@@ -46,10 +46,9 @@ validated for seekability and large-file I/O before the fork is attempted in Sta
 5. **Drive guidance:** detect/report the USB filesystem; warn if **FAT32** (4 GB file cap) —
    recommend **exFAT**.
 
-*(Deferred — post-PoC) **Import existing dht_crawler `data/` from USB:** UI action that
-copies `data/torrents.db` (+ bloom/aux files) from a user-picked USB folder into the
-crawler's internal `data/` via the gateway, with progress and integrity check
-(`--check-database`). Not needed until Stage 02b adds dht_crawler supervision.*
+*(Deferred — post-PoC) **Import existing dht_crawler `data/` from USB:** covered in
+**Stage 07 (`07-dht-crawler.md`)**, which builds the full import UI action. Not needed
+until Stage 07 adds dht_crawler supervision.*
 
 ## Key decisions & gotchas
 
@@ -77,5 +76,5 @@ crawler's internal `data/` via the gateway, with progress and integrity check
 - The native validation harness writes/reads a >4 GB random-access pattern to USB via a SAF
   fd and passes, with a recorded throughput number.
 
-*(Deferred acceptance criterion — post-PoC) Importing a real `data/torrents.db` from USB
+*(Deferred acceptance criterion — Stage 07) Importing a real `data/torrents.db` from USB
 populates the crawler's internal DB and `--check-database` passes.*

@@ -1,10 +1,10 @@
-# Stage 07 — Backups (crawler DB → network remote)
+# Stage 08 — Backups (crawler DB → network remote)
 
 > **DEFERRED — post-PoC.** This stage depends on dht_crawler being cross-compiled and
-> supervised (Stage 02b). Do not start until the transmission-to-USB PoC (Stages 01–05) is
+> supervised (Stage 07). Do not start until the transmission-to-USB PoC (Stages 01–05) is
 > complete and dht_crawler has been integrated.
 
-**Builds on:** Stage 02b (dht_crawler cross-compile; rclone built & exec-proven; crawler
+**Builds on:** Stage 07 (dht_crawler cross-compile; rclone built & exec-proven; crawler
 running).
 **De-risks:** off-device durability of the expensive-to-rebuild asset — the crawler's
 SQLite database — using the crawler's **existing** backup machinery where possible.
@@ -44,7 +44,7 @@ backup feature, with the binary-resolution problem solved.
   (Stage 02 pattern); set the config keys to their `nativeLibraryDir` absolute paths.
 - Provide rclone its config: set `RCLONE_CONFIG`/`HOME` in the crawler child's environment
   (or pass `--config`) so the `r2` remote resolves. Manage `rclone.conf` from the control
-  UI (Stage 08).
+  UI (Stage 09).
 - Keeps the crawler's efficient **incremental** export; smallest behavioural change.
 
 ### Option B (fallback): drive backup from Kotlin
@@ -80,7 +80,7 @@ backup feature, with the binary-resolution problem solved.
 
 ## Out of scope (later stages)
 
-- Remote-setup / schedule UI (Stage 08).
+- Remote-setup / schedule UI (Stage 09).
 - USB-content backup (deliberately excluded).
 
 ## Acceptance test

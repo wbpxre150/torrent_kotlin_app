@@ -1,4 +1,4 @@
-# Stage 08 — Unified settings & service control web UI
+# Stage 09 — Unified settings & service control web UI
 
 **Builds on:** every prior stage (it configures and controls them all).
 **De-risks:** the requirement that *everything* is configured from one web page, and that
@@ -51,7 +51,7 @@ component, shows status, and starts/stops/restarts each service — plus the fir
 
 ## Out of scope (later stages)
 
-- Boot-start, battery/Doze, OEM survival (Stage 09) — though their toggles/guidance links
+- Boot-start, battery/Doze, OEM survival (Stage 10) — though their toggles/guidance links
   live in this UI.
 
 ## Acceptance test

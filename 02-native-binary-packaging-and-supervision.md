@@ -47,32 +47,18 @@ is what Stage 04 will reuse for `libtransmissiond.so`.
 - The test binary must genuinely sleep (not exit immediately) to exercise the supervisor's
   liveness check and restart path.
 
-## Deferred — dht_crawler & rclone (post-PoC, after Stage 05)
+## Deferred — dht_crawler & rclone (Stage 07)
 
-When dht_crawler is eventually added, the cross-compile specifics are:
-- **Native deps:** `libuv`, `libsqlite3`, `libssl`/`libcrypto`, `libpthread`, `libm`,
-  `libdl`. Bundled submodules in `lib/` (`bencode-c`, `cJSON`, `civetweb`, `libbloom`,
-  `uthash`); replicate the Makefile with an NDK toolchain + cross-built deps (crib from
-  `termux-packages`).
-- **HTTP port 8080 is effectively hardcoded** (`http_api.c:99`); binds all interfaces.
-- **Working directory matters:** `config.ini` paths are relative; set `directory()` to the
-  dir holding `data/`, `config.ini`, and keyword files.
-- **The crawler has its own internal supervisor** (`supervisor.c`); the Kotlin supervisor
-  only needs to keep the process alive and restart on full exit.
-- **Resource tuning:** defaults (~32 trees, ~4,500 threads, ~500 MB RAM) must be reduced
-  for mobile via a seeded `config.ini` (`num_trees=16`, lower worker counts).
-- **Cold-start bootstrap abort:** if the BEP51 cache is empty and bootstrap fails, the
-  process exits. Supervisor should retry; importing an existing `data/` (Stage 03) avoids
-  this.
-- **rclone:** `GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build` → static binary as
-  `librclone.so`. Configured and used in Stage 07.
+The dht_crawler and rclone cross-compiles, supervisor integration, and data-directory import
+from USB are covered in full in **Stage 07 (`07-dht-crawler.md`)**. Do not build them here;
+the supervisor machinery proven in this stage is what Stage 07 reuses.
 
 ## Out of scope (later stages)
 
 - transmission build (Stage 04) and its SAF fork (Stage 05).
 - USB (Stage 03).
-- dht_crawler and rclone cross-compiles (post-PoC, after Stage 05).
-- rclone configuration & the crawler's built-in backup wiring (Stage 07).
+- dht_crawler and rclone cross-compiles (Stage 07).
+- rclone configuration & the crawler's built-in backup wiring (Stage 08).
 
 ## Acceptance test
 

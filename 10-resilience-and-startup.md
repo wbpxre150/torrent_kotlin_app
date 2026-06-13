@@ -1,4 +1,4 @@
-# Stage 09 — Resilience, 24/7 survival & startup
+# Stage 10 — Resilience, 24/7 survival & startup
 
 **Builds on:** all prior stages.
 **De-risks:** the "runs forever like Termux did, restarts on crash, survives reboot"
