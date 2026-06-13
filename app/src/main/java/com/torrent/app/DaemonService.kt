@@ -15,6 +15,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import java.io.File
 
 sealed class ServiceState {
     data object Starting : ServiceState()
@@ -32,12 +33,17 @@ class DaemonService : Service() {
     private var wifiLock: WifiManager.WifiLock? = null
     private lateinit var controlServer: ControlServer
     private lateinit var tokenManager: TokenManager
+    private val supervisors = mutableListOf<ProcessSupervisor>()
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
         tokenManager = TokenManager(this)
-        controlServer = ControlServer(tokenManager, _state)
+        controlServer = ControlServer(
+            tokenManager = tokenManager,
+            serviceState = _state,
+            daemonStatuses = ::getDaemonStatuses,
+        )
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -50,11 +56,13 @@ class DaemonService : Service() {
 
         _state.value = ServiceState.Running
         controlServer.start()
+        startSupervisors()
         return START_STICKY
     }
 
     override fun onDestroy() {
         controlServer.stop()
+        stopSupervisors()
         _state.value = ServiceState.Stopping
         releaseLocks()
         _state.value = ServiceState.Stopped
@@ -69,6 +77,8 @@ class DaemonService : Service() {
         if (ip == 0) return null
         return "${ip and 0xFF}.${(ip shr 8) and 0xFF}.${(ip shr 16) and 0xFF}.${(ip shr 24) and 0xFF}"
     }
+
+    fun getDaemonStatuses(): List<ProcessStatus> = supervisors.map { it.status.value }
 
     private fun acquireLocks() {
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -141,6 +151,31 @@ class DaemonService : Service() {
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             nm.createNotificationChannel(channel)
         }
+    }
+
+    private fun startSupervisors() {
+        if (supervisors.isNotEmpty()) return  // guard against double-start from START_STICKY
+        val nativeLibDir = applicationInfo.nativeLibraryDir
+        val workDir = File(filesDir, "daemons")
+        val logDir = File(filesDir, "logs")
+
+        // probe — minimal test binary (replaced by transmission in Stage 04)
+        val probe = ProcessSupervisor(
+            label = "probe",
+            binaryName = "libprobe.so",
+            nativeLibraryDir = nativeLibDir,
+            workDir = workDir,
+            logDir = logDir,
+        )
+        probe.start()
+        supervisors.add(probe)
+    }
+
+    private fun stopSupervisors() {
+        for (s in supervisors) {
+            s.stop()
+        }
+        supervisors.clear()
     }
 
     companion object {
