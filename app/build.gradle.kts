@@ -45,6 +45,32 @@ android {
             useLegacyPackaging = true
         }
     }
+
+tasks.register<Exec>("buildProbe") {
+    description = "Compile probe.c → libprobe.so (arm64, static)"
+
+    // Find NDK: prefer ANDROID_NDK_HOME env, fall back to SDK ndk dir
+    val ndk = providers.environmentVariable("ANDROID_NDK_HOME")
+        .orElse(providers.provider {
+            val sdk = android.sdkDirectory
+            val ndks = file("$sdk/ndk").listFiles()?.sortedByDescending { it.name }
+            ndks?.firstOrNull()?.absolutePath ?: error("NDK not found")
+        })
+    val ndkDir = file(ndk.get())
+    val toolchain = "toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+    val cc = file("$ndkDir/$toolchain")
+    val jniLibsDir = file("src/main/jniLibs/arm64-v8a")
+
+    inputs.file("src/main/cpp/probe.c")
+    outputs.file("$jniLibsDir/libprobe.so")
+
+    commandLine(
+        cc.absolutePath,
+        "-static",
+        "-o", "$jniLibsDir/libprobe.so",
+        "src/main/cpp/probe.c"
+    )
+}
 }
 
 dependencies {
