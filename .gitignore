@@ -1,0 +1,39 @@
+# Gradle
+.gradle/
+build/
+app/build/
+
+# IDE – IntelliJ / Android Studio
+.idea/
+*.iml
+*.iws
+*.ipr
+.idea_modules/
+
+# Kotlin
+.kotlin/
+
+# Android SDK
+local.properties
+
+# NDK / CMake
+.externalNativeBuild/
+.cxx/
+
+# Android capture/test artifacts
+captures/
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Maven / Gradle wrapper binaries (keep wrapper scripts, ignore binary JAR)
+gradle/wrapper/gradle-wrapper.jar
