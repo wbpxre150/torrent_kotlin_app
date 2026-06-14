@@ -46,7 +46,14 @@ class DaemonService : Service() {
         )
     }
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    inner class LocalBinder : android.os.Binder() {
+        val serviceState: StateFlow<ServiceState> = this@DaemonService.state
+        fun getAuthToken(): String = this@DaemonService.getAuthToken()
+        fun getWifiIpAddress(): String? = this@DaemonService.getWifiIpAddress()
+        fun getDaemonStatuses(): List<ProcessStatus> = this@DaemonService.getDaemonStatuses()
+    }
+
+    override fun onBind(intent: Intent?): IBinder = LocalBinder()
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         _state.value = ServiceState.Starting
@@ -117,9 +124,17 @@ class DaemonService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
+        val wifiIp = getWifiIpAddress()
+        val token = tokenManager.getToken()
+        val contentText = if (wifiIp != null) {
+            "http://$wifiIp:8090/?token=$token"
+        } else {
+            "Services active — tap to open"
+        }
+
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Torrent App running")
-            .setContentText("Services active — tap to open")
+            .setContentText(contentText)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(pendingIntent)
             .setOngoing(true)

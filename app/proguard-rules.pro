@@ -1,0 +1,3 @@
+-keep class com.google.zxing.qrcode.** { *; }
+-keep class com.google.zxing.common.** { *; }
+-keep class com.google.zxing.BarcodeFormat { *; }
