@@ -23,6 +23,11 @@ Kotlin supervisor (reusing the Stage 02 machinery), optionally seed its SQLite D
   `libm`, `libdl`. Bundled submodules in `lib/`: `bencode-c`, `cJSON`, `civetweb`,
   `libbloom`, `uthash`. Replicate the upstream `Makefile` with an NDK toolchain + cross-built
   deps (crib flags from `termux-packages`).
+- **Apply the PT_TLS p_align ELF patch** in the Gradle task's `doLast` block after
+  `libdhtcrawler.so` is produced (copy the `buildProbe` `doLast` from
+  `app/build.gradle.kts`). ARM64 Bionic rejects static NDK binaries with `PT_TLS p_align
+  < 64`; the crawler will not start without this patch. Apply the same patch to any
+  separately-shipped static C helpers (`libsqlite3.so`, `libzstd.so`).
 - Ship as `libdhtcrawler.so` in `jniLibs/arm64-v8a/` (Stage 02 pattern).
 - **HTTP port 8080 is effectively hardcoded** in `http_api.c`/`http_api.h`; present it
   read-only in the control UI unless the crawler is patched to read it from config.
@@ -74,6 +79,10 @@ to validate integrity.
 - **Static linking preferred.** dht_crawler's deps should be statically linked into
   `libdhtcrawler.so` or co-shipped as `lib*.so` siblings with `LD_LIBRARY_PATH`. Dynamic deps
   against the wrong libc fail at exec.
+- **PT_TLS p_align ELF patch required** for every static NDK C binary produced in this
+  stage (`libdhtcrawler.so`, `libsqlite3.so`, `libzstd.so`). See Stage 02 gotchas and the
+  `buildProbe` `doLast` reference implementation. rclone (`CGO_ENABLED=0`, pure Go) does
+  not go through the NDK linker and does not need this patch.
 - **HTTP port 8080 is compile-time.** Unless the crawler is patched, 8080 cannot be changed
   via config — document this in the settings UI (Stage 09) as a read-only field.
 - **Resource tuning is mandatory on mobile.** A default-config dht_crawler will OOM the

@@ -18,6 +18,8 @@ is what Stage 04 will reuse for `libtransmissiond.so`.
    prints a version string plus its PID, then sleeps indefinitely (so it behaves like a
    daemon the supervisor can kill/restart). Statically linked, no external deps.
    - Compiled for `arm64-v8a` with the NDK: `aarch64-linux-android24-clang -static`.
+     The `buildProbe` Gradle task runs the compile step then applies the **PT_TLS p_align
+     ELF patch** in `doLast` (see below) before the binary is usable on device.
    - Placed at `src/main/jniLibs/arm64-v8a/libprobe.so`. At install it extracts
      (because `useLegacyPackaging = true`) to `applicationInfo.nativeLibraryDir`, which is
      the **only** location an app may `execve()` on Android 10+.
@@ -42,6 +44,14 @@ is what Stage 04 will reuse for `libtransmissiond.so`.
   breaks in release/AAB" bug.
 - Filename **must** match `lib*.so` or packaging drops it from `jniLibs`.
 - Prefer **static linking**; dynamic deps against the wrong libc fail at exec.
+- **PT_TLS p_align ELF patch — mandatory for arm64 static NDK binaries.** ARM64 Bionic
+  requires `PT_TLS p_align >= 64`. NDK static builds via `emutls` generate a stub TLS
+  segment with `p_align = 8`; Bionic's dynamic linker rejects the binary at startup with no
+  useful error. The fix: after compilation, parse the ELF program header table, find the
+  `PT_TLS` entry (type `7`), and overwrite `p_align` with `64` if the current value is less
+  than `64`. This is implemented as the `doLast` block in the `buildProbe` Gradle task
+  (`app/build.gradle.kts`) and **must be copied into every Gradle task that compiles a static
+  NDK binary** (transmission, dht_crawler, sqlite3, zstd, etc.).
 - Build with a **recent NDK (r27+)** for forward-compatible 16 KB page alignment (Android
   15+).
 - The test binary must genuinely sleep (not exit immediately) to exercise the supervisor's

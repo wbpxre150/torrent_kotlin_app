@@ -160,6 +160,15 @@ The control server can reverse-proxy 8080/9091 so the user has one LAN entry poi
   is mandatory or they won't be extracted to disk and exec fails. (`chmod +x` in `filesDir`
   never works on Android 10+.) See Stage 02.
 - **Statically link** the C binaries (or co-ship and `LD_LIBRARY_PATH` their `.so` deps).
+- **PT_TLS p_align ELF patch (required for every static NDK C binary on arm64):** ARM64
+  Bionic requires `PT_TLS p_align >= 64`. NDK static builds via `emutls` produce a stub TLS
+  segment with alignment 8; the dynamic linker rejects the binary at startup. After each NDK
+  compilation step, the Gradle task must patch the binary's ELF program header: scan the
+  `PT_PHDR` table, find the `PT_TLS` entry (type `7`), and write `p_align = 64` if the
+  current value is less than 64. The `buildProbe` `doLast` block in `app/build.gradle.kts`
+  is the canonical reference implementation — copy it into every Gradle task that produces a
+  static NDK binary (`libtransmissiond.so`, `libdhtcrawler.so`, `libsqlite3.so`,
+  `libzstd.so`, etc.).
 - **Always drain** child `stdout`/`stderr`, or the child blocks. Logs → rotating files +
   control UI.
 - **Auth on every localhost port.** Loopback is not UID-isolated on Android. Set

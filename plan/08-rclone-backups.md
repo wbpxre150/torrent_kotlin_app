@@ -42,6 +42,10 @@ backup feature, with the binary-resolution problem solved.
   names so desktop builds are unchanged).
 - Ship `sqlite3`, `zstd`, `rclone` (and optionally `ssh`) as `lib*.so` in `jniLibs`
   (Stage 02 pattern); set the config keys to their `nativeLibraryDir` absolute paths.
+  `sqlite3` and `zstd` are static NDK C binaries — apply the **PT_TLS p_align ELF patch**
+  in their Gradle build tasks' `doLast` blocks (copy from `buildProbe` in
+  `app/build.gradle.kts`). rclone is compiled with `CGO_ENABLED=0` (pure Go, no NDK
+  linker) and does not need the patch.
 - Provide rclone its config: set `RCLONE_CONFIG`/`HOME` in the crawler child's environment
   (or pass `--config`) so the `r2` remote resolves. Manage `rclone.conf` from the control
   UI (Stage 09).

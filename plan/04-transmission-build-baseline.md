@@ -23,6 +23,10 @@ Transmission Android remote via RPC on `:9091`.
      a static executable.
    - **Crib configure/CMake flags from `termux-packages`'** transmission `build.sh` — it
      already cross-compiles transmission for arm64 Android.
+   - **Apply the PT_TLS p_align ELF patch** in the Gradle task's `doLast` block after the
+     binary is produced (copy the `buildProbe` `doLast` implementation from
+     `app/build.gradle.kts`). ARM64 Bionic rejects static NDK binaries whose `PT_TLS`
+     segment has `p_align < 64`; the daemon will not start without this patch.
 2. **Package** the binary as `jniLibs/arm64-v8a/libtransmissiond.so` (+ any companion `.so`
    if not fully static). Supervise it with the Stage 02 supervisor.
 3. **Config management:** generate `settings.json` in internal `filesDir`:
