@@ -9,6 +9,7 @@ The system default JDK is 26. Android Gradle Plugin 8.8.2 does not support JDK 2
 ```bash
 export JAVA_HOME=/usr/lib/jvm/java-21-openjdk
 export ANDROID_HOME="$HOME/Android/Sdk"
+export ANDROID_NDK_HOME="$HOME/Android/Sdk/ndk/android-ndk-r27"
 ./gradlew installDebug
 ```
 

@@ -70,6 +70,47 @@ tasks.register<Exec>("buildProbe") {
         "-o", "$jniLibsDir/libprobe.so",
         "src/main/cpp/probe.c"
     )
+
+    // ARM64 Bionic requires PT_TLS p_align >= 64. NDK static builds via emutls produce
+    // a stub TLS segment with alignment 8. Patch the ELF program header directly.
+    doLast {
+        fun leU16(b: ByteArray, off: Int) =
+            (b[off].toInt() and 0xff) or ((b[off + 1].toInt() and 0xff) shl 8)
+        fun leU32(b: ByteArray, off: Int) =
+            (b[off].toInt() and 0xff) or ((b[off + 1].toInt() and 0xff) shl 8) or
+            ((b[off + 2].toInt() and 0xff) shl 16) or ((b[off + 3].toInt() and 0xff) shl 24)
+        fun leU64(b: ByteArray, off: Int): Long {
+            var v = 0L
+            for (s in 0..7) v = v or ((b[off + s].toLong() and 0xff) shl (s * 8))
+            return v
+        }
+        fun putU64(b: ByteArray, off: Int, v: Long) {
+            for (s in 0..7) b[off + s] = ((v ushr (s * 8)) and 0xff).toByte()
+        }
+
+        val binary = file("$jniLibsDir/libprobe.so")
+        val bytes = binary.readBytes()
+        check(bytes[0] == 0x7f.toByte() && bytes[1] == 0x45.toByte() &&
+              bytes[2] == 0x4c.toByte() && bytes[3] == 0x46.toByte()) { "Not an ELF file" }
+        val phoff    = leU64(bytes, 32).toInt()   // e_phoff
+        val phentsize = leU16(bytes, 54)           // e_phentsize
+        val phnum    = leU16(bytes, 56)            // e_phnum
+        var patched  = false
+        for (i in 0 until phnum) {
+            val hdrOff = phoff + i * phentsize
+            if (leU32(bytes, hdrOff) == 7) {       // PT_TLS
+                val palign = leU64(bytes, hdrOff + 48)
+                if (palign < 64L) {
+                    logger.lifecycle("Patching PT_TLS p_align $palign -> 64 in ${binary.name}")
+                    putU64(bytes, hdrOff + 48, 64L)
+                    binary.writeBytes(bytes)
+                    patched = true
+                }
+                break
+            }
+        }
+        if (!patched) logger.lifecycle("PT_TLS p_align already >= 64, no patch needed")
+    }
 }
 }
 
