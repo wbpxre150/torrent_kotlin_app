@@ -112,6 +112,33 @@ tasks.register<Exec>("buildProbe") {
         if (!patched) logger.lifecycle("PT_TLS p_align already >= 64, no patch needed")
     }
 }
+tasks.register<Exec>("buildSafTest") {
+    description = "Compile saf_test.c -> libsaftest.so (arm64, shared JNI lib)"
+
+    val ndk = providers.environmentVariable("ANDROID_NDK_HOME")
+        .orElse(providers.provider {
+            val sdk = android.sdkDirectory
+            val ndks = file("$sdk/ndk").listFiles()?.sortedByDescending { it.name }
+            ndks?.firstOrNull()?.absolutePath ?: error("NDK not found")
+        })
+    val ndkDir = file(ndk.get())
+    val cc = file("$ndkDir/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang")
+    val jniLibsDir = file("src/main/jniLibs/arm64-v8a")
+
+    inputs.file("src/main/cpp/saf_test.c")
+    outputs.file("$jniLibsDir/libsaftest.so")
+
+    commandLine(
+        cc.absolutePath,
+        "-shared",
+        "-fPIC",
+        "-o", "$jniLibsDir/libsaftest.so",
+        "src/main/cpp/saf_test.c"
+    )
+
+    // NOTE: no PT_TLS p_align patch — that patch is for static executables only.
+    // libsaftest.so is a shared library; Bionic provides TLS via the dynamic linker.
+}
 }
 
 dependencies {
