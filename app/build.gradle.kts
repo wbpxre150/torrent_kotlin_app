@@ -128,4 +128,7 @@ dependencies {
     implementation("io.ktor:ktor-server-core:3.5.0")
     // ZXing for QR code generation
     implementation("com.google.zxing:core:3.5.3")
+    // SAF DocumentFile helper (used by SafStorageGateway)
+    implementation("androidx.documentfile:documentfile:1.0.1")
+    testImplementation("junit:junit:4.13.2")
 }

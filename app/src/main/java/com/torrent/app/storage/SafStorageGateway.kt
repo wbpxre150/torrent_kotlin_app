@@ -1,0 +1,215 @@
+package com.torrent.app.storage
+
+import android.content.Context
+import android.net.Uri
+import android.os.ParcelFileDescriptor
+import android.os.storage.StorageManager
+import android.provider.DocumentsContract
+import android.system.Os
+import android.util.Log
+import androidx.documentfile.provider.DocumentFile
+import java.util.concurrent.ConcurrentHashMap
+
+/**
+ * The single SAF choke point. All USB I/O in the app goes through here.
+ *
+ * Thread-safety: the path->URI cache is a ConcurrentHashMap; cache misses are resolved
+ * under a synchronized walk. All public methods are synchronous and safe to call from
+ * transmission's disk thread (Stage 05).
+ */
+class SafStorageGateway(
+    private val context: Context,
+    private val treeUri: Uri,
+) : UsbFdBridge {
+
+    private val resolver = context.contentResolver
+    private val cache = ConcurrentHashMap<String, Uri>()
+
+    init {
+        // Seed the cache with the tree root.
+        cache[""] = DocumentsContract.buildDocumentUriUsingTree(
+            treeUri,
+            DocumentsContract.getTreeDocumentId(treeUri),
+        )
+    }
+
+    // UsbFdBridge
+
+    override fun openFd(relPath: String, mode: String): Int {
+        val n = SafPaths.normalize(relPath)
+        val m = SafPaths.mapMode(mode)
+        val uri = ensureDocument(n) ?: run {
+            Log.e(TAG, "openFd: ensureDocument failed for '$n'")
+            return -1
+        }
+        return try {
+            val pfd = resolver.openFileDescriptor(uri, m)
+                ?: run { Log.e(TAG, "openFd: openFileDescriptor returned null"); return -1 }
+            pfd.detachFd()   // native owns; caller MUST close
+        } catch (e: Exception) {
+            Log.e(TAG, "openFd failed: ${e.message}")
+            -1
+        }
+    }
+
+    override fun truncate(relPath: String, len: Long): Boolean = withPfd(relPath, "rw") { pfd ->
+        try { Os.ftruncate(pfd.fileDescriptor, len); true }
+        catch (e: Exception) { Log.e(TAG, "truncate: ${e.message}"); false }
+    } ?: false
+
+    override fun statSize(relPath: String): Long {
+        val uri = resolveUri(relPath) ?: return -1
+        return withPfd(relPath, "r") { pfd ->
+            try { Os.fstat(pfd.fileDescriptor).st_size }
+            catch (e: Exception) { Log.e(TAG, "statSize: ${e.message}"); -1L }
+        } ?: -1L
+    }
+
+    override fun renameDoc(relPath: String, newName: String): Boolean {
+        val parent = SafPaths.splitParent(relPath) ?: return false
+        val uri = resolveUri(relPath) ?: return false
+        return try {
+            val renamed = DocumentsContract.renameDocument(resolver, uri, newName)
+            if (renamed != null) {
+                cache.remove(relPath)
+                cache[parent.first + if (parent.first.isEmpty()) "" else "/" + newName] = renamed
+                true
+            } else false
+        } catch (e: Exception) { Log.e(TAG, "renameDoc: ${e.message}"); false }
+    }
+
+    override fun removeDoc(relPath: String): Boolean {
+        val n = SafPaths.normalize(relPath)
+        val uri = resolveUri(n) ?: return false
+        // invalidate this node and any cached descendants
+        cache.keys.filter { it == n || it.startsWith("$n/") }.forEach { cache.remove(it) }
+        return try {
+            DocumentsContract.deleteDocument(resolver, uri)
+        } catch (e: Exception) { Log.e(TAG, "removeDoc: ${e.message}"); false }
+    }
+
+    override fun mkdirs(relPath: String): Boolean {
+        val n = SafPaths.normalize(relPath)
+        if (n.isEmpty()) return true
+        return resolveOrCreateDir(n) != null
+    }
+
+    override fun availableBytes(): Long {
+        return try {
+            val authority = treeUri.authority ?: return Long.MAX_VALUE
+            val rootsUri = DocumentsContract.buildRootsUri(authority)
+            resolver.query(rootsUri, arrayOf(DocumentsContract.Root.COLUMN_AVAILABLE_BYTES),
+                null, null, null)?.use { c ->
+                if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else Long.MAX_VALUE
+            } ?: Long.MAX_VALUE
+        } catch (e: Exception) {
+            Log.w(TAG, "availableBytes unavailable, returning sentinel: ${e.message}")
+            Long.MAX_VALUE
+        }
+    }
+
+    override fun exists(relPath: String): Boolean = resolveUri(relPath) != null
+
+    override fun list(relPath: String): List<String> {
+        val parentUri = resolveUri(relPath) ?: return emptyList()
+        val out = mutableListOf<String>()
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
+            treeUri, DocumentsContract.getDocumentId(parentUri))
+        return try {
+            resolver.query(childrenUri,
+                arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
+                null, null, null)?.use { c ->
+                while (c.moveToNext()) out.add(c.getString(0) ?: "")
+                // cache children
+                out.forEach { name ->
+                    val childPath = if (relPath.isEmpty()) name else "$relPath/$name"
+                    // don't overwrite; full child URI not needed for list callers
+                }
+                out
+            } ?: emptyList()
+        } catch (e: Exception) { Log.e(TAG, "list: ${e.message}"); emptyList() }
+    }
+
+    // internals
+
+    /** Open a pfd WITHOUT detaching; caller's block closes it. Returns null on miss. */
+    private inline fun <T> withPfd(relPath: String, mode: String, block: (ParcelFileDescriptor) -> T): T? {
+        val uri = resolveUri(relPath) ?: return null
+        return try {
+            resolver.openFileDescriptor(uri, mode)?.use { block(it) }
+        } catch (e: Exception) { Log.e(TAG, "withPfd: ${e.message}"); null }
+    }
+
+    /**
+     * Resolve a normalized relPath to a document URI, walking + caching the tree on miss.
+     * Does NOT create documents.
+     */
+    @Synchronized
+    private fun resolveUri(relPath: String): Uri? {
+        val n = SafPaths.normalize(relPath)
+        cache[n]?.let { return it }
+        if (n.isEmpty()) return cache[""]
+        val parent = SafPaths.splitParent(n) ?: return null
+        val parentUri = resolveUri(parent.first) ?: return null
+        val leaf = parent.second
+        // query children of parentUri for a matching display name
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
+            treeUri, DocumentsContract.getDocumentId(parentUri))
+        try {
+            resolver.query(childrenUri,
+                arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME),
+                null, null, null)?.use { c ->
+                while (c.moveToNext()) {
+                    val docId = c.getString(0)
+                    val name = c.getString(1) ?: continue
+                    val childPath = if (parent.first.isEmpty()) name else "${parent.first}/$name"
+                    val childUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
+                    cache[childPath] = childUri
+                    if (name == leaf) return childUri
+                }
+            }
+        } catch (e: Exception) { Log.e(TAG, "resolveUri walk: ${e.message}"); return null }
+        return null
+    }
+
+    /** Ensure [relPath] exists as a regular document, creating parents + the file. */
+    @Synchronized
+    private fun ensureDocument(relPath: String): Uri? {
+        val n = SafPaths.normalize(relPath)
+        if (n.isEmpty()) return cache[""]
+        cache[n]?.let { return it }
+        val parent = SafPaths.splitParent(n) ?: return null
+        val parentUri = resolveOrCreateDir(parent.first) ?: return null
+        val leaf = parent.second
+        // does it already exist?
+        resolveUri(n)?.let { return it }
+        // create a regular document
+        return try {
+            val mimeType = "application/octet-stream"
+            val created = DocumentsContract.createDocument(resolver, parentUri, mimeType, leaf)
+            if (created != null) { cache[n] = created; created } else null
+        } catch (e: Exception) { Log.e(TAG, "ensureDocument create: ${e.message}"); null }
+    }
+
+    /** Resolve or create [relPath] as a directory, walking+creating ancestors. */
+    @Synchronized
+    private fun resolveOrCreateDir(relPath: String): Uri? {
+        val n = SafPaths.normalize(relPath)
+        if (n.isEmpty()) return cache[""]
+        cache[n]?.let { return it }
+        val parent = SafPaths.splitParent(n) ?: return null
+        val parentUri = if (parent.first.isEmpty()) cache[""]!! else resolveOrCreateDir(parent.first) ?: return null
+        val leaf = parent.second
+        resolveUri(n)?.let { return it }   // existing dir
+        return try {
+            val created = DocumentsContract.createDocument(
+                resolver, parentUri, DocumentsContract.Document.MIME_TYPE_DIR, leaf)
+            if (created != null) { cache[n] = created; created } else null
+        } catch (e: Exception) { Log.e(TAG, "mkdir create: ${e.message}"); null }
+    }
+
+    companion object {
+        private const val TAG = "SafStorageGateway"
+    }
+}
