@@ -16,6 +16,12 @@ import androidx.core.app.ServiceCompat
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.io.File
+import android.net.Uri
+import com.torrent.app.storage.SafStatus
+import com.torrent.app.storage.SafStorageGateway
+import com.torrent.app.storage.SafValidationResult
+import com.torrent.app.storage.SafValidator
+import com.torrent.app.storage.UsbPermissionManager
 
 sealed class ServiceState {
     data object Starting : ServiceState()
@@ -34,15 +40,23 @@ class DaemonService : Service() {
     private lateinit var controlServer: ControlServer
     private lateinit var tokenManager: TokenManager
     private val supervisors = mutableListOf<ProcessSupervisor>()
+    private lateinit var usbPermissionManager: UsbPermissionManager
+    private var gateway: SafStorageGateway? = null
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
         tokenManager = TokenManager(this)
+        usbPermissionManager = UsbPermissionManager(this)
+        usbPermissionManager.treeUri()?.let { uri ->
+            gateway = SafStorageGateway(this, uri)
+        }
         controlServer = ControlServer(
             tokenManager = tokenManager,
             serviceState = _state,
             daemonStatuses = ::getDaemonStatuses,
+            safStatus = ::getSafStatus,
+            runSafValidation = ::runSafValidation,
         )
     }
 
@@ -51,6 +65,10 @@ class DaemonService : Service() {
         fun getAuthToken(): String = this@DaemonService.getAuthToken()
         fun getWifiIpAddress(): String? = this@DaemonService.getWifiIpAddress()
         fun getDaemonStatuses(): List<ProcessStatus> = this@DaemonService.getDaemonStatuses()
+        fun setUsbTree(uri: Uri) = this@DaemonService.setUsbTree(uri)
+        fun clearUsbTree() = this@DaemonService.clearUsbTree()
+        fun getSafStatus(): SafStatus = this@DaemonService.getSafStatus()
+        suspend fun runSafValidation(): SafValidationResult = this@DaemonService.runSafValidation()
     }
 
     override fun onBind(intent: Intent?): IBinder = LocalBinder()
@@ -86,6 +104,32 @@ class DaemonService : Service() {
     }
 
     fun getDaemonStatuses(): List<ProcessStatus> = supervisors.map { it.status.value }
+
+    fun setUsbTree(uri: Uri) {
+        usbPermissionManager.grant(uri)
+        gateway = SafStorageGateway(this, uri)
+    }
+
+    fun clearUsbTree() {
+        usbPermissionManager.clear()
+        gateway = null
+    }
+
+    fun getSafStatus(): SafStatus {
+        val uri = usbPermissionManager.treeUri()
+        return SafStatus(
+            granted = uri != null,
+            treeUri = uri?.toString(),
+            rootSummary = if (uri != null) "USB (SAF tree)" else null,
+        )
+    }
+
+    suspend fun runSafValidation(): SafValidationResult {
+        val g = gateway ?: return SafValidationResult(
+            ok = false, message = "USB tree not granted",
+            throughputMBs = null, offsetBytes = 0, fat32Warning = false)
+        return SafValidator(g).run()
+    }
 
     private fun acquireLocks() {
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager

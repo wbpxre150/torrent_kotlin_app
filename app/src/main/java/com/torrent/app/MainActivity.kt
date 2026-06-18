@@ -11,12 +11,19 @@ import android.os.Bundle
 import android.os.IBinder
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import android.net.Uri
+import com.torrent.app.storage.SafStatus
+import com.torrent.app.storage.SafValidationResult
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.Image
 import androidx.compose.material3.*
+import androidx.compose.material3.Button
 import androidx.compose.runtime.*
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -29,10 +36,11 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
-
+    private var wifiIp = MutableStateFlow("")
+    private val safStatus = MutableStateFlow<SafStatus?>(null)
+    private val safValidation = MutableStateFlow<SafValidationResult?>(null)
     private val serviceState = MutableStateFlow<ServiceState>(ServiceState.Stopped)
     private var authToken = MutableStateFlow("")
-    private var wifiIp = MutableStateFlow("")
 
     private var boundService: DaemonService.LocalBinder? = null
 
@@ -52,6 +60,7 @@ class MainActivity : ComponentActivity() {
             }
             authToken.value = b.getAuthToken()
             wifiIp.value = b.getWifiIpAddress() ?: ""
+            safStatus.value = b.getSafStatus()
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -78,6 +87,7 @@ class MainActivity : ComponentActivity() {
                 boundService?.let { svc ->
                     wifiIp.value = svc.getWifiIpAddress() ?: ""
                     authToken.value = svc.getAuthToken()
+                    safStatus.value = svc.getSafStatus()
                 }
             }
         }
@@ -93,12 +103,32 @@ class MainActivity : ComponentActivity() {
                     startOrRestartService()
                 }
             }
+            val usbTreeLauncher = rememberLauncherForActivityResult(
+                ActivityResultContracts.OpenDocumentTree()
+            ) { uri: Uri? ->
+                uri?.let { boundService?.setUsbTree(it) }
+            }
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     MainScreen(
                         serviceState = state,
                         authToken = token,
                         wifiIp = ip,
+                        safStatus = safStatus.collectAsState().value,
+                        safValidation = safValidation.collectAsState().value,
+                        onGrantUsb = { usbTreeLauncher.launch(null) },
+                        onValidateUsb = {
+                            lifecycleScope.launch {
+                                val svc = boundService
+                                safValidation.value = SafValidationResult(
+                                    ok = false, message = "running…",
+                                    throughputMBs = null, offsetBytes = 0, fat32Warning = false)
+                                safValidation.value = svc?.runSafValidation()
+                                    ?: SafValidationResult(
+                                        ok = false, message = "service not bound",
+                                        throughputMBs = null, offsetBytes = 0, fat32Warning = false)
+                            }
+                        },
                     )
                 }
             }
@@ -160,6 +190,10 @@ fun MainScreen(
     serviceState: ServiceState,
     authToken: String,
     wifiIp: String,
+    safStatus: SafStatus?,
+    safValidation: SafValidationResult?,
+    onGrantUsb: () -> Unit,
+    onValidateUsb: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -198,6 +232,52 @@ fun MainScreen(
                 text = "Waiting for network…",
                 style = MaterialTheme.typography.bodyMedium
             )
+        }
+
+        Spacer(modifier = Modifier.height(32.dp))
+        Text(
+            text = "USB Storage",
+            style = MaterialTheme.typography.titleMedium
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        val status = safStatus
+        Text(
+            text = if (status?.granted == true) "USB: connected (${status.treeUri?.takeLast(24) ?: ""})"
+                   else "USB: not granted",
+            style = MaterialTheme.typography.bodyMedium
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Row {
+            Button(onClick = onGrantUsb) { Text("Grant USB") }
+            Spacer(modifier = Modifier.width(8.dp))
+            Button(
+                onClick = onValidateUsb,
+                enabled = status?.granted == true,
+            ) { Text("Validate SAF fd") }
+        }
+        safValidation?.let { v ->
+            Spacer(modifier = Modifier.height(12.dp))
+            SelectionContainer {
+                Column {
+                    Text(
+                        text = if (v.ok) "VALIDATION: PASS" else "VALIDATION: FAIL",
+                        color = if (v.ok) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.error
+                    )
+                    Text(text = v.message, style = MaterialTheme.typography.bodySmall)
+                    v.throughputMBs?.let { mbps ->
+                        Text(text = "throughput: %.1f MB/s".format(mbps),
+                            style = MaterialTheme.typography.bodySmall)
+                    }
+                    if (v.fat32Warning) {
+                        Text(
+                            text = "FAT32 suspected (4 GiB cap). Reformat the drive as exFAT.",
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            }
         }
     }
 }

@@ -13,6 +13,8 @@ class ControlServer(
     private val tokenManager: TokenManager,
     private val serviceState: StateFlow<ServiceState>,
     private val daemonStatuses: () -> List<ProcessStatus>,
+    private val safStatus: () -> com.torrent.app.storage.SafStatus,
+    private val runSafValidation: suspend () -> com.torrent.app.storage.SafValidationResult,
     private val port: Int = 8090
 ) {
     @Volatile
@@ -43,6 +45,32 @@ class ControlServer(
 
                     get {
                         call.respondText(buildStatusPage(), ContentType.Text.Html)
+                    }
+
+                    get("saf/status") {
+                        val s = safStatus()
+                        val json = buildString {
+                            append("{")
+                            append("\"granted\":").append(s.granted).append(",")
+                            append("\"treeUri\":").append(jsonStr(s.treeUri)).append(",")
+                            append("\"rootSummary\":").append(jsonStr(s.rootSummary))
+                            append("}")
+                        }
+                        call.respondText(json, ContentType.Application.Json)
+                    }
+
+                    post("saf/validate") {
+                        val r = runSafValidation()
+                        val json = buildString {
+                            append("{")
+                            append("\"ok\":").append(r.ok).append(",")
+                            append("\"message\":").append(jsonStr(r.message)).append(",")
+                            append("\"throughputMBs\":").append(r.throughputMBs ?: "null").append(",")
+                            append("\"offsetBytes\":").append(r.offsetBytes).append(",")
+                            append("\"fat32Warning\":").append(r.fat32Warning)
+                            append("}")
+                        }
+                        call.respondText(json, ContentType.Application.Json)
                     }
                 }
             }
@@ -126,4 +154,6 @@ class ControlServer(
         return if (hours > 0) "%dh %02dm %02ds".format(hours, minutes, seconds)
         else "%dm %02ds".format(minutes, seconds)
     }
+    private fun jsonStr(s: String?): String =
+        if (s == null) "null" else "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 }
