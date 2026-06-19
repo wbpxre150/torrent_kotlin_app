@@ -1,0 +1,38 @@
+package com.torrent.app
+
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class TransmissionConfigTest {
+
+    @Test fun buildSettingsJson_hasRequiredRpcAndDownloadFields() {
+        val json = TransmissionConfig.buildSettingsJson(
+            "torrentapp", "secret123", "/data/user/0/com.torrent.app/files/transmission/downloads"
+        )
+        assertTrue(json.contains("\"rpc-enabled\": true"))
+        assertTrue(json.contains("\"rpc-bind-address\": \"0.0.0.0\""))
+        assertTrue(json.contains("\"rpc-port\": 9091"))
+        assertTrue(json.contains("\"rpc-authentication-required\": true"))
+        assertTrue(json.contains("\"rpc-username\": \"torrentapp\""))
+        assertTrue(json.contains("\"rpc-password\": \"secret123\""))
+        assertTrue(json.contains("\"rpc-whitelist-enabled\": false"))
+        assertTrue(json.contains("\"download-dir\": \"/data/user/0/com.torrent.app/files/transmission/downloads\""))
+        assertTrue(json.contains("\"incomplete-dir\": \"/data/user/0/com.torrent.app/files/transmission/downloads\""))
+        assertTrue(json.contains("\"incomplete-dir-enabled\": true"))
+        assertTrue(json.contains("\"watch-dir-enabled\": false"))
+    }
+
+    @Test fun buildSettingsJson_escapesQuotesAndBackslashes() {
+        val json = TransmissionConfig.buildSettingsJson("user", "pa\"ss\\word", "/dir")
+        // Escaped form must appear verbatim in the output.
+        assertTrue(json.contains("\"rpc-password\": \"pa\\\"ss\\\\word\""))
+    }
+
+    @Test fun buildSettingsJson_isValidJsonObjectShape() {
+        val json = TransmissionConfig.buildSettingsJson("u", "p", "/d")
+        assertTrue(json.trimStart().startsWith("{"))
+        assertTrue(json.trimEnd().endsWith("}"))
+        assertFalse(json.contains("\"message-level\": 3,"))
+    }
+}

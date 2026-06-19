@@ -43,6 +43,8 @@ class DaemonService : Service() {
     private lateinit var usbPermissionManager: UsbPermissionManager
     private var gateway: SafStorageGateway? = null
 
+    private lateinit var transmissionConfig: TransmissionConfig
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
@@ -228,6 +230,20 @@ class DaemonService : Service() {
         )
         probe.start()
         supervisors.add(probe)
+
+        // transmission-daemon (Stage 04): internal storage only, RPC on :9091 with auth.
+        transmissionConfig = TransmissionConfig(this)
+        transmissionConfig.ensureSettingsJson()
+        val transmission = ProcessSupervisor(
+            label = "transmission",
+            binaryName = "libtransmissiond.so",
+            args = listOf("--foreground", "--config-dir", transmissionConfig.configDir.absolutePath),
+            nativeLibraryDir = nativeLibDir,
+            workDir = workDir,
+            logDir = logDir,
+        )
+        transmission.start()
+        supervisors.add(transmission)
     }
 
     private fun stopSupervisors() {
