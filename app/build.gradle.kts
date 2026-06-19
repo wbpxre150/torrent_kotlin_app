@@ -139,6 +139,63 @@ tasks.register<Exec>("buildSafTest") {
     // NOTE: no PT_TLS p_align patch — that patch is for static executables only.
     // libsaftest.so is a shared library; Bionic provides TLS via the dynamic linker.
 }
+tasks.register("buildMbedtls") {
+    description = "Cross-compile mbedTLS 3.6.6 static libs for arm64 (Stage 04 dep)"
+
+    val ndk = providers.environmentVariable("ANDROID_NDK_HOME")
+        .orElse(providers.provider {
+            val sdk = android.sdkDirectory
+            val ndks = file("$sdk/ndk").listFiles()?.sortedByDescending { it.name }
+            ndks?.firstOrNull()?.absolutePath ?: error("NDK not found")
+        })
+    val ndkDir = file(ndk.get())
+    val toolchainFile = file("$ndkDir/build/cmake/android.toolchain.cmake")
+
+    val nativeDir = file("build/native")
+    val srcDir = file("$nativeDir/src/mbedtls-3.6.6")
+    val buildDir = file("$nativeDir/build-mbedtls")
+    val installDir = file("$nativeDir/mbedtls-install")
+    val tarball = file("$nativeDir/src/mbedtls-3.6.6.tar.bz2")
+    val url = "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.6/mbedtls-3.6.6.tar.bz2"
+
+    outputs.dir(installDir)
+
+    doLast {
+        // 1. Fetch tarball if missing
+        if (!tarball.exists()) {
+            tarball.parentFile.mkdirs()
+            project.exec {
+                commandLine("curl", "-L", "--fail", "-o", tarball.absolutePath, url)
+            }
+        }
+        // 2. Extract if missing
+        if (!srcDir.exists()) {
+            project.exec {
+                commandLine("tar", "-xjf", tarball.absolutePath, "-C", srcDir.parentFile.absolutePath)
+            }
+        }
+        // 3. Configure (Ninja generator + NDK toolchain, static only)
+        project.exec {
+            commandLine(
+                "cmake", "-G", "Ninja",
+                "-S", srcDir.absolutePath, "-B", buildDir.absolutePath,
+                "-DCMAKE_TOOLCHAIN_FILE=${toolchainFile.absolutePath}",
+                "-DANDROID_ABI=arm64-v8a",
+                "-DANDROID_PLATFORM=android-24",
+                "-DCMAKE_BUILD_TYPE=Release",
+                "-DCMAKE_INSTALL_PREFIX=${installDir.absolutePath}",
+                "-DUSE_SHARED_MBEDTLS_LIBRARY=OFF",
+                "-DUSE_STATIC_MBEDTLS_LIBRARY=ON",
+                "-DENABLE_TESTING=OFF",
+                "-DENABLE_PROGRAMS=OFF"
+            )
+        }
+        // 4. Build + install
+        project.exec {
+            commandLine("cmake", "--build", buildDir.absolutePath, "--target", "install", "-j8")
+        }
+    }
+}
 }
 
 dependencies {
