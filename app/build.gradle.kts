@@ -196,6 +196,82 @@ tasks.register("buildMbedtls") {
         }
     }
 }
+tasks.register("buildCurl") {
+    description = "Cross-compile libcurl 8.20.0 static with mbedTLS for arm64 (Stage 04 dep)"
+    dependsOn("buildMbedtls")
+
+    val ndk = providers.environmentVariable("ANDROID_NDK_HOME")
+        .orElse(providers.provider {
+            val sdk = android.sdkDirectory
+            val ndks = file("$sdk/ndk").listFiles()?.sortedByDescending { it.name }
+            ndks?.firstOrNull()?.absolutePath ?: error("NDK not found")
+        })
+    val ndkDir = file(ndk.get())
+    val toolchainBin = file("$ndkDir/toolchains/llvm/prebuilt/linux-x86_64/bin")
+    val cc = file("$toolchainBin/aarch64-linux-android24-clang")
+    val ar = file("$toolchainBin/llvm-ar")
+    val ranlib = file("$toolchainBin/llvm-ranlib")
+
+    val nativeDir = file("build/native")
+    val srcDir = file("$nativeDir/src/curl-8.20.0")
+    val mbedtlsInstall = file("$nativeDir/mbedtls-install")
+    val installDir = file("$nativeDir/curl-install")
+    val tarball = file("$nativeDir/src/curl-8.20.0.tar.gz")
+    val curlUrl = "https://curl.se/download/curl-8.20.0.tar.gz"
+
+    outputs.dir(installDir)
+
+    doLast {
+        // 1. Fetch tarball if missing
+        if (!tarball.exists()) {
+            tarball.parentFile.mkdirs()
+            project.exec {
+                commandLine("curl", "-L", "--fail", "-o", tarball.absolutePath, curlUrl)
+            }
+        }
+        // 2. Extract if missing
+        if (!srcDir.exists()) {
+            project.exec {
+                commandLine("tar", "-xzf", tarball.absolutePath, "-C", srcDir.parentFile.absolutePath)
+            }
+        }
+        // 3. Configure (autotools, cross-compile via --host + env vars)
+        project.exec {
+            workingDir = srcDir
+            environment("CC", cc.absolutePath)
+            environment("AR", ar.absolutePath)
+            environment("RANLIB", ranlib.absolutePath)
+            environment("CFLAGS", "-fPIC -Os")
+            environment("LDFLAGS", "-L${mbedtlsInstall.absolutePath}/lib")
+            environment("CPPFLAGS", "-I${mbedtlsInstall.absolutePath}/include")
+            environment("PKG_CONFIG_LIBDIR", "/dev/null")
+            commandLine(
+                "./configure",
+                "--host=aarch64-linux-android",
+                "--prefix=${installDir.absolutePath}",
+                "--with-mbedtls=${mbedtlsInstall.absolutePath}",
+                "--without-nghttp2", "--without-ngtcp2", "--without-nghttp3",
+                "--without-librtmp", "--without-libssh2",
+                "--without-zlib", "--without-libpsl",
+                "--disable-shared", "--enable-static",
+                "--disable-ldap", "--disable-ldaps",
+                "--disable-manual", "--disable-docs",
+                "--disable-rtsp", "--disable-dict", "--disable-telnet", "--disable-tftp",
+                "--disable-pop3", "--disable-imap", "--disable-smtp", "--disable-gopher",
+                "--disable-mqtt", "--disable-smb"
+            )
+        }
+        // 4. Build + install
+        project.exec {
+            workingDir = srcDir
+            commandLine("make", "-j8")
+        }
+        project.exec {
+            workingDir = srcDir
+            commandLine("make", "install")
+        }
+    }
+}
 }
 
 dependencies {
