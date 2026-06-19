@@ -272,6 +272,91 @@ tasks.register("buildCurl") {
         }
     }
 }
+tasks.register("buildTransmission") {
+    description = "Cross-compile transmission-daemon 4.1.2 for arm64, package libtransmissiond.so"
+    dependsOn("buildCurl")
+
+    val ndk = providers.environmentVariable("ANDROID_NDK_HOME")
+        .orElse(providers.provider {
+            val sdk = android.sdkDirectory
+            val ndks = file("$sdk/ndk").listFiles()?.sortedByDescending { it.name }
+            ndks?.firstOrNull()?.absolutePath ?: error("NDK not found")
+        })
+    val ndkDir = file(ndk.get())
+    val toolchainFile = file("$ndkDir/build/cmake/android.toolchain.cmake")
+
+    val nativeDir = file("build/native")
+    val srcDir = file("$nativeDir/src/transmission-4.1.2")
+    val curlInstall = file("$nativeDir/curl-install")
+    val mbedtlsInstall = file("$nativeDir/mbedtls-install")
+    val buildDir = file("$nativeDir/build-transmission")
+    val daemonOut = file("$buildDir/daemon/transmission-daemon")
+    val jniLibsArm64 = file("src/main/jniLibs/arm64-v8a")
+    val tarball = file("$nativeDir/src/transmission-4.1.2.tar.xz")
+    // Official release tarball (includes vendored third-party submodules)
+    val url = "https://github.com/transmission/transmission/releases/download/4.1.2/transmission-4.1.2.tar.xz"
+
+    outputs.file("$jniLibsArm64/libtransmissiond.so")
+
+    doLast {
+        // 1. Fetch tarball if missing
+        if (!tarball.exists()) {
+            tarball.parentFile.mkdirs()
+            project.exec {
+                commandLine("curl", "-L", "--fail", "-o", tarball.absolutePath, url)
+            }
+        }
+        // 2. Extract if missing
+        if (!srcDir.exists()) {
+            project.exec {
+                commandLine("tar", "-xJf", tarball.absolutePath, "-C", srcDir.parentFile.absolutePath)
+            }
+        }
+        // 3. Configure (Ninja + NDK toolchain, dynamic PIE, static deps, mbedtls crypto)
+        project.exec {
+            commandLine(
+                "cmake", "-G", "Ninja",
+                "-S", srcDir.absolutePath, "-B", buildDir.absolutePath,
+                "-DCMAKE_TOOLCHAIN_FILE=${toolchainFile.absolutePath}",
+                "-DANDROID_ABI=arm64-v8a",
+                "-DANDROID_PLATFORM=android-24",
+                "-DCMAKE_BUILD_TYPE=Release",
+                "-DCMAKE_PREFIX_PATH=${curlInstall.absolutePath};${mbedtlsInstall.absolutePath}",
+                // Force our static curl
+                "-DCURL_INCLUDE_DIR=${curlInstall.absolutePath}/include",
+                "-DCURL_LIBRARY=${curlInstall.absolutePath}/lib/libcurl.a",
+                // mbedTLS (FindMbedTLS.cmake vars)
+                "-DWITH_CRYPTO=mbedtls",
+                "-DMBEDTLS_INCLUDE_DIR=${mbedtlsInstall.absolutePath}/include",
+                "-DMBEDTLS_LIBRARY=${mbedtlsInstall.absolutePath}/lib/libmbedtls.a",
+                "-DMBEDCRYPTO_LIBRARY=${mbedtlsInstall.absolutePath}/lib/libmbedcrypto.a",
+                // Build scope: daemon only
+                "-DENABLE_DAEMON=ON",
+                "-DENABLE_GTK=OFF", "-DENABLE_QT=OFF", "-DENABLE_CLI=OFF",
+                "-DENABLE_UTILS=OFF", "-DENABLE_TESTS=OFF", "-DENABLE_NLS=OFF",
+                "-DRUN_CLANG_TIDY=OFF",
+                // Force vendored third-party (built static), so no system libevent/etc needed
+                "-DUSE_SYSTEM_DHT=OFF", "-DUSE_SYSTEM_MINIUPNPC=OFF", "-DUSE_SYSTEM_NATPMP=OFF",
+                "-DUSE_SYSTEM_UTP=OFF", "-DUSE_SYSTEM_B64=OFF", "-DUSE_SYSTEM_PSL=OFF",
+                "-DUSE_SYSTEM_DEFLATE=OFF", "-DUSE_SYSTEM_EVENT2=OFF",
+                // Resolve mbedTLS symbols referenced by static libcurl; -llog for __android_log
+                // Help FindThreads during cross-compilation (Bionic pthreads in libc, no -lpthread)
+                "-DCMAKE_USE_PTHREADS_INIT=1", "-DCMAKE_THREAD_LIBS_INIT=",
+                "-DCMAKE_EXE_LINKER_FLAGS=-L${mbedtlsInstall.absolutePath}/lib -L${curlInstall.absolutePath}/lib -lmbedx509 -lmbedcrypto -llog"
+            )
+        }
+        // 4. Build only the daemon target
+        project.exec {
+            commandLine("cmake", "--build", buildDir.absolutePath, "--target", "transmission-daemon", "-j8")
+        }
+        // 5. Copy + rename to jniLibs (lib*.so name required for packaging)
+        copy {
+            from(daemonOut)
+            into(jniLibsArm64)
+            rename { "libtransmissiond.so" }
+        }
+    }
+}
 }
 
 dependencies {
