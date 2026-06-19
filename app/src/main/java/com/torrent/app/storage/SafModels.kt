@@ -7,11 +7,9 @@ data class SafStatus(
     val rootSummary: String?,   // e.g. "USB (128 GB)" when discoverable, else null
 )
 
-/** Result of the native SAF fd validation harness (Stage 3 runs it). */
+/** Result of the SAF fd throughput validation harness. */
 data class SafValidationResult(
     val ok: Boolean,
     val message: String,
     val throughputMBs: Double?,   // null if not measured / failed
-    val offsetBytes: Long,        // the >4GB offset tested
-    val fat32Warning: Boolean,    // true if failure looked like the 4GB FAT32 cap
 )

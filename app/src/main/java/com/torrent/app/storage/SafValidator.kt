@@ -6,62 +6,51 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
- * Runs the on-device SAF fd validation: opens a test file under the USB tree via the
- * gateway, hands the raw fd to the native validate+throughput fns, then removes the
- * test file. Safe to run on a coroutine; does disk I/O on Dispatchers.IO.
+ * Writes 512 MiB sequentially to a test file on the USB volume via the SAF gateway,
+ * measures throughput, then removes the file. The drive is always exFAT; no sparse-file
+ * or FAT32 tests are needed. Safe to call on a coroutine; does disk I/O on Dispatchers.IO.
  */
 class SafValidator(private val bridge: UsbFdBridge) {
 
     suspend fun run(): SafValidationResult = withContext(Dispatchers.IO) {
         SafBridgeTest.ensureLoaded()
         val testRelPath = "saftest/saftest.bin"
-        val offset = 5L * 1024 * 1024 * 1024   // 5 GiB > 4 GiB FAT32 cap
+        val throughputBytes = 512L * 1024 * 1024   // 512 MiB
 
         if (!bridge.mkdirs("saftest")) {
             return@withContext SafValidationResult(
                 ok = false, message = "mkdirs(\"saftest\") failed",
-                throughputMBs = null, offsetBytes = offset, fat32Warning = false)
+                throughputMBs = null)
         }
 
         val fd = bridge.openFd(testRelPath, "rw")
         if (fd < 0) {
             return@withContext SafValidationResult(
                 ok = false, message = "openFd failed (fd=$fd)",
-                throughputMBs = null, offsetBytes = offset, fat32Warning = false)
+                throughputMBs = null)
         }
 
-        // Re-adopt the detached fd so Kotlin owns + closes it after the native calls.
         val pfd = ParcelFileDescriptor.adoptFd(fd)
         try {
-            val code = SafBridgeTest.nativeValidateFd(pfd.fd, offset)
-            if (code != 0L) {
-                // EFBIG(27)/ENOSPC(28) near 4GB strongly suggests a FAT32 filesystem.
-                val fat32 = (code == -27L || code == -28L)
-                return@withContext SafValidationResult(
-                    ok = false,
-                    message = "native validate failed (errno=${-code})",
-                    throughputMBs = null,
-                    offsetBytes = offset,
-                    fat32Warning = fat32)
-            }
-
-            val throughputBytes = 64L * 1024 * 1024   // 64 MiB
             val ns = SafBridgeTest.nativeThroughput(pfd.fd, throughputBytes)
+            if (ns < 0) {
+                return@withContext SafValidationResult(
+                    ok = false, message = "throughput write failed (errno=${-ns})",
+                    throughputMBs = null)
+            }
             val mbps = if (ns > 0) {
                 (throughputBytes.toDouble() / (1024.0 * 1024.0)) / (ns / 1_000_000_000.0)
             } else null
 
             SafValidationResult(
                 ok = true,
-                message = "OK: seekable; pwrite/pread/ftruncate/fsync at 5 GiB offset",
-                throughputMBs = mbps,
-                offsetBytes = offset,
-                fat32Warning = false)
+                message = "OK: 512 MiB sequential write",
+                throughputMBs = mbps)
         } catch (e: Exception) {
             Log.e(TAG, "validation threw", e)
             SafValidationResult(
                 ok = false, message = "exception: ${e.message}",
-                throughputMBs = null, offsetBytes = offset, fat32Warning = false)
+                throughputMBs = null)
         } finally {
             try { pfd.close() } catch (_: Exception) {}
             try { bridge.removeDoc(testRelPath) } catch (_: Exception) {}

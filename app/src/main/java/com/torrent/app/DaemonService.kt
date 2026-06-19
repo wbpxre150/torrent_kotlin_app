@@ -127,7 +127,7 @@ class DaemonService : Service() {
     suspend fun runSafValidation(): SafValidationResult {
         val g = gateway ?: return SafValidationResult(
             ok = false, message = "USB tree not granted",
-            throughputMBs = null, offsetBytes = 0, fat32Warning = false)
+            throughputMBs = null)
         return SafValidator(g).run()
     }
 

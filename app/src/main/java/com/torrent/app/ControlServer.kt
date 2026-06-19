@@ -65,9 +65,7 @@ class ControlServer(
                             append("{")
                             append("\"ok\":").append(r.ok).append(",")
                             append("\"message\":").append(jsonStr(r.message)).append(",")
-                            append("\"throughputMBs\":").append(r.throughputMBs ?: "null").append(",")
-                            append("\"offsetBytes\":").append(r.offsetBytes).append(",")
-                            append("\"fat32Warning\":").append(r.fat32Warning)
+                            append("\"throughputMBs\":").append(r.throughputMBs ?: "null")
                             append("}")
                         }
                         call.respondText(json, ContentType.Application.Json)

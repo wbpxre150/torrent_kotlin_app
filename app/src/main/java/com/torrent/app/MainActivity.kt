@@ -122,11 +122,11 @@ class MainActivity : ComponentActivity() {
                                 val svc = boundService
                                 safValidation.value = SafValidationResult(
                                     ok = false, message = "running…",
-                                    throughputMBs = null, offsetBytes = 0, fat32Warning = false)
+                                    throughputMBs = null)
                                 safValidation.value = svc?.runSafValidation()
                                     ?: SafValidationResult(
                                         ok = false, message = "service not bound",
-                                        throughputMBs = null, offsetBytes = 0, fat32Warning = false)
+                                        throughputMBs = null)
                             }
                         },
                     )
@@ -268,13 +268,6 @@ fun MainScreen(
                     v.throughputMBs?.let { mbps ->
                         Text(text = "throughput: %.1f MB/s".format(mbps),
                             style = MaterialTheme.typography.bodySmall)
-                    }
-                    if (v.fat32Warning) {
-                        Text(
-                            text = "FAT32 suspected (4 GiB cap). Reformat the drive as exFAT.",
-                            color = MaterialTheme.colorScheme.error,
-                            style = MaterialTheme.typography.bodySmall
-                        )
                     }
                 }
             }
