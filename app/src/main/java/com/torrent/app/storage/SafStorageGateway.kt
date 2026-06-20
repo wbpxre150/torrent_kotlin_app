@@ -130,6 +130,16 @@ class SafStorageGateway(
         }
     }
 
+    fun openReadPfd(relPath: String): ParcelFileDescriptor? {
+        val uri = resolveUri(relPath) ?: return null
+        return try {
+            resolver.openFileDescriptor(uri, "r")
+        } catch (e: Exception) {
+            Log.e(TAG, "openReadPfd: ${e.message}")
+            null
+        }
+    }
+
     override fun list(relPath: String): List<String> {
         val parentUri = resolveUri(relPath) ?: return emptyList()
         val out = mutableListOf<String>()

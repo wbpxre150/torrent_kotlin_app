@@ -382,5 +382,10 @@ dependencies {
     implementation("com.google.zxing:core:3.5.3")
     // SAF DocumentFile helper (used by SafStorageGateway)
     implementation("androidx.documentfile:documentfile:1.0.1")
+    // Apache FtpServer (Stage 06): embedded wifi-only FTP serving USB to Kodi.
+    // ftpserver-core pulls mina-core transitively; do not pin mina separately.
+    implementation("org.apache.ftpserver:ftpserver-core:1.2.0")
+    // slf4j binding for FtpServer/MINA logging on Android (java.util.logging).
+    implementation("org.slf4j:slf4j-jdk14:1.7.36")
     testImplementation("junit:junit:4.13.2")
 }
