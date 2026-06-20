@@ -1,5 +1,6 @@
 package com.torrent.app
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -34,5 +35,14 @@ class TransmissionConfigTest {
         assertTrue(json.trimStart().startsWith("{"))
         assertTrue(json.trimEnd().endsWith("}"))
         assertFalse(json.contains("\"message-level\": 3,"))
+    }
+    @Test fun usbDownloadDir_isSentinel() {
+        assertEquals("/saf/usb", TransmissionConfig.USB_DOWNLOAD_DIR)
+    }
+
+    @Test fun buildSettingsJson_usesUsbSentinelForDownloadAndIncomplete() {
+        val json = TransmissionConfig.buildSettingsJson("u", "p", TransmissionConfig.USB_DOWNLOAD_DIR)
+        assertTrue(json.contains("\"download-dir\": \"/saf/usb\""))
+        assertTrue(json.contains("\"incomplete-dir\": \"/saf/usb\""))
     }
 }

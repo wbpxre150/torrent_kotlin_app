@@ -36,6 +36,7 @@ class ProcessSupervisor(
     private val workDir: File,                    // child process cwd
     private val logDir: File,                     // rotating log files go here
     private val ldLibraryPath: String? = null,    // optional LD_LIBRARY_PATH
+    private val extraEnv: Map<String, String> = emptyMap(),
     private val pipelineMaxLines: Int = 200,
 ) {
     companion object {
@@ -170,6 +171,7 @@ class ProcessSupervisor(
             if (ldLibraryPath != null) {
                 put("LD_LIBRARY_PATH", ldLibraryPath)
             }
+            putAll(extraEnv)
         }
 
         val cmd = mutableListOf(binary.absolutePath)

@@ -21,6 +21,8 @@ import com.torrent.app.storage.SafStatus
 import com.torrent.app.storage.SafStorageGateway
 import com.torrent.app.storage.SafValidationResult
 import com.torrent.app.storage.SafValidator
+import com.torrent.app.storage.SafIpcRequestHandler
+import com.torrent.app.storage.SafIpcServer
 import com.torrent.app.storage.UsbPermissionManager
 
 sealed class ServiceState {
@@ -42,7 +44,8 @@ class DaemonService : Service() {
     private val supervisors = mutableListOf<ProcessSupervisor>()
     private lateinit var usbPermissionManager: UsbPermissionManager
     private var gateway: SafStorageGateway? = null
-
+    private lateinit var safSocketFile: java.io.File
+    private lateinit var safIpcServer: SafIpcServer
     private lateinit var transmissionConfig: TransmissionConfig
 
     override fun onCreate() {
@@ -53,6 +56,8 @@ class DaemonService : Service() {
         usbPermissionManager.treeUri()?.let { uri ->
             gateway = SafStorageGateway(this, uri)
         }
+        safSocketFile = java.io.File(filesDir, "saf-bridge.sock")
+        safIpcServer = SafIpcServer(safSocketFile, SafIpcRequestHandler { gateway })
         controlServer = ControlServer(
             tokenManager = tokenManager,
             serviceState = _state,
@@ -83,6 +88,7 @@ class DaemonService : Service() {
 
         _state.value = ServiceState.Running
         controlServer.start()
+        safIpcServer.start()
         startSupervisors()
         return START_STICKY
     }
@@ -90,6 +96,7 @@ class DaemonService : Service() {
     override fun onDestroy() {
         controlServer.stop()
         stopSupervisors()
+        safIpcServer.stop()
         _state.value = ServiceState.Stopping
         releaseLocks()
         _state.value = ServiceState.Stopped
@@ -241,6 +248,7 @@ class DaemonService : Service() {
             nativeLibraryDir = nativeLibDir,
             workDir = workDir,
             logDir = logDir,
+            extraEnv = mapOf("TORRENT_SAF_SOCKET" to safSocketFile.absolutePath),
         )
         transmission.start()
         supervisors.add(transmission)

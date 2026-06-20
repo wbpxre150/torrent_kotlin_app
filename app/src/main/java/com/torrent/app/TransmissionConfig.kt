@@ -35,7 +35,7 @@ class TransmissionConfig(context: Context) {
     fun ensureSettingsJson() {
         if (settingsFile.exists()) return
         settingsFile.writeText(
-            buildSettingsJson(username(), password(), downloadDir.absolutePath)
+            buildSettingsJson(username(), password(), USB_DOWNLOAD_DIR)
         )
     }
 
@@ -44,6 +44,9 @@ class TransmissionConfig(context: Context) {
         private const val KEY_PASSWORD = "rpc_password"
         private const val USERNAME = "torrentapp"
         private const val PASSWORD_LEN = 24
+
+        /** Sentinel download root recognized by the SAF file-backend fork. */
+        const val USB_DOWNLOAD_DIR = "/saf/usb"
         private val PASSWORD_CHARS =
             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789".toCharArray()
 
