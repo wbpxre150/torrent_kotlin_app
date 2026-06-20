@@ -207,6 +207,7 @@ class ProcessSupervisor(
             while (line != null) {
                 writer.write(line)
                 writer.newLine()
+                writer.flush()
 
                 // Ring buffer + push to status for UI
                 synchronized(ringBuffer) {

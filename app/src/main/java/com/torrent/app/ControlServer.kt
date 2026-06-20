@@ -69,6 +69,7 @@ class ControlServer(
                             append("\"throughputMBs\":").append(r.throughputMBs ?: "null")
                             append("}")
                         }
+                        call.respondText(json, ContentType.Application.Json)
                     }
 
                     get("ftp/status") {
