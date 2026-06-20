@@ -15,6 +15,7 @@ class ControlServer(
     private val daemonStatuses: () -> List<ProcessStatus>,
     private val safStatus: () -> com.torrent.app.storage.SafStatus,
     private val runSafValidation: suspend () -> com.torrent.app.storage.SafValidationResult,
+    private val ftpStatus: () -> com.torrent.app.ftp.FtpStatus,
     private val port: Int = 8090
 ) {
     @Volatile
@@ -66,6 +67,21 @@ class ControlServer(
                             append("\"ok\":").append(r.ok).append(",")
                             append("\"message\":").append(jsonStr(r.message)).append(",")
                             append("\"throughputMBs\":").append(r.throughputMBs ?: "null")
+                            append("}")
+                        }
+                    }
+
+                    get("ftp/status") {
+                        val f = ftpStatus()
+                        val json = buildString {
+                            append("{")
+                            append("\"running\":").append(f.running).append(",")
+                            append("\"state\":").append(jsonStr(f.state)).append(",")
+                            append("\"ip\":").append(jsonStr(f.ip)).append(",")
+                            append("\"port\":").append(f.port).append(",")
+                            append("\"username\":").append(jsonStr(f.username)).append(",")
+                            append("\"password\":").append(jsonStr(f.password)).append(",")
+                            append("\"wifiUp\":").append(f.wifiUp)
                             append("}")
                         }
                         call.respondText(json, ContentType.Application.Json)
@@ -141,8 +157,21 @@ class ControlServer(
                     <tr><th>Name</th><th>State</th><th>PID</th><th>Uptime</th><th>Restarts</th></tr>
                     $daemonRows
                 </table>
+                <h2>FTP Server (wifi only)</h2>
+                ${ftpStatusSection()}
             </body>
             </html>
+        """.trimIndent()
+    }
+    private fun ftpStatusSection(): String {
+        val f = ftpStatus()
+        val url = if (f.running && f.ip != null && f.password != null)
+            "ftp://${f.username}:${f.password}@${f.ip}:${f.port}/"
+        else "—"
+        return """
+            <p class="meta">State: <span class="state ${f.state}">${f.state}</span>
+               &nbsp; wifi: <strong>${if (f.wifiUp) "up" else "down"}</strong></p>
+            <p>URL: <code>$url</code></p>
         """.trimIndent()
     }
     private fun formatUptime(ms: Long): String {

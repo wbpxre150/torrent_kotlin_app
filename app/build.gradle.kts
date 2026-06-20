@@ -44,6 +44,11 @@ android {
         jniLibs {
             useLegacyPackaging = true
         }
+        resources {
+            excludes += "/META-INF/DEPENDENCIES"
+            excludes += "/META-INF/LICENSE"
+            excludes += "/META-INF/NOTICE"
+        }
     }
 
 tasks.register<Exec>("buildProbe") {

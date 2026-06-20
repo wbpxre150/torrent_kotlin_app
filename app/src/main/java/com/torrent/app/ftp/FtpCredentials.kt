@@ -1,4 +1,4 @@
-package com.torrent.app
+package com.torrent.app.ftp
 
 import android.content.Context
 import java.security.SecureRandom
