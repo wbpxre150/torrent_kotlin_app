@@ -218,7 +218,24 @@ class SafStorageGateway(
         return try {
             val mimeType = "application/octet-stream"
             val created = DocumentsContract.createDocument(resolver, parentUri, mimeType, leaf)
-            if (created != null) { cache[n] = created; created } else null
+                ?: return null
+            // SAF providers deduplicate colliding names by appending " (1)" etc.
+            // (Bug 4). Transmission's resume file references the exact requested
+            // name, so a renamed file is unrecoverable. Detect the collision, delete
+            // the duplicate, and fail loudly so the caller sees a clean error rather
+            // than a phantom file.
+            val actualName = resolver.query(
+                created,
+                arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
+                null, null, null)?.use { c -> if (c.moveToFirst() && !c.isNull(0)) c.getString(0) else null }
+            if (actualName != null && actualName != leaf) {
+                Log.e(TAG, "ensureDocument: name collision; requested '$leaf' got '$actualName' (path '$n')")
+                try { DocumentsContract.deleteDocument(resolver, created) } catch (_: Exception) {}
+                cache.remove(n)
+                return null
+            }
+            cache[n] = created
+            created
         } catch (e: Exception) { Log.e(TAG, "ensureDocument create: ${e.message}"); null }
     }
 

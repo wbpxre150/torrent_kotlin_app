@@ -393,4 +393,6 @@ dependencies {
     // slf4j binding for FtpServer/MINA logging on Android (java.util.logging).
     implementation("org.slf4j:slf4j-jdk14:1.7.36")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.mockito:mockito-core:5.12.0")
+    testImplementation("org.robolectric:robolectric:4.14.1")
 }
