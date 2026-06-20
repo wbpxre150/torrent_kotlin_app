@@ -16,6 +16,12 @@
 #include "libtransmission/file.h"
 #include "libtransmission/file-saf.h"
 
+
+#include <android/log.h>
+
+#define SAF_LOG_TAG "SafFileBackend"
+#define saf_log_e(...) __android_log_print(ANDROID_LOG_ERROR, SAF_LOG_TAG, __VA_ARGS__)
+#define saf_log_w(...) __android_log_print(ANDROID_LOG_WARN,  SAF_LOG_TAG, __VA_ARGS__)
 namespace
 {
 constexpr char const* SAF_ROOT = "/saf/usb";
@@ -69,11 +75,14 @@ int ensure_sock()
     char const* path = std::getenv("TORRENT_SAF_SOCKET");
     if (path == nullptr || path[0] == '\0')
     {
+        saf_log_e("ensure_sock: TORRENT_SAF_SOCKET env not set; SAF bridge disabled");
         return -1;
     }
     int s = ::socket(AF_UNIX, SOCK_STREAM, 0);
     if (s < 0)
     {
+        int e = errno;
+        saf_log_e("ensure_sock: socket() failed errno=%d (%s)", e, std::strerror(e));
         return -1;
     }
     struct sockaddr_un addr{};
@@ -81,6 +90,8 @@ int ensure_sock()
     std::strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
     if (::connect(s, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0)
     {
+        int e = errno;
+        saf_log_e("ensure_sock: connect(\"%s\") failed errno=%d (%s)", path, e, std::strerror(e));
         ::close(s);
         return -1;
     }
@@ -134,17 +145,23 @@ bool send_request(uint8_t op, std::vector<uint8_t> const& payload)
     int s = ensure_sock();
     if (s < 0)
     {
+        saf_log_e("send_request: op=%u no socket (see ensure_sock above)", static_cast<unsigned>(op));
         return false;
     }
     uint8_t hdr[3] = { op, static_cast<uint8_t>(payload.size() & 0xFF),
         static_cast<uint8_t>((payload.size() >> 8) & 0xFF) };
     if (!write_n(s, hdr, 3))
     {
+        int e = errno;
+        saf_log_e("send_request: op=%u write header failed errno=%d (%s)", static_cast<unsigned>(op), e, std::strerror(e));
         drop_sock();
         return false;
     }
     if (!payload.empty() && !write_n(s, payload.data(), payload.size()))
     {
+        int e = errno;
+        saf_log_e("send_request: op=%u write payload (%zu bytes) failed errno=%d (%s)",
+            static_cast<unsigned>(op), payload.size(), e, std::strerror(e));
         drop_sock();
         return false;
     }
@@ -156,11 +173,13 @@ bool recv_response(std::vector<uint8_t>& payload, int32_t& status)
     int s = g_sock;
     if (s < 0)
     {
+        saf_log_e("recv_response: no socket");
         return false;
     }
     uint8_t hdr[6];
     if (!read_n(s, hdr, 6))
     {
+        saf_log_e("recv_response: read header failed (peer closed?)");
         drop_sock();
         return false;
     }
@@ -169,6 +188,7 @@ bool recv_response(std::vector<uint8_t>& payload, int32_t& status)
     payload.resize(len);
     if (len > 0 && !read_n(s, payload.data(), len))
     {
+        saf_log_e("recv_response: read %u-byte payload failed", static_cast<unsigned>(len));
         drop_sock();
         return false;
     }
@@ -198,6 +218,9 @@ int recv_response_with_fd(int32_t& status)
     ssize_t r = ::recvmsg(s, &msg, MSG_WAITALL);
     if (r != static_cast<ssize_t>(sizeof(hdr)))
     {
+        int e = errno;
+        saf_log_e("recv_response_with_fd: recvmsg returned %zd (expected %zu) errno=%d (%s)",
+            r, sizeof(hdr), e, std::strerror(e));
         drop_sock();
         return -1;
     }
@@ -208,6 +231,7 @@ int recv_response_with_fd(int32_t& status)
         std::vector<uint8_t> tmp(len);
         if (!read_n(s, tmp.data(), len))
         {
+            saf_log_e("recv_response_with_fd: read %u-byte payload failed", static_cast<unsigned>(len));
             drop_sock();
             return -1;
         }

@@ -31,7 +31,10 @@ class SafIpcServer(
     fun start() {
         if (running) return
         socketFile.delete() // clear any stale socket file
-        serverSocket = LocalServerSocket(socketFile.absolutePath)
+        val ls = LocalSocket()
+        val addr = LocalSocketAddress(socketFile.absolutePath, LocalSocketAddress.Namespace.FILESYSTEM)
+        ls.bind(addr)
+        serverSocket = LocalServerSocket(ls.fileDescriptor)
         running = true
         scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + kotlinx.coroutines.CoroutineName("saf-ipc"))
         scope!!.launch { acceptLoop() }
