@@ -5,6 +5,7 @@ import org.apache.ftpserver.ftplet.User
 import org.apache.ftpserver.ftplet.UserManager
 import org.apache.ftpserver.usermanager.UsernamePasswordAuthentication
 import org.apache.ftpserver.usermanager.impl.BaseUser
+import org.apache.ftpserver.usermanager.impl.ConcurrentLoginPermission
 
 class FtpUserManager(
     private val username: String,
@@ -16,6 +17,7 @@ class FtpUserManager(
         homeDirectory = "/"
         setEnabled(true)
         maxIdleTime = 0
+        setAuthorities(listOf(ConcurrentLoginPermission(10, 5)))
     }
     override fun getUserByName(name: String): User? =
         if (name == username) user else null

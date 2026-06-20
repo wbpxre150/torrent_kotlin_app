@@ -60,12 +60,12 @@ class FtpServerController(
                 setActiveEnabled(false)                       // passive only (Kodi + LAN safety)
                 setPassiveAddress(ip)
                 setPassiveExternalAddress(ip)                 // what PASV reports to clients
-                setPassivePorts(passivePorts)
+                setPassivePorts(this@FtpServerController.passivePorts)
                 setIdleTime(300)
             }
             val listener = ListenerFactory().apply {
                 setServerAddress(ip)                          // bind wifi interface only
-                setPort(port)
+                setPort(this@FtpServerController.port)
                 setDataConnectionConfiguration(dataFactory.createDataConnectionConfiguration())
                 setIdleTimeout(300)
             }.createListener()
