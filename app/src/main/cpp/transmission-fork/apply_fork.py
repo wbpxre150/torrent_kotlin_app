@@ -66,27 +66,89 @@ def main():
         with open(fc, "w", encoding="utf-8") as f:
             f.write(text)
 
-    # 4. CMakeLists.txt: add file-saf.cc to the main add_library source list (REQUIRED —
-    #    tr_allow_compile_if only DISABLES sources; they must already be in the target's
-    #    source list to compile) and to the NOT WIN32 tr_allow_compile_if block (so a
-    #    hypothetical Win32 build disables it, mirroring file-posix.cc).
+    # 4. CMakeLists.txt: add file-saf.cc to the main add_library source list.
     cm = os.path.join(libt, "CMakeLists.txt")
     with open(cm, "r", encoding="utf-8") as f:
         text = f.read()
     if "file-saf.cc" not in text:
-        # 4a. Main add_library list: insert after file-posix.cc (appears before file-win32.cc).
         main_target = "        file-posix.cc\n        file-win32.cc"
         main_repl = "        file-posix.cc\n        file-saf.cc\n        file-win32.cc"
         if main_target not in text:
             sys.exit("ERROR: CMakeLists main source list not found")
         text = text.replace(main_target, main_repl, 1)
-        # 4b. tr_allow_compile_if NOT WIN32 block: insert after file-posix.cc there too.
         cond_target = "        file-posix.cc\n        subprocess-posix.cc)"
         cond_repl = "        file-posix.cc\n        file-saf.cc\n        subprocess-posix.cc)"
         if cond_target not in text:
             sys.exit("ERROR: CMakeLists NOT WIN32 block not found")
         text = text.replace(cond_target, cond_repl, 1)
         with open(cm, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    # 5. Patch log.cc: under __ANDROID__, logAddImpl only writes to logcat and
+    #    never enqueues, so the daemon's --logfile stays empty. Also enqueue
+    #    when queue_enabled_ so the log file is populated.
+    log_cc = os.path.join(libt, "log.cc")
+    with open(log_cc, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: also enqueue" not in text:
+        anchor = '    __android_log_write(prio, "transmission", szmsg.c_str());\n\n#else'
+        replacement = (
+            '    __android_log_write(prio, "transmission", szmsg.c_str());\n\n'
+            '    // ANDROID fork: also enqueue so the daemon\'s --logfile (drained via\n'
+            '    // pumpLogMessages -> tr_logGetQueue) is populated.\n'
+            '    if (log_state.queue_enabled_)\n'
+            '    {\n'
+            '        auto* const newmsg = new tr_log_message{};\n'
+            '        newmsg->level = level;\n'
+            '        newmsg->when = std::chrono::system_clock::now();\n'
+            '        newmsg->message = std::move(msg);\n'
+            '        newmsg->file = file;\n'
+            '        newmsg->line = line;\n'
+            '        newmsg->name = name;\n\n'
+            '        *log_state.queue_tail_ = newmsg;\n'
+            '        log_state.queue_tail_ = &newmsg->next;\n'
+            '        ++log_state.queue_length_;\n\n'
+            '        if (log_state.queue_length_ > TrLogMaxQueueLength)\n'
+            '        {\n'
+            '            tr_log_message* old = log_state.queue_;\n'
+            '            log_state.queue_ = old->next;\n'
+            '            old->next = nullptr;\n'
+            '            tr_logFreeQueue(old);\n'
+            '            --log_state.queue_length_;\n'
+            '        }\n'
+            '    }\n\n'
+            '#else'
+        )
+        if anchor not in text:
+            sys.exit("ERROR: log.cc Android anchor not found")
+        text = text.replace(anchor, replacement, 1)
+        with open(log_cc, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    # 6. Patch top-level CMakeLists.txt: disable libevent thread support to avoid
+    #    FindThreads failure on Android cross-compile.
+    top_cmake = os.path.join(src_root, "CMakeLists.txt")
+    with open(top_cmake, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: disable event threads" not in text:
+        old = "-DEVENT__LIBRARY_TYPE:STRING=STATIC)"
+        new = "-DEVENT__LIBRARY_TYPE:STRING=STATIC\n        -DEVENT__DISABLE_THREAD_SUPPORT:BOOL=ON\n        # ANDROID fork: disable event threads)"
+        text = text.replace(old, new, 1)
+        with open(top_cmake, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    # 7. Patch file-capacity.cc: guard sys/quota.h on Android.
+    fc2 = os.path.join(libt, "file-capacity.cc")
+    with open(fc2, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: skip quota" not in text:
+        old = "#else\n#include <sys/quota.h> /* quotactl() */"
+        new = "#elif !defined(__ANDROID__)\n#include <sys/quota.h> /* quotactl() */"
+        text = text.replace(old, new, 1)
+        old2 = "#include <sys/types.h> /* types needed by quota.h */"
+        new2 = "#include <sys/types.h> /* types needed by quota.h */\n// ANDROID fork: skip quota on Android"
+        text = text.replace(old2, new2, 1)
+        with open(fc2, "w", encoding="utf-8") as f:
             f.write(text)
 
     print("apply_fork: OK")
