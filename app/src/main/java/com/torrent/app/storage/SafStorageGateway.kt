@@ -110,6 +110,26 @@ class SafStorageGateway(
 
     override fun exists(relPath: String): Boolean = resolveUri(relPath) != null
 
+    override fun stat(relPath: String): UsbFdBridge.PathInfo? {
+        val uri = resolveUri(relPath) ?: return null
+        return try {
+            resolver.query(
+                uri,
+                arrayOf(
+                    DocumentsContract.Document.COLUMN_MIME_TYPE,
+                    DocumentsContract.Document.COLUMN_SIZE),
+                null, null, null)?.use { c ->
+                if (!c.moveToFirst()) return null
+                val mime = c.getString(0)
+                val isDir = mime == DocumentsContract.Document.MIME_TYPE_DIR
+                val size = if (c.isNull(1)) 0L else c.getLong(1)
+                UsbFdBridge.PathInfo(isDir, size)
+            } ?: null
+        } catch (e: Exception) {
+            Log.e(TAG, "stat: ${e.message}"); null
+        }
+    }
+
     override fun list(relPath: String): List<String> {
         val parentUri = resolveUri(relPath) ?: return emptyList()
         val out = mutableListOf<String>()
