@@ -297,6 +297,9 @@ tasks.register("buildTransmission") {
     val url = "https://github.com/transmission/transmission/releases/download/4.1.2/transmission-4.1.2.tar.xz"
 
     outputs.file("$jniLibsArm64/libtransmissiond.so")
+    inputs.file("src/main/cpp/transmission-fork/file-saf.h")
+    inputs.file("src/main/cpp/transmission-fork/file-saf.cc")
+    inputs.file("src/main/cpp/transmission-fork/apply_fork.py")
 
     doLast {
         // 1. Fetch tarball if missing
@@ -311,6 +314,10 @@ tasks.register("buildTransmission") {
             project.exec {
                 commandLine("tar", "-xJf", tarball.absolutePath, "-C", srcDir.parentFile.absolutePath)
             }
+        }
+        // 2b. Apply the SAF storage fork (copy file-saf.* + patch file-posix/file-capacity/CMakeLists).
+        project.exec {
+            commandLine("python3", file("src/main/cpp/transmission-fork/apply_fork.py").absolutePath, srcDir.absolutePath)
         }
         // 3. Configure (Ninja + NDK toolchain, dynamic PIE, static deps, mbedtls crypto)
         project.exec {
