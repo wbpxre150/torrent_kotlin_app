@@ -2,6 +2,7 @@ package com.torrent.app
 
 import android.content.Context
 import java.io.File
+import java.security.MessageDigest
 import java.security.SecureRandom
 
 /**
@@ -10,8 +11,6 @@ import java.security.SecureRandom
  * I/O to USB via the SAF fork.
  */
 class TransmissionConfig(context: Context) {
-
-    private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     val configDir: File = File(context.filesDir, "transmission")
     val downloadDir: File = File(configDir, "downloads")
@@ -24,35 +23,42 @@ class TransmissionConfig(context: Context) {
 
     fun username(): String = USERNAME
 
-    fun password(): String {
-        prefs.getString(KEY_PASSWORD, null)?.let { return it }
-        val generated = randomString(PASSWORD_LEN)
-        prefs.edit().putString(KEY_PASSWORD, generated).apply()
-        return generated
-    }
+    fun password(): String = "test"
 
-    /** Writes settings.json only if absent, so transmission's own rewrites are preserved. */
+    /** Writes settings.json, overwriting any previous so updated password takes effect. */
     fun ensureSettingsJson() {
-        if (settingsFile.exists()) return
         settingsFile.writeText(
-            buildSettingsJson(username(), password(), USB_DOWNLOAD_DIR)
+            buildSettingsJson(username(), ssha1Hash(password()), USB_DOWNLOAD_DIR)
         )
     }
 
     companion object {
-        private const val PREFS = "transmission_creds"
-        private const val KEY_PASSWORD = "rpc_password"
         private const val USERNAME = "torrentapp"
-        private const val PASSWORD_LEN = 24
-
         /** Sentinel download root recognized by the SAF file-backend fork. */
         const val USB_DOWNLOAD_DIR = "/saf/usb"
-        private val PASSWORD_CHARS =
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789".toCharArray()
+
+        /**
+         * Compute transmission's SSHA1 password hash: "{" + SHA1_hex(password + salt) + salt.
+         * Salt is 8 random chars from the same 64-char alphabet transmission uses.
+         * When this format is written to settings.json, transmission detects the "{"
+         * prefix and uses the hash directly without re-hashing.
+         */
+        fun ssha1Hash(password: String): String {
+            val salter = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ./"
+            val rnd = SecureRandom()
+            val salt = StringBuilder(8)
+            repeat(8) { salt.append(salter[rnd.nextInt(salter.length)]) }
+            val saltStr = salt.toString()
+            val sha1hex = MessageDigest.getInstance("SHA-1")
+                .digest((password + saltStr).toByteArray(Charsets.UTF_8))
+                .joinToString("") { "%02x".format(it) }
+            return "{$sha1hex$saltStr"
+        }
 
         /**
          * Pure builder for transmission's settings.json. Exposed for unit testing (no Android deps).
-         * rpc-password is written plaintext; transmission hashes it on first run and rewrites the file.
+         * rpc-password should be pre-hashed via [ssha1Hash] before calling; transmission detects the
+         * "{" prefix and uses the hash directly without re-hashing or rewriting the file.
          */
         fun buildSettingsJson(username: String, password: String, downloadDir: String): String =
             buildString {
@@ -74,12 +80,5 @@ class TransmissionConfig(context: Context) {
 
         private fun jsonStr(s: String): String =
             "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
-
-        private fun randomString(len: Int): String {
-            val rnd = SecureRandom()
-            val sb = StringBuilder(len)
-            repeat(len) { sb.append(PASSWORD_CHARS[rnd.nextInt(PASSWORD_CHARS.size)]) }
-            return sb.toString()
-        }
     }
 }
