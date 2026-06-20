@@ -72,6 +72,8 @@ class ProcessSupervisor(
     private val ringBuffer = ArrayDeque<String>(pipelineMaxLines)
 
     private var child: Process? = null
+    // Offset used by tailLogFileIntoRingBuffer and drained by drainLogTailOnce
+    private var tailLastPos = 0L
 
     /** Launch the child process. Idempotent: if already running, does nothing. */
     fun start() {
@@ -129,6 +131,7 @@ class ProcessSupervisor(
             restarts++
             _status.value = _status.value.copy(
                 state = ProcessState.RUNNING,
+                pid = pidOf(proc),
                 startTimeMs = now,
                 restartCount = restarts,
             )
@@ -199,6 +202,7 @@ class ProcessSupervisor(
     private suspend fun drainAndWait(proc: Process): Boolean = withContext(Dispatchers.IO) {
         val logFile = File(logDir, "$label.log")
         logDir.mkdirs()
+        tailLastPos = 0L
 
         if (selfLogging) {
             val reader = BufferedReader(InputStreamReader(proc.inputStream))
@@ -223,7 +227,10 @@ class ProcessSupervisor(
                 tailJob.cancel()
                 stdoutJob.cancel()
                 try { reader.close() } catch (_: Exception) {}
-                tailLogFileIntoRingBuffer(logFile)
+                // One-shot final drain of any bytes the tail job had not yet polled.
+                // Do NOT call the infinite tailLogFileIntoRingBuffer here — that hangs
+                // the supervisor thread and blocks restart (Bug 2).
+                drainLogTailOnce(logFile)
             }
         } else {
             val writer = logFile.bufferedWriter()
@@ -263,17 +270,16 @@ class ProcessSupervisor(
     }
 
     private suspend fun tailLogFileIntoRingBuffer(logFile: File) {
-        var lastPos = 0L
         while (true) {
             try {
                 val len = logFile.length()
-                if (len > lastPos) {
+                if (len > tailLastPos) {
                     logFile.bufferedReader().use { reader ->
-                        reader.skip(lastPos)
+                        reader.skip(tailLastPos)
                         var line = reader.readLine()
                         while (line != null) {
                             pushToRingBuffer(line)
-                            lastPos += line.length.toLong() + 1L
+                            tailLastPos += line.length.toLong() + 1L
                             line = reader.readLine()
                         }
                     }
@@ -314,5 +320,34 @@ class ProcessSupervisor(
         } catch (_: CancellationException) {
             // Expected during stop()
         }
+    }
+    private fun pidOf(proc: Process): Int? = try {
+        val f = proc.javaClass.getDeclaredField("pid")
+        f.isAccessible = true
+        (f.get(proc) as? Int)
+    } catch (_: Exception) {
+        null
+    }
+    /**
+     * One-shot read of any log file content appended since [tailLastPos], pushed
+     * into the ring buffer. Returns immediately after a single pass (no looping).
+     * Used as the final drain after process exit so the supervisor thread is not
+     * blocked by the infinite [tailLogFileIntoRingBuffer] loop.
+     */
+    private fun drainLogTailOnce(logFile: File) {
+        try {
+            val len = logFile.length()
+            if (len > tailLastPos) {
+                logFile.bufferedReader().use { reader ->
+                    reader.skip(tailLastPos)
+                    var line = reader.readLine()
+                    while (line != null) {
+                        pushToRingBuffer(line)
+                        tailLastPos += line.length.toLong() + 1L
+                        line = reader.readLine()
+                    }
+                }
+            }
+        } catch (_: Exception) {}
     }
 }
