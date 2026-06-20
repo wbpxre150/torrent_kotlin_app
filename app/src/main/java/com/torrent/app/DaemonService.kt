@@ -307,11 +307,17 @@ class DaemonService : Service() {
         val transmission = ProcessSupervisor(
             label = "transmission",
             binaryName = "libtransmissiond.so",
-            args = listOf("--foreground", "--config-dir", transmissionConfig.configDir.absolutePath),
+            args = listOf(
+                "--foreground",
+                "--config-dir", transmissionConfig.configDir.absolutePath,
+                "--logfile", File(logDir, "transmission.log").absolutePath,
+                "--log-level=info",
+            ),
             nativeLibraryDir = nativeLibDir,
             workDir = workDir,
             logDir = logDir,
             extraEnv = mapOf("TORRENT_SAF_SOCKET" to safSocketFile.absolutePath),
+            selfLogging = true,
         )
         transmission.start()
         supervisors.add(transmission)

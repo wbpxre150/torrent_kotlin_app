@@ -37,6 +37,7 @@ class ProcessSupervisor(
     private val logDir: File,                     // rotating log files go here
     private val ldLibraryPath: String? = null,    // optional LD_LIBRARY_PATH
     private val extraEnv: Map<String, String> = emptyMap(),
+    private val selfLogging: Boolean = false,
     private val pipelineMaxLines: Int = 200,
 ) {
     companion object {
@@ -199,39 +200,86 @@ class ProcessSupervisor(
         val logFile = File(logDir, "$label.log")
         logDir.mkdirs()
 
-        val writer = logFile.bufferedWriter()
-        val reader = BufferedReader(InputStreamReader(proc.inputStream))
-
-        try {
-            var line = reader.readLine()
-            while (line != null) {
-                writer.write(line)
-                writer.newLine()
-                writer.flush()
-
-                // Ring buffer + push to status for UI
-                synchronized(ringBuffer) {
-                    if (ringBuffer.size >= pipelineMaxLines) ringBuffer.removeFirst()
-                    ringBuffer.addLast(line)
-                    _status.value = _status.value.copy(lastLogLines = ringBuffer.toList())
-                }
-
-                line = reader.readLine()
+        if (selfLogging) {
+            val reader = BufferedReader(InputStreamReader(proc.inputStream))
+            val tailJob = launch {
+                tailLogFileIntoRingBuffer(logFile)
             }
-        } finally {
-            try { writer.close() } catch (_: Exception) {}
-            try { reader.close() } catch (_: Exception) {}
+            val stdoutJob = launch {
+                try {
+                    var line = reader.readLine()
+                    while (line != null) {
+                        pushToRingBuffer(line)
+                        line = reader.readLine()
+                    }
+                } catch (_: Exception) {}
+            }
+            try {
+                proc.waitFor()
+                true
+            } catch (_: InterruptedException) {
+                false
+            } finally {
+                tailJob.cancel()
+                stdoutJob.cancel()
+                try { reader.close() } catch (_: Exception) {}
+                tailLogFileIntoRingBuffer(logFile)
+            }
+        } else {
+            val writer = logFile.bufferedWriter()
+            val reader = BufferedReader(InputStreamReader(proc.inputStream))
+
+            try {
+                var line = reader.readLine()
+                while (line != null) {
+                    writer.write(line)
+                    writer.newLine()
+                    writer.flush()
+                    pushToRingBuffer(line)
+                    line = reader.readLine()
+                }
+            } finally {
+                try { writer.close() } catch (_: Exception) {}
+                try { reader.close() } catch (_: Exception) {}
+            }
+
+            if (logFile.length() > MAX_LOG_BYTES) rotateLogs(logFile)
+
+            try {
+                proc.waitFor()
+                true
+            } catch (_: InterruptedException) {
+                false
+            }
         }
+    }
 
-        // Rotate log if oversized
-        if (logFile.length() > MAX_LOG_BYTES) rotateLogs(logFile)
+    private fun pushToRingBuffer(line: String) {
+        synchronized(ringBuffer) {
+            if (ringBuffer.size >= pipelineMaxLines) ringBuffer.removeFirst()
+            ringBuffer.addLast(line)
+            _status.value = _status.value.copy(lastLogLines = ringBuffer.toList())
+        }
+    }
 
-        // waitFor should already be done since stdout closed, but call it anyway
-        try {
-            proc.waitFor()
-            true
-        } catch (_: InterruptedException) {
-            false
+    private suspend fun tailLogFileIntoRingBuffer(logFile: File) {
+        var lastPos = 0L
+        while (true) {
+            try {
+                val len = logFile.length()
+                if (len > lastPos) {
+                    logFile.bufferedReader().use { reader ->
+                        reader.skip(lastPos)
+                        var line = reader.readLine()
+                        while (line != null) {
+                            pushToRingBuffer(line)
+                            lastPos += line.length.toLong() + 1L
+                            line = reader.readLine()
+                        }
+                    }
+                }
+            } catch (_: Exception) {}
+            delay(500)
         }
     }
 

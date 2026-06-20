@@ -9,6 +9,7 @@ static volatile sig_atomic_t running = 1;
 static void handle_sigterm(int sig) { running = 0; }
 
 int main(int argc, char **argv) {
+    setvbuf(stdout, NULL, _IONBF, 0);
     // --version: print version + PID and exit 0 (used for build verification)
     if (argc == 2 && strcmp(argv[1], "--version") == 0) {
         printf("probe v1.0.0 pid=%ld\n", (long)getpid());
