@@ -2,6 +2,7 @@
 #include <cerrno>
 #include <cstring>
 #include <cstdlib>
+#include <cstddef>
 #include <fcntl.h>
 #include <mutex>
 #include <optional>
@@ -87,8 +88,21 @@ int ensure_sock()
     }
     struct sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
-    std::strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
-    if (::connect(s, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0)
+    // Android's LocalServerSocket creates an abstract-namespace socket
+    // (appears as @<path> in /proc/net/unix). Connect to abstract namespace
+    // by prepending a null byte to sun_path and using the exact address length.
+    auto const path_len = std::strlen(path);
+    if (path_len + 1 >= sizeof(addr.sun_path))
+    {
+        saf_log_e("ensure_sock: socket path too long (%zu)", path_len);
+        ::close(s);
+        return -1;
+    }
+    addr.sun_path[0] = '\0';  // abstract namespace prefix
+    std::memcpy(addr.sun_path + 1, path, path_len);
+    socklen_t addr_len = static_cast<socklen_t>(
+        offsetof(struct sockaddr_un, sun_path) + 1 + path_len);
+    if (::connect(s, reinterpret_cast<struct sockaddr*>(&addr), addr_len) < 0)
     {
         int e = errno;
         saf_log_e("ensure_sock: connect(\"%s\") failed errno=%d (%s)", path, e, std::strerror(e));
