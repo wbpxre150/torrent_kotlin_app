@@ -179,4 +179,16 @@ object SafIpcCodec {
     }
     fun parseAvailResponse(resp: Response): Long =
         if (resp.status != 0) -1L else leI64(ByteBuffer.wrap(resp.payload))
+
+    /** Payload-only (no frame) for a STAT success response. */
+    fun statPayload(isDir: Boolean, size: Long): ByteArray {
+        val buf = ByteBuffer.allocate(9).order(ByteOrder.LITTLE_ENDIAN)
+        buf.put(if (isDir) 1.toByte() else 0.toByte()); putI64(buf, size)
+        return buf.array()
+    }
+    /** Payload-only (no frame) for an AVAIL success response. */
+    fun availPayload(bytes: Long): ByteArray {
+        val buf = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
+        putI64(buf, bytes); return buf.array()
+    }
 }
