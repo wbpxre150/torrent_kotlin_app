@@ -30,9 +30,12 @@ class SafIpcServer(
 
     fun start() {
         if (running) return
-        socketFile.delete() // clear any stale socket file
+        // Abstract namespace (null-byte prefix in sun_path) to match the native
+        // file-saf.cc client. Abstract namespace needs no filesystem cleanup and
+        // is immune to permission races; the path string is the address (no file
+        // is created on disk).
         val ls = LocalSocket()
-        val addr = LocalSocketAddress(socketFile.absolutePath, LocalSocketAddress.Namespace.FILESYSTEM)
+        val addr = LocalSocketAddress(socketFile.absolutePath, LocalSocketAddress.Namespace.ABSTRACT)
         ls.bind(addr)
         serverSocket = LocalServerSocket(ls.fileDescriptor)
         running = true
