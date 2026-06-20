@@ -10,6 +10,7 @@ class SafFtpFilesystemTest {
     private class FakeSource(
         val dirs: Set<String> = emptySet(),
         val files: Map<String, Long> = emptyMap(),
+        val mtimes: Map<String, Long> = emptyMap(),
     ) : FtpFileSource {
         override fun list(relPath: String): List<FtpFileSource.Entry> {
             if (relPath !in dirs) return emptyList()
@@ -18,19 +19,19 @@ class SafFtpFilesystemTest {
                 .forEach { rp ->
                     val name = rp.substringAfterLast('/')
                     val parent = rp.substringBeforeLast('/', "")
-                    if (parent == relPath) children.add(FtpFileSource.Entry(name, false, files.getValue(rp)))
+                    if (parent == relPath) children.add(FtpFileSource.Entry(name, false, files.getValue(rp), mtimes[rp] ?: 0L))
                 }
             dirs.filter { it != relPath && it.startsWith(if (relPath.isEmpty()) "" else "$relPath/") }
                 .forEach { dp ->
                     val name = dp.substringAfterLast('/')
                     val parent = dp.substringBeforeLast('/', "")
-                    if (parent == relPath && name.isNotEmpty()) children.add(FtpFileSource.Entry(name, true, 0L))
+                    if (parent == relPath && name.isNotEmpty()) children.add(FtpFileSource.Entry(name, true, 0L, mtimes[dp] ?: 0L))
                 }
             return children
         }
         override fun stat(relPath: String): FtpFileSource.Entry? = when {
-            relPath in dirs -> FtpFileSource.Entry(relPath.substringAfterLast('/'), true, 0L)
-            files.containsKey(relPath) -> FtpFileSource.Entry(relPath.substringAfterLast('/'), false, files.getValue(relPath))
+            relPath in dirs -> FtpFileSource.Entry(relPath.substringAfterLast('/'), true, 0L, mtimes[relPath] ?: 0L)
+            files.containsKey(relPath) -> FtpFileSource.Entry(relPath.substringAfterLast('/'), false, files.getValue(relPath), mtimes[relPath] ?: 0L)
             else -> null
         }
     }
@@ -135,5 +136,21 @@ class SafFtpFilesystemTest {
         val v = SafFtpFileSystemView(FakeSource(dirs = setOf("")), streamProvider(byteArrayOf()))
         assertTrue(v.changeWorkingDirectory(".."))
         assertEquals("/", v.workingDirectory.absolutePath)
+    }
+
+    @Test fun getLastModified_reportsEntryMtime() {
+        val src = FakeSource(
+            dirs = setOf(""),
+            files = mapOf("movie.mkv" to 5_000_000_000L),
+            mtimes = mapOf("movie.mkv" to 1_700_000_000_000L),
+        )
+        val f = SafFtpFile("/movie.mkv", "movie.mkv", src, streamProvider(byteArrayOf()))
+        assertEquals(1_700_000_000_000L, f.getLastModified())
+    }
+
+    @Test fun getLastModified_zeroWhenMtimeMissing() {
+        val src = FakeSource(dirs = setOf(""), files = mapOf("x" to 1L))
+        val f = SafFtpFile("/x", "x", src, streamProvider(byteArrayOf()))
+        assertEquals(0L, f.getLastModified())
     }
 }

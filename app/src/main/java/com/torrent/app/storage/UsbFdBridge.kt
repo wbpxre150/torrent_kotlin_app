@@ -43,7 +43,7 @@ interface UsbFdBridge {
     fun list(relPath: String): List<String>   // child names
 
     /** Combined type+size for a document, or null if it does not exist. */
-    data class PathInfo(val isDir: Boolean, val size: Long)
+    data class PathInfo(val isDir: Boolean, val size: Long, val lastModified: Long = 0L)
 
     /**
      * Stat [relPath]: is it a directory, and its size in bytes. Returns null if the

@@ -30,7 +30,7 @@ class SafFtpFile(
     override fun getOwnerName(): String = "torrent"
     override fun getGroupName(): String = "torrent"
     override fun getLinkCount(): Int = 1
-    override fun getLastModified(): Long = 0L
+    override fun getLastModified(): Long = entry?.lastModified ?: 0L
     override fun setLastModified(time: Long): Boolean = false
     override fun getSize(): Long = entry?.size ?: 0L
     override fun getPhysicalFile(): String = relPath

@@ -117,13 +117,15 @@ class SafStorageGateway(
                 uri,
                 arrayOf(
                     DocumentsContract.Document.COLUMN_MIME_TYPE,
-                    DocumentsContract.Document.COLUMN_SIZE),
+                    DocumentsContract.Document.COLUMN_SIZE,
+                    DocumentsContract.Document.COLUMN_LAST_MODIFIED),
                 null, null, null)?.use { c ->
                 if (!c.moveToFirst()) return null
                 val mime = c.getString(0)
                 val isDir = mime == DocumentsContract.Document.MIME_TYPE_DIR
                 val size = if (c.isNull(1)) 0L else c.getLong(1)
-                UsbFdBridge.PathInfo(isDir, size)
+                val mtime = if (c.isNull(2)) 0L else c.getLong(2)
+                UsbFdBridge.PathInfo(isDir, size, mtime)
             } ?: null
         } catch (e: Exception) {
             Log.e(TAG, "stat: ${e.message}"); null
