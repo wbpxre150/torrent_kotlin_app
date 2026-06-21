@@ -74,7 +74,8 @@ class TransmissionConfig(context: Context) {
                 append("  \"incomplete-dir-enabled\": false,\n")
                 append("  \"rename-partial-files\": false,\n")
                 append("  \"watch-dir-enabled\": false,\n")
-                append("  \"message-level\": 3\n")
+                append("  \"message-level\": 3,\n")
+                append("  \"preallocation\": 0\n")
                 append("}\n")
             }
 
