@@ -62,17 +62,42 @@ Register `libdhtcrawler.so` with the Kotlin supervisor (Stage 02 machinery):
 - The control page gains a **dht_crawler panel**: state, PID, uptime, log tail,
   start/stop/restart buttons.
 
-### 4. Data directory import from USB (optional bootstrap)
+### 4. Data directory import (optional bootstrap)
 
 UI action in the control server: copy an existing `data/` directory (containing `torrents.db`
-plus bloom/auxiliary files) from a user-selected USB folder into the crawler's internal
-working dir via the SAF gateway, with progress reporting. Run `--check-database` after import
-to validate integrity.
+plus bloom/auxiliary files) into the crawler's internal working dir, with progress reporting
+and integrity validation. Two sources are supported:
 
-- Uses the Stage 03 SAF gateway for the USB read side.
-- Copies to `filesDir/crawler/data/` (temp dir + rename for atomicity).
-- Avoids the cold-start bootstrap abort on first launch if the user has an existing DB.
-- Warn and block if the crawler is currently running (never copy a live WAL DB).
+**4a. USB import (via SAF gateway)**
+- User selects the `data/` directory on their USB device via the SAF directory picker.
+- Kotlin reads each file through the SAF gateway (Stage 03) and streams it to a staging
+  area at `filesDir/crawler/data.import/`.
+- Expected files: `torrents.db`, `torrents.db-wal` (optional), `bloom_filter.bin`,
+  `failure_bloom.bin`, `rclone_backup_ids.txt` (optional), `ssh_backup_ids.txt` (optional).
+  Reject the import if `torrents.db` is missing or if unexpected top-level entries are found.
+- Validate: open `torrents.db` with the Android SQLite API (read-only) and check that the
+  `torrents`, `torrent_files`, and `path_prefixes` tables exist and are non-empty. Reject
+  blobs, executables, or files > 20 GB.
+- On validation pass, atomically rename `data.import/` → `data/`.
+
+**4b. SSH import**
+- User provides SSH host, user, port, key path (or password), and remote `data/` path via the
+  setup/import UI.
+- Kotlin exec's `librclone.so` (already available after Stage 09 §2) with the `sftp` backend
+  to list the remote directory and copy files into `filesDir/crawler/data.import/`.
+  Alternatively, exec `libssh.so` / use JSch if rclone sftp is sufficient — prefer rclone to
+  avoid a second SSH binary.
+- Apply the same validation (table existence, file allow-list, size cap) before atomic rename.
+- SSH import is **Android-only disabled by default** and enabled via the import UI explicitly;
+  it does not require SSH backup to be configured.
+
+**Common rules for both sources:**
+- Block import if the crawler is currently running (never copy into a live WAL DB).
+- Run `dht_crawler --check-database` after the atomic rename to confirm integrity; roll back
+  (delete `data/`) and surface the error if it fails.
+- Show per-file progress (file name, size, bytes copied) during transfer.
+- The import UI lives in the crawler control panel (Stage 10), reachable even before first
+  crawler start, so a cold-start user can seed the DB immediately.
 
 ## Key decisions & gotchas
 
@@ -92,12 +117,19 @@ to validate integrity.
   before copying `data/torrents.db`, or use SQLite online backup.
 - **dht_crawler has no USB access** (it runs on internal storage only; see Stage 00). The
   `backup_path` daily-copy option cannot target USB — point it at internal storage.
+- **SSH import uses rclone sftp**, not a raw `ssh` binary, to avoid an extra dependency and to
+  reuse the `librclone.so` already shipped. Configure sftp connection from the import UI; no
+  persistent rclone remote is needed for a one-off import.
+- **Import validation is mandatory.** Never blindly copy whatever directory the user provides.
+  Reject imports that fail the table-existence check or contain unexpected files.
 
 ## Out of scope (later stages)
 
 - rclone configuration, backup scheduling, and the binary-resolution patch for the crawler's
-  own `system()` backup calls (Stage 08).
-- Backup and crawler settings in the full web UI (Stage 09).
+  own `system()` backup calls (Stage 11).
+- USB SAF external backup backend (Stage 12 — build-flag gated, applied as a patch).
+- SSH backup download and restore (Stage 12).
+- Backup and crawler settings in the full web UI (Stage 10).
 
 ## Acceptance test
 
@@ -107,5 +139,7 @@ to validate integrity.
 - The crawler's HTTP search UI is reachable at `http://<device-ip>:8080` on the LAN.
 - `kill` the crawler process → the supervisor restarts it within the backoff window; the
   restart event is visible in the control page log.
-- *(If data import is exercised)* Importing a real `data/torrents.db` from USB populates the
-  crawler's internal DB and `--check-database` passes.
+- *(If USB data import is exercised)* Importing a real `data/torrents.db` from USB populates
+  the crawler's internal DB and `--check-database` passes.
+- *(If SSH data import is exercised)* Importing via rclone sftp completes, validates, and the
+  crawler starts on the imported DB with `--check-database` passing.
