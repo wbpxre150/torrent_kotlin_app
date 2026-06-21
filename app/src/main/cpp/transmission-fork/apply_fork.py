@@ -181,33 +181,71 @@ def main():
         with open(log_cc, "w", encoding="utf-8") as f:
             f.write(text)
 
-    # 6. Patch top-level CMakeLists.txt: pass the Android pthreads workaround
-    #    into the libevent ExternalProject sub-build so libevent keeps thread
-    #    support ENABLED. evhttp/event_active must be thread-safe across the
-    #    session thread and callers of run_in_session_thread; disabling threads
-    #    (the previous EVENT__DISABLE_THREAD_SUPPORT:BOOL=ON) left the event
-    #    base with no lock callbacks, so cross-thread event_active wakes from
-    #    tr_session_thread_impl::queue() were lost and start_server() never
-    #    ran, leaving RPC port 9091 unbound.
-    #    Bionic provides pthreads in libc (no -lpthread); pre-setting
-    #    CMAKE_USE_PTHREADS_INIT / CMAKE_THREAD_LIBS_INIT mirrors the vars
-    #    forced for transmission's own find_package(Threads) in
-    #    app/build.gradle.kts and satisfies libevent's
-    #    `if (NOT CMAKE_USE_PTHREADS_INIT)` guard in its CMakeLists.txt.
+    # 6. Patch top-level CMakeLists.txt: pre-seed EVENT__HAVE_PTHREADS so the
+    #    libevent sub-build can skip find_package(Threads) (which fails on
+    #    Android cross-compilation when inheriting parent's
+    #    CMAKE_USE_PTHREADS_INIT=1).
     top_cmake = os.path.join(src_root, "CMakeLists.txt")
     with open(top_cmake, "r", encoding="utf-8") as f:
         text = f.read()
-    if "ANDROID fork: pthreads workaround for libevent sub-build" not in text:
+    if "ANDROID fork: fix libevent thread detection" not in text:
         old = "-DEVENT__LIBRARY_TYPE:STRING=STATIC)"
         new = (
             "-DEVENT__LIBRARY_TYPE:STRING=STATIC\n"
-            "        -DCMAKE_USE_PTHREADS_INIT:BOOL=1\n"
-            "        -DCMAKE_THREAD_LIBS_INIT:STRING=\n"
-            "        # ANDROID fork: pthreads workaround for libevent sub-build\n"
+            "        -DEVENT__HAVE_PTHREADS:BOOL=ON\n"
+            "        # ANDROID fork: fix libevent thread detection\n"
             ")"
         )
         text = text.replace(old, new, 1)
         with open(top_cmake, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    # 6b. Patch libevent/CMakeLists.txt: on Android, skip find_package(Threads)
+    #    and use EVENT__HAVE_PTHREADS pre-seed. The parent build forces
+    #    CMAKE_USE_PTHREADS_INIT=1 which breaks the sub-build's thread
+    #    detection. Bionic has pthreads in libc (no -lpthread needed).
+    le_cmake = os.path.join(src_root, "third-party", "libevent", "CMakeLists.txt")
+    with open(le_cmake, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: skip find_package(Threads) for libevent" not in text:
+        old = (
+            "if (NOT EVENT__DISABLE_THREAD_SUPPORT)\n"
+            "    if (WIN32)\n"
+            "        list(APPEND SRC_CORE evthread_win32.c)\n"
+            "    else()\n"
+            "        find_package(Threads REQUIRED)\n"
+            "        if (NOT CMAKE_USE_PTHREADS_INIT)\n"
+            "            message(FATAL_ERROR\n"
+            "                    \"Failed to find Pthreads, set EVENT__DISABLE_THREAD_SUPPORT to disable\")\n"
+            "        endif()\n"
+            "\n"
+            "        set(EVENT__HAVE_PTHREADS 1)\n"
+            "        list(APPEND LIB_APPS ${CMAKE_THREAD_LIBS_INIT})\n"
+            "    endif()\n"
+            "endif()"
+        )
+        new = (
+            "if (NOT EVENT__DISABLE_THREAD_SUPPORT)\n"
+            "    if (WIN32)\n"
+            "        list(APPEND SRC_CORE evthread_win32.c)\n"
+            "    else()\n"
+            "        # ANDROID fork: skip find_package(Threads) for libevent\n"
+            "        # Bionic has pthreads in libc; CMAKE_USE_PTHREADS_INIT=1\n"
+            "        # from parent cache breaks the sub-build detection.\n"
+            "        if(NOT DEFINED EVENT__HAVE_PTHREADS)\n"
+            "            find_package(Threads REQUIRED)\n"
+            "            if (NOT CMAKE_USE_PTHREADS_INIT)\n"
+            "                message(FATAL_ERROR\n"
+            "                        \"Failed to find Pthreads, set EVENT__DISABLE_THREAD_SUPPORT to disable\")\n"
+            "            endif()\n"
+            "        endif()\n"
+            "        set(EVENT__HAVE_PTHREADS 1)\n"
+            "        list(APPEND LIB_APPS ${CMAKE_THREAD_LIBS_INIT})\n"
+            "    endif()\n"
+            "endif()"
+        )
+        text = text.replace(old, new, 1)
+        with open(le_cmake, "w", encoding="utf-8") as f:
             f.write(text)
 
     # 7. Patch file-capacity.cc: guard sys/quota.h on Android.

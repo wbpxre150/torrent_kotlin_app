@@ -369,6 +369,13 @@ tasks.register("buildTransmission") {
         }
     }
 }
+
+// Ensure buildTransmission runs before jniLibs are merged into the APK
+afterEvaluate {
+    tasks.named("mergeDebugJniLibFolders").configure {
+        dependsOn("buildTransmission")
+    }
+}
 }
 
 dependencies {
