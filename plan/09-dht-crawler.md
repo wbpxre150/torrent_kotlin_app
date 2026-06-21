@@ -1,4 +1,4 @@
-# Stage 07 — dht_crawler & rclone cross-compile, supervision & data import
+# Stage 09 — dht_crawler & rclone cross-compile, supervision & data import
 
 > **DEFERRED — post-PoC.** Do not start until the transmission-to-USB PoC (Stages 01–05) is
 > complete. dht_crawler and rclone are not needed to prove transmission writes to USB.

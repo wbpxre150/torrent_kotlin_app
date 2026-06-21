@@ -1,11 +1,11 @@
-# Stage 08 — Backups (crawler DB → network remote)
+# Stage 11 — Backups (crawler DB → network remote)
 
 > **DEFERRED — post-PoC.** This stage depends on dht_crawler being cross-compiled and
-> supervised (Stage 07). Do not start until the transmission-to-USB PoC (Stages 01–05) is
+> supervised (Stage 09). Do not start until the transmission-to-USB PoC (Stages 01–05) is
 > complete and dht_crawler has been integrated.
 
-**Builds on:** Stage 07 (dht_crawler cross-compile; rclone built & exec-proven; crawler
-running).
+**Builds on:** Stage 09 (dht_crawler cross-compile; rclone built & exec-proven; crawler
+running) and Stage 10 (crawler UI panel wired up).
 **De-risks:** off-device durability of the expensive-to-rebuild asset — the crawler's
 SQLite database — using the crawler's **existing** backup machinery where possible.
 
@@ -84,7 +84,7 @@ backup feature, with the binary-resolution problem solved.
 
 ## Out of scope (later stages)
 
-- Remote-setup / schedule UI (Stage 09).
+- Remote-setup / schedule UI (Stage 10).
 - USB-content backup (deliberately excluded).
 
 ## Acceptance test

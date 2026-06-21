@@ -148,8 +148,8 @@ The control server can reverse-proxy 8080/9091 so the user has one LAN entry poi
 
 **Additional steps unlocked post-PoC:**
 4. *(Stage 06)* **Kodi** connects to the **FTP server** (`:2121`) over wifi and streams from USB.
-5. *(Stage 07)* User opens dht_crawler UI (`:8080`), searches, copies a **magnet link** instead of sourcing it manually.
-6. *(Stage 08)* On schedule, **rclone** uploads the SQLite DB to the configured remote.
+5. *(Stage 09)* User opens dht_crawler UI (`:8080`), searches, copies a **magnet link** instead of sourcing it manually.
+6. *(Stage 11)* On schedule, **rclone** uploads the SQLite DB to the configured remote.
 
 ---
 
@@ -198,15 +198,18 @@ The control server can reverse-proxy 8080/9091 so the user has one LAN entry poi
 | Stage | File                                          | Delivers                                                  |
 |-------|-----------------------------------------------|-----------------------------------------------------------|
 | 06    | `06-ftp-server.md`                            | Wifi-only FTP serving USB to Kodi                         |
-| 07    | `07-dht-crawler.md`                           | Cross-compile dht_crawler + rclone; supervise crawler; USB data import |
-| 08    | `08-rclone-backups.md`                        | Scheduled DB backup to a network remote (depends on Stage 07) |
-| 09    | `09-unified-settings-and-control.md`          | Full settings/control web UI, first-run wizard            |
-| 10    | `10-resilience-and-startup.md`                | Boot start, 24/7 survival, crash recovery, OEM/Doze       |
+| 07    | `07-unified-settings-and-control.md`          | Settings/control web UI + first-run wizard (crawler panel stubbed) |
+| 08    | `08-resilience-and-startup.md`                | Boot start, 24/7 survival, crash recovery, OEM/Doze       |
+| 09    | `09-dht-crawler.md`                           | Cross-compile dht_crawler + rclone; supervise crawler; USB data import |
+| 10    | `10-crawler-ui-panel.md`                      | Wire up crawler & rclone UI panels (stubs from Stage 07)  |
+| 11    | `11-rclone-backups.md`                        | Scheduled DB backup to a network remote (depends on Stage 09) |
 
 Build the PoC stages in order first. Stage 05 is the highest-risk, highest-value stage —
 Stages 03 and 04 exist to de-risk it (prove the SAF fd works; prove the daemon builds).
-Stage 07 (dht_crawler) and Stage 08 (rclone backups) are not needed to prove transmission
-writes to USB and should be built after Stage 06.
+The UI (Stage 07) and resilience hardening (Stage 08) are built before the DHT crawler
+so the transmission daemon controller app is complete and testable end-to-end first.
+Stage 09 (dht_crawler) bolts onto the finished app; Stage 10 wires its UI panel;
+Stage 11 adds scheduled backups.
 
 ---
 
@@ -227,8 +230,8 @@ writes to USB and should be built after Stage 06.
 
 ### Post-PoC risks (address after Stage 05 acceptance test passes)
 
-- **Android 15 `dataSync` FGS ~6h/24h cap** — breaks always-on. Mitigation in Stage 09
-  (likely `specialUse` FGS for sideload). Decide before Stage 09.
-- **OEM background killers** — no API fix; user whitelists (Stage 09).
-- **Cross-compiling dht_crawler + deps** (libuv/sqlite/openssl) for arm64 — Stage 07.
+- **Android 15 `dataSync` FGS ~6h/24h cap** — breaks always-on. Mitigation in Stage 07
+  (likely `specialUse` FGS for sideload). Decide before Stage 07.
+- **OEM background killers** — no API fix; user whitelists (Stage 07).
+- **Cross-compiling dht_crawler + deps** (libuv/sqlite/openssl) for arm64 — Stage 09.
 - **Distribution is sideload-only** assumed (Play policy would fight the FGS/battery needs).
