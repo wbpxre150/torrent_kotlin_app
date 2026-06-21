@@ -181,14 +181,31 @@ def main():
         with open(log_cc, "w", encoding="utf-8") as f:
             f.write(text)
 
-    # 6. Patch top-level CMakeLists.txt: disable libevent thread support to avoid
-    #    FindThreads failure on Android cross-compile.
+    # 6. Patch top-level CMakeLists.txt: pass the Android pthreads workaround
+    #    into the libevent ExternalProject sub-build so libevent keeps thread
+    #    support ENABLED. evhttp/event_active must be thread-safe across the
+    #    session thread and callers of run_in_session_thread; disabling threads
+    #    (the previous EVENT__DISABLE_THREAD_SUPPORT:BOOL=ON) left the event
+    #    base with no lock callbacks, so cross-thread event_active wakes from
+    #    tr_session_thread_impl::queue() were lost and start_server() never
+    #    ran, leaving RPC port 9091 unbound.
+    #    Bionic provides pthreads in libc (no -lpthread); pre-setting
+    #    CMAKE_USE_PTHREADS_INIT / CMAKE_THREAD_LIBS_INIT mirrors the vars
+    #    forced for transmission's own find_package(Threads) in
+    #    app/build.gradle.kts and satisfies libevent's
+    #    `if (NOT CMAKE_USE_PTHREADS_INIT)` guard in its CMakeLists.txt.
     top_cmake = os.path.join(src_root, "CMakeLists.txt")
     with open(top_cmake, "r", encoding="utf-8") as f:
         text = f.read()
-    if "ANDROID fork: disable event threads" not in text:
+    if "ANDROID fork: pthreads workaround for libevent sub-build" not in text:
         old = "-DEVENT__LIBRARY_TYPE:STRING=STATIC)"
-        new = "-DEVENT__LIBRARY_TYPE:STRING=STATIC\n        -DEVENT__DISABLE_THREAD_SUPPORT:BOOL=ON\n        # ANDROID fork: disable event threads\n)"
+        new = (
+            "-DEVENT__LIBRARY_TYPE:STRING=STATIC\n"
+            "        -DCMAKE_USE_PTHREADS_INIT:BOOL=1\n"
+            "        -DCMAKE_THREAD_LIBS_INIT:STRING=\n"
+            "        # ANDROID fork: pthreads workaround for libevent sub-build\n"
+            ")"
+        )
         text = text.replace(old, new, 1)
         with open(top_cmake, "w", encoding="utf-8") as f:
             f.write(text)
@@ -251,29 +268,6 @@ def main():
         with open(plat, "w", encoding="utf-8") as f:
             f.write(text)
 
-    # 9. Patch session-thread.cc: guard evthread code behind
-    #    EVENT__DISABLE_THREAD_SUPPORT so the build works when libevent
-    #    thread support is disabled (Android cross-compile).
-    st = os.path.join(libt, "session-thread.cc")
-    with open(st, "r", encoding="utf-8") as f:
-        text = f.read()
-    if "ANDROID fork: guard evthread" not in text:
-        # Guard #include <event2/thread.h>
-        text = text.replace(
-            "#include <event2/thread.h>",
-            "#include <event2/thread.h>\n// ANDROID fork: guard evthread when thread support disabled",
-            1,
-        )
-        # Wrap the tr_evthread_init_helpers namespace
-        old = "#endif\n}\n\nvoid init_evthreads_once()\n{\n    evthread_lock_callbacks constexpr LockCbs{"
-        new = "#endif\n}\n\nvoid init_evthreads_once()\n{\n#ifndef EVENT__DISABLE_THREAD_SUPPORT\n    // ANDROID fork: guard evthread types when thread support disabled\n    evthread_lock_callbacks constexpr LockCbs{"
-        text = text.replace(old, new, 1)
-        # Close the guard before the namespace close
-        old2 = "    evthread_set_id_callback(thread_current_id);\n}\n\n} // namespace tr_evthread_init_helpers"
-        new2 = "    evthread_set_id_callback(thread_current_id);\n#endif\n}\n\n} // namespace tr_evthread_init_helpers"
-        text = text.replace(old2, new2, 1)
-        with open(st, "w", encoding="utf-8") as f:
-            f.write(text)
     print("apply_fork: OK")
 
 if __name__ == "__main__":
