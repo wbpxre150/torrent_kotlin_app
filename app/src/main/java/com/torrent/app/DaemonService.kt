@@ -316,7 +316,12 @@ class DaemonService : Service() {
             nativeLibraryDir = nativeLibDir,
             workDir = workDir,
             logDir = logDir,
-            extraEnv = mapOf("TORRENT_SAF_SOCKET" to safSocketFile.absolutePath),
+            extraEnv = mapOf(
+                "TORRENT_SAF_SOCKET" to safSocketFile.absolutePath,
+                // libtransmission uses $TMPDIR (fallback /tmp) for the session-id
+                // file and other temp files; /tmp is not writable on Android.
+                "TMPDIR" to File(filesDir, "tmp").apply { mkdirs() }.absolutePath,
+            ),
             selfLogging = true,
         )
         transmission.start()

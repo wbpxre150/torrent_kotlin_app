@@ -50,12 +50,14 @@ class ProcessSupervisor(
         // Grace period between destroy() and destroyForcibly()
         private const val GRACE_MS = 5000L
 
-        // Uptime after which backoff resets
-        private const val RESET_UPTIME_MS = 60000L
-
         // Max log file size before rotation (1 MB)
         private const val MAX_LOG_BYTES = 1_000_000L
         private const val LOG_ROTATIONS = 1
+
+        // Reset backoff to its fastest value only on a clean exit. A crash
+        // (non-zero exit, e.g. SIGSEGV=139) keeps the current index so a crash
+        // loop escalates toward BACKOFF_CAP_MS instead of resetting every cycle.
+        internal fun shouldResetBackoff(exitCode: Int): Boolean = exitCode == 0
     }
 
     private val _status = MutableStateFlow(ProcessStatus(label = label, state = ProcessState.STOPPED))
@@ -144,12 +146,16 @@ class ProcessSupervisor(
 
             if (stopping) break
 
-            // Process exited — check if it ran long enough to reset backoff
+            // Process exited. Reset backoff only on a clean exit (exitCode == 0);
+            // a crash keeps the index climbing so a crash loop escalates toward
+            // BACKOFF_CAP_MS instead of resetting to 1s every cycle. Previously
+            // backoff reset after 60s of uptime regardless of exit code, so a
+            // daemon that ran ~2.5 min then crashed never escalated.
             val uptime = System.currentTimeMillis() - now
-            if (uptime >= RESET_UPTIME_MS) {
+            val exitCode = if (exited) proc.exitValue() else -1
+            if (shouldResetBackoff(exitCode)) {
                 backoffIndex = 0
             }
-            val exitCode = if (exited) proc.exitValue() else -1
             Log.w(TAG, "[$label] exited code=$exitCode uptime=${uptime}ms")
 
             val delayMs = backoffMs(backoffIndex)
