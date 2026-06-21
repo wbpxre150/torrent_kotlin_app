@@ -65,16 +65,35 @@ class SafStorageGateway(
         } ?: -1L
     }
 
+    @Synchronized
     override fun renameDoc(relPath: String, newName: String): Boolean {
-        val parent = SafPaths.splitParent(relPath) ?: return false
-        val uri = resolveUri(relPath) ?: return false
+        val n = SafPaths.normalize(relPath)
+        val parent = SafPaths.splitParent(n) ?: return false
+        val srcUri = resolveUri(n) ?: return false
+        val targetPath = if (parent.first.isEmpty()) newName else "${parent.first}/$newName"
         return try {
-            val renamed = DocumentsContract.renameDocument(resolver, uri, newName)
-            if (renamed != null) {
-                cache.remove(relPath)
-                cache[parent.first + if (parent.first.isEmpty()) "" else "/" + newName] = renamed
-                true
-            } else false
+            // SAF's renameDocument auto-appends " (1)" on a name collision instead of
+            // overwriting (POSIX rename replaces the target). Emulate POSIX: remove an
+            // existing target first so the rename lands on the exact requested name and
+            // transmission does not silently end up referencing a phantom " (1)" file
+            // (mirrors ensureDocument collision handling, Bug 4). @Synchronized keeps the
+            // check-delete-rename atomic w.r.t. other gateway calls, so no interleave can
+            // resurrect the target between the delete and the rename.
+            resolveUri(targetPath)?.let { existing ->
+                try {
+                    DocumentsContract.deleteDocument(resolver, existing)
+                } catch (e: Exception) {
+                    Log.e(TAG, "renameDoc: cannot remove existing target '$targetPath': ${e.message}")
+                    return false
+                }
+                cache.keys.filter { it == targetPath || it.startsWith("$targetPath/") }
+                    .forEach { cache.remove(it) }
+            }
+            val renamed = DocumentsContract.renameDocument(resolver, srcUri, newName)
+                ?: return false
+            cache.remove(n)
+            cache[targetPath] = renamed
+            true
         } catch (e: Exception) { Log.e(TAG, "renameDoc: ${e.message}"); false }
     }
 
