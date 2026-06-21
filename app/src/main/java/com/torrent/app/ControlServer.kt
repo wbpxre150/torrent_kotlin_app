@@ -9,7 +9,9 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import kotlinx.coroutines.flow.StateFlow
 import java.net.URLDecoder
+import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
+import com.torrent.app.config.TransmissionApplyMode
 
 class ControlServer(
     private val tokenManager: TokenManager,
@@ -26,6 +28,8 @@ class ControlServer(
     private val restartDaemon: (String) -> Boolean,
     private val stopDaemon: (String) -> Boolean,
     private val startDaemon: (String) -> Boolean,
+    private val applyTransmission: (com.torrent.app.config.TransmissionSettings, Boolean) -> com.torrent.app.config.ApplyResult,
+    private val applyFtp: (com.torrent.app.config.FtpSettings) -> com.torrent.app.config.ApplyResult,
     private val port: Int = 8090,
 ) {
     @Volatile private var server: EmbeddedServer<*, *>? = null
@@ -118,6 +122,62 @@ class ControlServer(
                             append(",\"wifiUp\":").append(f.wifiUp).append("}")
                         }
                         call.respondText(json, ContentType.Application.Json)
+                    }
+                    get("settings/transmission") {
+                        val msg = call.request.queryParameters["msg"]
+                        val ok = call.request.queryParameters["ok"]?.toBoolean() ?: false
+                        call.respondText(buildTransmissionPanel(msg, ok), ContentType.Text.Html)
+                    }
+                    post("settings/transmission") {
+                        val form = parseForm(call.receiveText())
+                        val current = loadConfig().transmission
+                        val password = form["password"]?.takeIf { it.isNotEmpty() } ?: current.password
+                        val s = com.torrent.app.config.TransmissionSettings(
+                            username = form["username"] ?: current.username,
+                            password = password,
+                            peerPort = form["peerPort"]?.toIntOrNull() ?: current.peerPort,
+                            speedLimitDown = form["speedLimitDown"]?.toIntOrNull() ?: current.speedLimitDown,
+                            speedLimitUp = form["speedLimitUp"]?.toIntOrNull() ?: current.speedLimitUp,
+                            altSpeedDown = form["altSpeedDown"]?.toIntOrNull() ?: current.altSpeedDown,
+                            altSpeedUp = form["altSpeedUp"]?.toIntOrNull() ?: current.altSpeedUp,
+                            downloadSubpath = form["downloadSubpath"] ?: current.downloadSubpath,
+                        )
+                        val liveOnly = !TransmissionApplyMode.needsRestart(current, s)
+                        val r = applyTransmission(s, liveOnly)
+                        val token = parseCookieToken(call.request.headers["Cookie"]) ?: call.request.queryParameters["token"] ?: ""
+                        val mode = if (liveOnly) "live+RPC" else "restart"
+                        call.respondRedirect("/settings/transmission?msg=${urlEnc(r.message + " ($mode)")}&ok=${r.ok}&token=$token")
+                    }
+
+                    get("settings/ftp") {
+                        val msg = call.request.queryParameters["msg"]
+                        val ok = call.request.queryParameters["ok"]?.toBoolean() ?: false
+                        call.respondText(buildFtpPanel(msg, ok), ContentType.Text.Html)
+                    }
+                    post("settings/ftp") {
+                        val form = parseForm(call.receiveText())
+                        val current = loadConfig().ftp
+                        val password = form["password"]?.takeIf { it.isNotEmpty() } ?: current.password
+                        val s = com.torrent.app.config.FtpSettings(
+                            username = form["username"] ?: current.username,
+                            password = password,
+                            port = form["port"]?.toIntOrNull() ?: current.port,
+                            wifiOnly = form.containsKey("wifiOnly"),
+                            exposedRoot = form["exposedRoot"] ?: current.exposedRoot,
+                        )
+                        val r = applyFtp(s)
+                        val token = parseCookieToken(call.request.headers["Cookie"]) ?: call.request.queryParameters["token"] ?: ""
+                        call.respondRedirect("/settings/ftp?msg=${urlEnc(r.message)}&ok=${r.ok}&token=$token")
+                    }
+
+                    get("settings/storage") {
+                        call.respondText(buildStoragePanel(), ContentType.Text.Html)
+                    }
+                    get("settings/crawler") {
+                        call.respondText(buildStubPanel("DHT crawler", "Available after Stage 10."), ContentType.Text.Html)
+                    }
+                    get("settings/rclone") {
+                        call.respondText(buildStubPanel("Backups (rclone)", "Available after Stage 11."), ContentType.Text.Html)
                     }
                 }
             }
@@ -306,6 +366,103 @@ class ControlServer(
         """.trimIndent()
     }
 
+    // ── settings panel builders ───────────────────────────────────────────
+
+    private fun buildTransmissionPanel(msg: String?, ok: Boolean): String {
+        val s = loadConfig().transmission
+        val banner = if (msg != null)
+            """<div class="${if (ok) "ok" else "err"}">${esc(msg)}</div>""" else ""
+        return """
+            <!DOCTYPE html><html><head><title>Transmission settings</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <style>$panelCss</style></head><body>
+            <h1>Transmission settings</h1>$banner
+            <form method="post" action="/settings/transmission">
+              <label>RPC username<input name="username" value="${esc(s.username)}"></label>
+              <label>RPC password (leave blank to keep)<input type="password" name="password" placeholder="unchanged"></label>
+              <label>Peer port<input name="peerPort" value="${s.peerPort}"></label>
+              <fieldset><legend>Speed limits (KB/s, 0 = unlimited)</legend>
+                <label>Down<input name="speedLimitDown" value="${s.speedLimitDown}"></label>
+                <label>Up<input name="speedLimitUp" value="${s.speedLimitUp}"></label>
+                <label>Alt down<input name="altSpeedDown" value="${s.altSpeedDown}"></label>
+                <label>Alt up<input name="altSpeedUp" value="${s.altSpeedUp}"></label>
+              </fieldset>
+              <label>Download subpath (under USB root; blank = root)<input name="downloadSubpath" value="${esc(s.downloadSubpath)}"></label>
+              <button type="submit">Apply</button>
+            </form>
+            <p class="meta">Speed-only changes apply live via RPC. Username/password/peer-port/subpath changes restart transmission.</p>
+            <p><a href="/">Back to dashboard</a></p>
+            </body></html>
+        """.trimIndent()
+    }
+
+    private fun buildFtpPanel(msg: String?, ok: Boolean): String {
+        val s = loadConfig().ftp
+        val banner = if (msg != null)
+            """<div class="${if (ok) "ok" else "err"}">${esc(msg)}</div>""" else ""
+        val checked = if (s.wifiOnly) "checked" else ""
+        return """
+            <!DOCTYPE html><html><head><title>FTP settings</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <style>$panelCss</style></head><body>
+            <h1>FTP settings</h1>$banner
+            <form method="post" action="/settings/ftp">
+              <label>Username<input name="username" value="${esc(s.username)}"></label>
+              <label>Password (leave blank to keep)<input type="password" name="password" placeholder="unchanged"></label>
+              <label>Port<input name="port" value="${s.port}"></label>
+              <label class="row"><input type="checkbox" name="wifiOnly" $checked> WiFi only</label>
+              <label>Exposed root (under USB root; blank = root)<input name="exposedRoot" value="${esc(s.exposedRoot)}"></label>
+              <button type="submit">Apply</button>
+            </form>
+            <p><a href="/">Back to dashboard</a></p>
+            </body></html>
+        """.trimIndent()
+    }
+
+    private fun buildStoragePanel(): String {
+        val s = safStatus()
+        val free = usbFreeSpace()
+        val f = ftpStatus()
+        return """
+            <!DOCTYPE html><html><head><title>Storage</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <style>$panelCss</style></head><body>
+            <h1>USB storage</h1>
+            <p class="meta">Granted: <strong>${s.granted}</strong></p>
+            <p class="meta">Tree: <code>${esc(s.treeUri ?: "—")}</code></p>
+            <p class="meta">Free: <strong>${free?.let { formatBytes(it) } ?: "unknown"}</strong></p>
+            <p class="meta">WiFi: <strong>${if (f.wifiUp) "up" else "down"}</strong></p>
+            <div class="warn">To re-grant or change the USB drive, open the Torrent App on the
+            Android device and tap <strong>Grant USB</strong>. The download subpath is set in
+            <a href="/settings/transmission">Transmission settings</a>.</div>
+            <p><a href="/">Back to dashboard</a></p>
+            </body></html>
+        """.trimIndent()
+    }
+
+    private fun buildStubPanel(title: String, note: String): String = """
+        <!DOCTYPE html><html><head><title>$title</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>$panelCss</style></head><body>
+        <h1>$title</h1>
+        <div class="warn">$note This panel is a placeholder.</div>
+        <p><a href="/">Back to dashboard</a></p>
+        </body></html>
+    """.trimIndent()
+
+    private val panelCss = """
+        body{font-family:system-ui,sans-serif;max-width:640px;margin:2em auto;padding:0 1em}
+        label{display:block;margin:.6em 0} input{display:block;width:100%;padding:6px;box-sizing:border-box;margin-top:2px}
+        fieldset{margin:.8em 0;border:1px solid #ddd;border-radius:4px}
+        fieldset label{display:inline-block;width:auto;vertical-align:middle} fieldset input{display:inline;width:auto}
+        label.row{display:block} .meta{color:#666;font-size:.9em}
+        .ok{background:#d4edda;color:#155724;padding:.6em;border-radius:4px;margin:1em 0}
+        .err{background:#f8d7da;color:#721c24;padding:.6em;border-radius:4px;margin:1em 0}
+        .warn{background:#fff3cd;color:#856404;padding:.6em;border-radius:4px;margin:1em 0}
+        button{padding:.5em 1em;margin-top:1em}
+    """.trimIndent()
+
+    private fun urlEnc(s: String): String = URLEncoder.encode(s, "UTF-8")
     // ── helpers ─────────────────────────────────────────────────────────────
 
     private fun formatUptime(ms: Long): String {

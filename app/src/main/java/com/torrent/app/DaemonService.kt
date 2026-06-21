@@ -90,6 +90,8 @@ class DaemonService : Service() {
             restartDaemon = ::restartDaemon,
             stopDaemon = ::stopDaemon,
             startDaemon = ::startDaemon,
+            applyTransmission = ::applyTransmissionSettings,
+            applyFtp = ::applyFtpSettings,
 )
         wifiGateMonitor = WifiGateMonitor(this)
         gateway?.let {
