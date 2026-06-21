@@ -24,6 +24,7 @@ class SafStorageGateway(
 
     private val resolver = context.contentResolver
     private val cache = ConcurrentHashMap<String, Uri>()
+    private var cachedFreeSpace: Pair<Long, Long>? = null
 
     init {
         // Seed the cache with the tree root.
@@ -114,28 +115,48 @@ class SafStorageGateway(
     }
 
     override fun availableBytes(): Long {
-        val authority = treeUri.authority ?: return Long.MAX_VALUE
-        val treeRootId = DocumentsContract.getTreeDocumentId(treeUri).trimEnd(':')
-        val rootsUri = DocumentsContract.buildRootsUri(authority)
+        val now = System.currentTimeMillis()
+        cachedFreeSpace?.let { (value, ts) ->
+            if (now - ts < FREE_SPACE_TTL_MS) return value
+        }
+        val free = probeFreeSpaceViaFd()
+        if (free != Long.MAX_VALUE) {
+            cachedFreeSpace = free to now
+        }
+        return free
+    }
+
+    /**
+     * Read free bytes via Os.fstatvfs on a SAF-granted file descriptor.
+     *
+     * COLUMN_AVAILABLE_BYTES is unpopulated for removable volumes on AOSP
+     * (reportAvailableBytes stays false), and StorageStatsManager has no UUID
+     * for portable volumes. A probe document is created in the tree root so we
+     * can open it and fstatvfs its fd, which returns the free space of the
+     * exact filesystem the tree lives on. The probe is deleted in [finally].
+     */
+    private fun probeFreeSpaceViaFd(): Long {
+        val rootUri = cache[""] ?: return Long.MAX_VALUE
+        var pfd: ParcelFileDescriptor? = null
+        var probeUri: Uri? = null
         return try {
-            resolver.query(
-                rootsUri,
-                arrayOf(
-                    DocumentsContract.Root.COLUMN_DOCUMENT_ID,
-                    DocumentsContract.Root.COLUMN_AVAILABLE_BYTES),
-                null, null, null)?.use { c ->
-                    val docIdIdx = c.getColumnIndexOrThrow(DocumentsContract.Root.COLUMN_DOCUMENT_ID)
-                    val availIdx = c.getColumnIndexOrThrow(DocumentsContract.Root.COLUMN_AVAILABLE_BYTES)
-                    while (c.moveToNext()) {
-                        if (c.getString(docIdIdx) == treeRootId) {
-                            return@use if (c.isNull(availIdx)) Long.MAX_VALUE else c.getLong(availIdx)
-                        }
-                    }
-                    Long.MAX_VALUE
-                } ?: Long.MAX_VALUE
+            probeUri = DocumentsContract.createDocument(
+                resolver, rootUri, "application/octet-stream", FREE_SPACE_PROBE_NAME)
+                ?: return Long.MAX_VALUE
+            pfd = resolver.openFileDescriptor(probeUri, "r")
+                ?: return Long.MAX_VALUE
+            val st = Os.fstatvfs(pfd.fileDescriptor)
+            val free = st.f_bavail * st.f_frsize
+            if (free < 0) Long.MAX_VALUE else free
         } catch (e: Exception) {
-            Log.w(TAG, "availableBytes unavailable, returning sentinel: ${e.message}")
+            Log.w(TAG, "availableBytes fstatvfs failed: ${e.message}")
             Long.MAX_VALUE
+        } finally {
+            try { pfd?.close() } catch (_: Exception) {}
+            probeUri?.let { u ->
+                try { DocumentsContract.deleteDocument(resolver, u) }
+                catch (e: Exception) { Log.w(TAG, "availableBytes: could not delete probe: ${e.message}") }
+            }
         }
     }
 
@@ -291,5 +312,7 @@ class SafStorageGateway(
 
     companion object {
         private const val TAG = "SafStorageGateway"
+        private const val FREE_SPACE_TTL_MS = 5_000L
+        private const val FREE_SPACE_PROBE_NAME = ".tr-freespace-probe"
     }
 }
