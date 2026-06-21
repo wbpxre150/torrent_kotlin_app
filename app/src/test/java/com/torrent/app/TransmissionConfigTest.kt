@@ -19,8 +19,9 @@ class TransmissionConfigTest {
         assertTrue(json.contains("\"rpc-password\": \"secret123\""))
         assertTrue(json.contains("\"rpc-whitelist-enabled\": false"))
         assertTrue(json.contains("\"download-dir\": \"/data/user/0/com.torrent.app/files/transmission/downloads\""))
-        assertTrue(json.contains("\"incomplete-dir\": \"/data/user/0/com.torrent.app/files/transmission/downloads\""))
-        assertTrue(json.contains("\"incomplete-dir-enabled\": true"))
+        assertTrue(json.contains("\"incomplete-dir-enabled\": false"))
+        assertTrue(json.contains("\"rename-partial-files\": false"))
+        assertFalse(json.contains("\"incomplete-dir\""))
         assertTrue(json.contains("\"watch-dir-enabled\": false"))
     }
 
@@ -39,10 +40,8 @@ class TransmissionConfigTest {
     @Test fun usbDownloadDir_isSentinel() {
         assertEquals("/saf/usb", TransmissionConfig.USB_DOWNLOAD_DIR)
     }
-
-    @Test fun buildSettingsJson_usesUsbSentinelForDownloadAndIncomplete() {
+    @Test fun buildSettingsJson_usesUsbSentinelForDownloadDir() {
         val json = TransmissionConfig.buildSettingsJson("u", "p", TransmissionConfig.USB_DOWNLOAD_DIR)
         assertTrue(json.contains("\"download-dir\": \"/saf/usb\""))
-        assertTrue(json.contains("\"incomplete-dir\": \"/saf/usb\""))
     }
 }
