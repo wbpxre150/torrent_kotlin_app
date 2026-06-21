@@ -115,7 +115,7 @@ class SafStorageGateway(
 
     override fun availableBytes(): Long {
         val authority = treeUri.authority ?: return Long.MAX_VALUE
-        val treeRootId = DocumentsContract.getTreeDocumentId(treeUri)
+        val treeRootId = DocumentsContract.getTreeDocumentId(treeUri).trimEnd(':')
         val rootsUri = DocumentsContract.buildRootsUri(authority)
         return try {
             resolver.query(

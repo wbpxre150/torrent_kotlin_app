@@ -48,9 +48,9 @@ class SafStorageGatewayAvailableBytesTest {
             arrayOf(
                 DocumentsContract.Root.COLUMN_DOCUMENT_ID,
                 DocumentsContract.Root.COLUMN_AVAILABLE_BYTES))
-        cursor.newRow().add("primary:").add(50_000_000_000L)
-        cursor.newRow().add(treeRootId).add(7_800_000_000_000L)
-        cursor.newRow().add("1234-ABCD:").add(1_000_000_000_000L)
+        cursor.newRow().add("primary").add(50_000_000_000L)
+        cursor.newRow().add("6E6B-757C").add(7_800_000_000_000L)
+        cursor.newRow().add("1234-ABCD").add(1_000_000_000_000L)
 
         `when`(resolver.query(any<Uri>(), any<Array<String>>(), any(), any(), any()))
             .thenReturn(cursor)
@@ -79,7 +79,7 @@ class SafStorageGatewayAvailableBytesTest {
             arrayOf(
                 DocumentsContract.Root.COLUMN_DOCUMENT_ID,
                 DocumentsContract.Root.COLUMN_AVAILABLE_BYTES))
-        cursor.newRow().add("primary:").add(50_000_000_000L)
+        cursor.newRow().add("primary").add(50_000_000_000L)
 
         `when`(resolver.query(any<Uri>(), any<Array<String>>(), any(), any(), any()))
             .thenReturn(cursor)
@@ -108,7 +108,7 @@ class SafStorageGatewayAvailableBytesTest {
             arrayOf(
                 DocumentsContract.Root.COLUMN_DOCUMENT_ID,
                 DocumentsContract.Root.COLUMN_AVAILABLE_BYTES))
-        cursor.newRow().add(treeRootId).add(null)
+        cursor.newRow().add("6E6B-757C").add(null)
 
         `when`(resolver.query(any<Uri>(), any<Array<String>>(), any(), any(), any()))
             .thenReturn(cursor)
