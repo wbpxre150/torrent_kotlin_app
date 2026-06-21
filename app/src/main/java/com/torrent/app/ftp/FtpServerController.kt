@@ -5,6 +5,7 @@ import com.torrent.app.storage.SafStorageGateway
 import org.apache.ftpserver.FtpServer
 import org.apache.ftpserver.FtpServerFactory
 import org.apache.ftpserver.DataConnectionConfigurationFactory
+import org.apache.ftpserver.command.CommandFactory
 import org.apache.ftpserver.listener.ListenerFactory
 import java.io.FilterInputStream
 import java.io.IOException
@@ -74,6 +75,15 @@ class FtpServerController(
                 addListener("default", listener)
                 setUserManager(FtpUserManager(creds.username(), creds.password()))
                 setFileSystem(SafFtpFileSystemFactory(fileSource, streamProvider))
+                val defaultCmds = commandFactory
+                setCommandFactory(CommandFactory { name ->
+                    val stock = defaultCmds.getCommand(name)
+                    when (name?.uppercase()) {
+                        "LIST", "NLST", "MLSD" ->
+                            LiteralPathListingCommand(stock!!)
+                        else -> stock
+                    }
+                })
             }
             val s = factory.createServer()
             s.start()
