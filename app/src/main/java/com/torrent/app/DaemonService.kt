@@ -82,7 +82,15 @@ class DaemonService : Service() {
             safStatus = ::getSafStatus,
             runSafValidation = ::runSafValidation,
             ftpStatus = ::getFtpStatus,
-        )
+            loadConfig = ::loadConfig,
+            wizardCompleted = { configStore.load().wizardCompleted },
+            rpcSummary = ::transmissionRpcSummary,
+            usbFreeSpace = ::usbFreeSpace,
+            lastApplyRolledBack = { lastApplyRolledBack },
+            restartDaemon = ::restartDaemon,
+            stopDaemon = ::stopDaemon,
+            startDaemon = ::startDaemon,
+)
         wifiGateMonitor = WifiGateMonitor(this)
         gateway?.let {
             val ftp = configStore.load().ftp
