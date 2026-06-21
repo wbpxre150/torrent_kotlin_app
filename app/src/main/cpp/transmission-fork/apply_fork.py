@@ -132,7 +132,7 @@ def main():
         text = f.read()
     if "ANDROID fork: disable event threads" not in text:
         old = "-DEVENT__LIBRARY_TYPE:STRING=STATIC)"
-        new = "-DEVENT__LIBRARY_TYPE:STRING=STATIC\n        -DEVENT__DISABLE_THREAD_SUPPORT:BOOL=ON\n        # ANDROID fork: disable event threads)"
+        new = "-DEVENT__LIBRARY_TYPE:STRING=STATIC\n        -DEVENT__DISABLE_THREAD_SUPPORT:BOOL=ON\n        # ANDROID fork: disable event threads\n)"
         text = text.replace(old, new, 1)
         with open(top_cmake, "w", encoding="utf-8") as f:
             f.write(text)
@@ -148,7 +148,51 @@ def main():
         old2 = "#include <sys/types.h> /* types needed by quota.h */"
         new2 = "#include <sys/types.h> /* types needed by quota.h */\n// ANDROID fork: skip quota on Android"
         text = text.replace(old2, new2, 1)
+        # Also guard the getquota() #else body which uses quota.h types
+        old3 = "#else\n\n[[nodiscard]] tr_sys_path_capacity getquota(char const* device)\n{\n#if defined(__DragonFly__)"
+        new3 = "#else\n#if !defined(__ANDROID__)\n\n[[nodiscard]] tr_sys_path_capacity getquota(char const* device)\n{\n#if defined(__DragonFly__)"
+        text = text.replace(old3, new3, 1)
+        # Close the #if !defined(__ANDROID__) after getquota() closes
+        old4 = "#endif\n}\n\n#endif\n\n#ifdef HAVE_XQM"
+        new4 = "#endif\n}\n\n#endif\n#endif\n\n#ifdef HAVE_XQM"
+        text = text.replace(old4, new4, 1)
+        # Guard the getquota() call site
+        old5 = "    else\n    {\n        ret = getquota(info.device.c_str());\n    }"
+        new5 = "    else\n    {\n#if defined(__ANDROID__)\n        // No quota support on Android\n#else\n        ret = getquota(info.device.c_str());\n#endif\n    }"
+        text = text.replace(old5, new5, 1)
         with open(fc2, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    # 8. Patch platform.cc: tr_getSessionIdDir() hardcodes "/tmp" on non-Windows,
+    #    which is not writable on Android. Under __ANDROID__, honor $TMPDIR
+    #    (already exported by DaemonService to filesDir/tmp) with /tmp fallback.
+    plat = os.path.join(libt, "platform.cc")
+    with open(plat, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: honor TMPDIR for session-id dir" not in text:
+        old = (
+            'std::string tr_getSessionIdDir()\n'
+            '{\n'
+            '#ifndef _WIN32\n\n'
+            '    return std::string{ "/tmp"sv };'
+        )
+        new = (
+            'std::string tr_getSessionIdDir()\n'
+            '{\n'
+            '#ifndef _WIN32\n\n'
+            '#ifdef __ANDROID__\n'
+            '    // ANDROID fork: honor TMPDIR for session-id dir (/tmp not writable).\n'
+            '    if (auto dir = tr_env_get_string("TMPDIR"sv); !std::empty(dir))\n'
+            '    {\n'
+            '        return dir;\n'
+            '    }\n'
+            '#endif\n\n'
+            '    return std::string{ "/tmp"sv };'
+        )
+        if old not in text:
+            sys.exit("apply_fork: could not find tr_getSessionIdDir anchor in platform.cc")
+        text = text.replace(old, new)
+        with open(plat, "w", encoding="utf-8") as f:
             f.write(text)
 
     print("apply_fork: OK")
