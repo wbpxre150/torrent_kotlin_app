@@ -88,9 +88,6 @@ int ensure_sock()
     }
     struct sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
-    // Android's LocalServerSocket creates an abstract-namespace socket
-    // (appears as @<path> in /proc/net/unix). Connect to abstract namespace
-    // by prepending a null byte to sun_path and using the exact address length.
     auto const path_len = std::strlen(path);
     if (path_len + 1 >= sizeof(addr.sun_path))
     {
@@ -98,14 +95,32 @@ int ensure_sock()
         ::close(s);
         return -1;
     }
-    addr.sun_path[0] = '\0';  // abstract namespace prefix
-    std::memcpy(addr.sun_path + 1, path, path_len);
+    // Filesystem-namespace Unix socket: the path is the on-disk socket file
+    // created by SafIpcServer (filesDir/saf-bridge.sock). No null prefix.
+    std::memcpy(addr.sun_path, path, path_len + 1); // include trailing NUL
     socklen_t addr_len = static_cast<socklen_t>(
-        offsetof(struct sockaddr_un, sun_path) + 1 + path_len);
-    if (::connect(s, reinterpret_cast<struct sockaddr*>(&addr), addr_len) < 0)
+        offsetof(struct sockaddr_un, sun_path) + path_len);
+
+    // Bounded retry: the server (SafIpcServer) binds synchronously in start(),
+    // but a supervisor restart can race the child's first connect. Retry a few
+    // times with a short sleep; log only on final failure to avoid log floods.
+    bool connected = false;
+    for (int attempt = 0; attempt < 5; ++attempt)
+    {
+        if (::connect(s, reinterpret_cast<struct sockaddr*>(&addr), addr_len) == 0)
+        {
+            connected = true;
+            break;
+        }
+        if (attempt < 4)
+        {
+            ::usleep(200 * 1000);
+        }
+    }
+    if (!connected)
     {
         int e = errno;
-        saf_log_e("ensure_sock: connect(\"%s\") failed errno=%d (%s)", path, e, std::strerror(e));
+        saf_log_e("ensure_sock: connect(\"%s\") failed after retries errno=%d (%s)", path, e, std::strerror(e));
         ::close(s);
         return -1;
     }

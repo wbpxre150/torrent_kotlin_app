@@ -30,12 +30,18 @@ class SafIpcServer(
 
     fun start() {
         if (running) return
-        // Abstract namespace (null-byte prefix in sun_path) to match the native
-        // file-saf.cc client. Abstract namespace needs no filesystem cleanup and
-        // is immune to permission races; the path string is the address (no file
-        // is created on disk).
+        // Remove a stale socket file from a previous crashed instance; a leftover
+        // file would make bind() fail with EADDRINUSE. Filesystem-namespace only
+        // (abstract namespace has no on-disk file). The app-private filesDir has
+        // no permission race, so filesystem namespace is safe and debuggable.
+        if (socketFile.exists()) socketFile.delete()
+        // Filesystem-namespace Unix socket at filesDir/saf-bridge.sock. The
+        // native file-saf.cc client connects with a plain sun_path (no null
+        // prefix). The app-private filesDir is owned by this UID, so there is no
+        // permission race; the on-disk socket file is unlinked before bind and
+        // on stop().
         val ls = LocalSocket()
-        val addr = LocalSocketAddress(socketFile.absolutePath, LocalSocketAddress.Namespace.ABSTRACT)
+        val addr = LocalSocketAddress(socketFile.absolutePath, LocalSocketAddress.Namespace.FILESYSTEM)
         ls.bind(addr)
         serverSocket = LocalServerSocket(ls.fileDescriptor)
         running = true
