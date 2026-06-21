@@ -20,6 +20,7 @@ class LiteralPathListingCommandTest {
             files.containsKey(relPath) -> FtpFileSource.Entry(relPath.substringAfterLast('/'), false, files.getValue(relPath))
             else -> null
         }
+        override fun delete(relPath: String): Boolean = false
     }
 
     private fun view(dirs: Set<String>, files: Map<String, Long> = emptyMap()): SafFtpFileSystemView {

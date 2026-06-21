@@ -26,7 +26,7 @@ class SafFtpFile(
     override fun doesExist(): Boolean = entry != null
     override fun isReadable(): Boolean = true
     override fun isWritable(): Boolean = false
-    override fun isRemovable(): Boolean = false
+    override fun isRemovable(): Boolean = relPath.isNotEmpty()
     override fun getOwnerName(): String = "torrent"
     override fun getGroupName(): String = "torrent"
     override fun getLinkCount(): Int = 1
@@ -35,7 +35,7 @@ class SafFtpFile(
     override fun getSize(): Long = entry?.size ?: 0L
     override fun getPhysicalFile(): String = relPath
     override fun mkdir(): Boolean = false
-    override fun delete(): Boolean = false
+    override fun delete(): Boolean = source.delete(relPath)
     override fun move(destination: FtpFile): Boolean = false
 
     override fun listFiles(): List<SafFtpFile>? {

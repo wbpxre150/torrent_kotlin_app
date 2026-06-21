@@ -22,4 +22,6 @@ class SafFtpFileSource(private val gateway: SafStorageGateway) : FtpFileSource {
 
     fun openReadPfd(relPath: String): ParcelFileDescriptor? =
         gateway.openReadPfd(relPath)
+
+    override fun delete(relPath: String): Boolean = gateway.removeDoc(relPath)
 }

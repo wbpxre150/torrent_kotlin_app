@@ -34,6 +34,7 @@ class SafFtpFilesystemTest {
             files.containsKey(relPath) -> FtpFileSource.Entry(relPath.substringAfterLast('/'), false, files.getValue(relPath), mtimes[relPath] ?: 0L)
             else -> null
         }
+        override fun delete(relPath: String): Boolean = false
     }
 
     private fun streamProvider(bytes: ByteArray): (String, Long) -> InputStream = { _, offset ->
@@ -57,7 +58,7 @@ class SafFtpFilesystemTest {
         assertFalse(f.isDirectory())
         assertTrue(f.isReadable())
         assertFalse(f.isWritable())
-        assertFalse(f.isRemovable())
+        assertTrue(f.isRemovable())
         assertEquals(5_000_000_000L, f.getSize())
         assertEquals("movie.mkv", f.getName())
     }
