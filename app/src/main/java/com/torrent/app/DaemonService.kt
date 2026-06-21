@@ -59,10 +59,12 @@ class DaemonService : Service() {
     private lateinit var safSocketFile: java.io.File
     private lateinit var safIpcServer: SafIpcServer
     private lateinit var transmissionConfig: TransmissionConfig
+    private lateinit var configStore: com.torrent.app.config.ConfigStore
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        configStore = com.torrent.app.config.ConfigStore(this)
         tokenManager = TokenManager(this)
         usbPermissionManager = UsbPermissionManager(this)
         usbPermissionManager.treeUri()?.let { uri ->
@@ -78,7 +80,7 @@ class DaemonService : Service() {
             runSafValidation = ::runSafValidation,
             ftpStatus = ::getFtpStatus,
         )
-        ftpCredentials = FtpCredentials(this)
+        ftpCredentials = FtpCredentials(configStore)
         wifiGateMonitor = WifiGateMonitor(this)
         gateway?.let { ftpController = FtpServerController(it, ftpCredentials) }
     }
@@ -302,7 +304,7 @@ class DaemonService : Service() {
         supervisors.add(probe)
 
         // transmission-daemon (Stage 04): internal storage only, RPC on :9091 with auth.
-        transmissionConfig = TransmissionConfig(this)
+        transmissionConfig = TransmissionConfig(this, configStore)
         transmissionConfig.ensureSettingsJson()
         val transmission = ProcessSupervisor(
             label = "transmission",

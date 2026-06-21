@@ -4,13 +4,14 @@ import android.content.Context
 import java.io.File
 import java.security.MessageDigest
 import java.security.SecureRandom
+import com.torrent.app.config.ConfigStore
 
 /**
  * Owns transmission-daemon's config dir under internal storage and generates settings.json
  * with RPC auth on first run. Stage 04 (internal storage only); Stage 05 redirects payload
  * I/O to USB via the SAF fork.
  */
-class TransmissionConfig(context: Context) {
+class TransmissionConfig(context: Context, private val store: ConfigStore) {
 
     val configDir: File = File(context.filesDir, "transmission")
     val downloadDir: File = File(configDir, "downloads")
@@ -21,19 +22,23 @@ class TransmissionConfig(context: Context) {
         downloadDir.mkdirs()
     }
 
-    fun username(): String = USERNAME
+    fun username(): String = store.load().transmission.username
+    fun password(): String = store.load().transmission.password
 
-    fun password(): String = "test"
-
-    /** Writes settings.json, overwriting any previous so updated password takes effect. */
+    /** Writes settings.json from the current ConfigStore transmission settings. */
     fun ensureSettingsJson() {
+        val s = store.load().transmission
+        val downloadDir = if (s.downloadSubpath.isEmpty()) USB_DOWNLOAD_DIR
+                          else "$USB_DOWNLOAD_DIR/${s.downloadSubpath}"
         settingsFile.writeText(
-            buildSettingsJson(username(), ssha1Hash(password()), USB_DOWNLOAD_DIR)
+            buildSettingsJson(
+                s.username, ssha1Hash(s.password), downloadDir,
+                s.peerPort, s.speedLimitDown, s.speedLimitUp, s.altSpeedDown, s.altSpeedUp,
+            )
         )
     }
 
     companion object {
-        private const val USERNAME = "torrentapp"
         /** Sentinel download root recognized by the SAF file-backend fork. */
         const val USB_DOWNLOAD_DIR = "/saf/usb"
 
@@ -60,24 +65,37 @@ class TransmissionConfig(context: Context) {
          * rpc-password should be pre-hashed via [ssha1Hash] before calling; transmission detects the
          * "{" prefix and uses the hash directly without re-hashing or rewriting the file.
          */
-        fun buildSettingsJson(username: String, password: String, downloadDir: String): String =
-            buildString {
-                append("{\n")
-                append("  \"rpc-enabled\": true,\n")
-                append("  \"rpc-bind-address\": \"0.0.0.0\",\n")
-                append("  \"rpc-port\": 9091,\n")
-                append("  \"rpc-authentication-required\": true,\n")
-                append("  \"rpc-username\": ").append(jsonStr(username)).append(",\n")
-                append("  \"rpc-password\": ").append(jsonStr(password)).append(",\n")
-                append("  \"rpc-whitelist-enabled\": false,\n")
-                append("  \"download-dir\": ").append(jsonStr(downloadDir)).append(",\n")
-                append("  \"incomplete-dir-enabled\": false,\n")
-                append("  \"rename-partial-files\": false,\n")
-                append("  \"watch-dir-enabled\": false,\n")
-                append("  \"message-level\": 3,\n")
-                append("  \"preallocation\": 0\n")
-                append("}\n")
-            }
+        fun buildSettingsJson(
+            username: String,
+            password: String,
+            downloadDir: String,
+            peerPort: Int = 51413,
+            speedLimitDown: Int = 0,
+            speedLimitUp: Int = 0,
+            altSpeedDown: Int = 0,
+            altSpeedUp: Int = 0,
+        ): String = buildString {
+            append("{\n")
+            append("  \"rpc-enabled\": true,\n")
+            append("  \"rpc-bind-address\": \"0.0.0.0\",\n")
+            append("  \"rpc-port\": 9091,\n")
+            append("  \"rpc-authentication-required\": true,\n")
+            append("  \"rpc-username\": ").append(jsonStr(username)).append(",\n")
+            append("  \"rpc-password\": ").append(jsonStr(password)).append(",\n")
+            append("  \"rpc-whitelist-enabled\": false,\n")
+            append("  \"peer-port\": ").append(peerPort).append(",\n")
+            append("  \"download-dir\": ").append(jsonStr(downloadDir)).append(",\n")
+            append("  \"incomplete-dir-enabled\": false,\n")
+            append("  \"rename-partial-files\": false,\n")
+            append("  \"watch-dir-enabled\": false,\n")
+            append("  \"speed-limit-down\": ").append(speedLimitDown).append(",\n")
+            append("  \"speed-limit-up\": ").append(speedLimitUp).append(",\n")
+            append("  \"alt-speed-down\": ").append(altSpeedDown).append(",\n")
+            append("  \"alt-speed-up\": ").append(altSpeedUp).append(",\n")
+            append("  \"message-level\": 3,\n")
+            append("  \"preallocation\": 0\n")
+            append("}\n")
+        }
 
         private fun jsonStr(s: String): String =
             "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
