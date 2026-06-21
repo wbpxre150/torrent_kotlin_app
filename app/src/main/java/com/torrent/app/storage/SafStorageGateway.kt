@@ -114,13 +114,25 @@ class SafStorageGateway(
     }
 
     override fun availableBytes(): Long {
+        val authority = treeUri.authority ?: return Long.MAX_VALUE
+        val treeRootId = DocumentsContract.getTreeDocumentId(treeUri)
+        val rootsUri = DocumentsContract.buildRootsUri(authority)
         return try {
-            val authority = treeUri.authority ?: return Long.MAX_VALUE
-            val rootsUri = DocumentsContract.buildRootsUri(authority)
-            resolver.query(rootsUri, arrayOf(DocumentsContract.Root.COLUMN_AVAILABLE_BYTES),
+            resolver.query(
+                rootsUri,
+                arrayOf(
+                    DocumentsContract.Root.COLUMN_DOCUMENT_ID,
+                    DocumentsContract.Root.COLUMN_AVAILABLE_BYTES),
                 null, null, null)?.use { c ->
-                if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else Long.MAX_VALUE
-            } ?: Long.MAX_VALUE
+                    val docIdIdx = c.getColumnIndexOrThrow(DocumentsContract.Root.COLUMN_DOCUMENT_ID)
+                    val availIdx = c.getColumnIndexOrThrow(DocumentsContract.Root.COLUMN_AVAILABLE_BYTES)
+                    while (c.moveToNext()) {
+                        if (c.getString(docIdIdx) == treeRootId) {
+                            return@use if (c.isNull(availIdx)) Long.MAX_VALUE else c.getLong(availIdx)
+                        }
+                    }
+                    Long.MAX_VALUE
+                } ?: Long.MAX_VALUE
         } catch (e: Exception) {
             Log.w(TAG, "availableBytes unavailable, returning sentinel: ${e.message}")
             Long.MAX_VALUE
