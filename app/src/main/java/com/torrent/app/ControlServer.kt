@@ -54,16 +54,27 @@ class ControlServer(
                     }
                 }
 
-                // Everything below requires a valid token (cookie > query > header)
+                // Everything below requires a valid token (cookie > query > header).
+                // A valid query-string token also sets the cookie so the browser keeps
+                // the session across link navigations (POST /login is the other entry).
                 route("/") {
                     intercept(ApplicationCallPipeline.Plugins) {
-                        val token = parseCookieToken(call.request.headers["Cookie"])
-                            ?: call.request.queryParameters["token"]
-                            ?: call.request.headers["Authorization"]?.removePrefix("Bearer ")
-                        if (token == null || !tokenManager.validate(token)) {
+                        val (token, setCookie) = resolveAuthToken(
+                            call.request.headers["Cookie"],
+                            call.request.queryParameters["token"],
+                            call.request.headers["Authorization"],
+                            tokenManager::validate,
+                        )
+                        if (token == null) {
                             call.respond(HttpStatusCode.Unauthorized,
                                 "Missing or invalid token. Open /login or append ?token=...")
                             finish()
+                            return@intercept
+                        }
+                        if (setCookie) {
+                            call.response.headers.append(
+                                "Set-Cookie",
+                                "control_token=$token; Path=/; HttpOnly; SameSite=Strict")
                         }
                     }
 
@@ -501,6 +512,30 @@ class ControlServer(
                     return part.substring(eq + 1).trim()
             }
             return null
+        }
+
+        /**
+         * Decides which token authenticates a request and whether the response should
+         * set the control_token cookie. Returns (token, setCookie):
+         *   - token is the authenticated token, or null if none/invalid (caller rejects).
+         *   - setCookie is true when the token came from the query string (no cookie
+         *     was present), so the caller sets the cookie to keep the session alive.
+         *
+         * Pure and unit-testable; the interceptor applies the result.
+         */
+        fun resolveAuthToken(
+            cookieHeader: String?,
+            queryToken: String?,
+            authHeader: String?,
+            isValid: (String) -> Boolean,
+        ): Pair<String?, Boolean> {
+            val cookie = parseCookieToken(cookieHeader)
+            if (cookie != null && isValid(cookie)) return cookie to false
+            val query = queryToken
+            if (query != null && isValid(query)) return query to true
+            val bearer = authHeader?.removePrefix("Bearer ")
+            if (bearer != null && isValid(bearer)) return bearer to false
+            return null to false
         }
     }
 }
