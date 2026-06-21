@@ -15,6 +15,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.delay
 import java.io.File
 import android.net.Uri
 import com.torrent.app.storage.SafStatus
@@ -32,6 +33,7 @@ import com.torrent.app.ftp.WifiGateMonitor
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 
 sealed class ServiceState {
     data object Starting : ServiceState()
@@ -52,7 +54,6 @@ class DaemonService : Service() {
     private val supervisors = mutableListOf<ProcessSupervisor>()
     private lateinit var usbPermissionManager: UsbPermissionManager
     private var gateway: SafStorageGateway? = null
-    private lateinit var ftpCredentials: FtpCredentials
     private var ftpController: FtpServerController? = null
     private lateinit var wifiGateMonitor: WifiGateMonitor
     private var ftpObservingJob: Job? = null
@@ -60,6 +61,8 @@ class DaemonService : Service() {
     private lateinit var safIpcServer: SafIpcServer
     private lateinit var transmissionConfig: TransmissionConfig
     private lateinit var configStore: com.torrent.app.config.ConfigStore
+    @Volatile var lastApplyRolledBack: Boolean = false
+    private var rollbackJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -80,9 +83,11 @@ class DaemonService : Service() {
             runSafValidation = ::runSafValidation,
             ftpStatus = ::getFtpStatus,
         )
-        ftpCredentials = FtpCredentials(configStore)
         wifiGateMonitor = WifiGateMonitor(this)
-        gateway?.let { ftpController = FtpServerController(it, ftpCredentials) }
+        gateway?.let {
+            val ftp = configStore.load().ftp
+            ftpController = FtpServerController(it, FtpCredentials(configStore), port = ftp.port, rootRelPath = ftp.exposedRoot)
+        }
     }
 
     inner class LocalBinder : android.os.Binder() {
@@ -95,6 +100,17 @@ class DaemonService : Service() {
         fun getSafStatus(): SafStatus = this@DaemonService.getSafStatus()
         fun getFtpStatus(): FtpStatus = this@DaemonService.getFtpStatus()
         suspend fun runSafValidation(): SafValidationResult = this@DaemonService.runSafValidation()
+        fun loadConfig(): com.torrent.app.config.AppConfig = this@DaemonService.loadConfig()
+        fun applyTransmissionSettings(s: com.torrent.app.config.TransmissionSettings, liveOnly: Boolean) =
+            this@DaemonService.applyTransmissionSettings(s, liveOnly)
+        fun applyFtpSettings(s: com.torrent.app.config.FtpSettings) = this@DaemonService.applyFtpSettings(s)
+        fun restartDaemon(label: String) = this@DaemonService.restartDaemon(label)
+        fun stopDaemon(label: String) = this@DaemonService.stopDaemon(label)
+        fun startDaemon(label: String) = this@DaemonService.startDaemon(label)
+        fun transmissionRpcSummary(): com.torrent.app.transmission.TransmissionSummary? = this@DaemonService.transmissionRpcSummary()
+        fun usbFreeSpace(): Long? = this@DaemonService.usbFreeSpace()
+        fun completeWizard() = this@DaemonService.completeWizard()
+        fun lastApplyRolledBack(): Boolean = this@DaemonService.lastApplyRolledBack
     }
 
     override fun onBind(intent: Intent?): IBinder = LocalBinder()
@@ -115,6 +131,7 @@ class DaemonService : Service() {
     }
 
     override fun onDestroy() {
+        rollbackJob?.cancel()
         controlServer.stop()
         stopSupervisors()
         safIpcServer.stop()
@@ -142,8 +159,9 @@ class DaemonService : Service() {
         usbPermissionManager.grant(uri)
         val g = SafStorageGateway(this, uri)
         gateway = g
+        val ftp = configStore.load().ftp
         ftpController?.stop()
-        ftpController = FtpServerController(g, ftpCredentials)
+        ftpController = FtpServerController(g, FtpCredentials(configStore), port = ftp.port, rootRelPath = ftp.exposedRoot)
         maybeStartFtp()
     }
 
@@ -172,15 +190,17 @@ class DaemonService : Service() {
 
     private fun observeWifiForFtp() {
         ftpObservingJob?.cancel()
-        ftpObservingJob = kotlinx.coroutines.MainScope().launch {
+        ftpObservingJob = MainScope().launch {
             wifiGateMonitor.state.collect { ws ->
+                val ftp = configStore.load().ftp
                 if (ws.wifi && ws.ip != null) maybeStartFtp(ws.ip)
-                else ftpController?.stop()
+                else if (ftp.wifiOnly) ftpController?.stop()
             }
         }
     }
 
     private fun maybeStartFtp(ip: String? = null) {
+        if (!configStore.load().wizardCompleted) return
         val ctrl = ftpController ?: return
         val ws = wifiGateMonitor.state.value
         val useIp = ip ?: ws.ip
@@ -193,17 +213,115 @@ class DaemonService : Service() {
     fun getFtpStatus(): FtpStatus {
         val ctrl = ftpController
         val ws = wifiGateMonitor.state.value
+        val creds = FtpCredentials(configStore)
         return FtpStatus(
             running = ctrl?.state == FtpState.RUNNING,
             state = (ctrl?.state ?: FtpState.STOPPED).name,
             ip = ctrl?.ip,
-            port = 2121,
-            username = ftpCredentials.username(),
-            password = if (ctrl?.state == FtpState.RUNNING) ftpCredentials.password() else null,
+            port = configStore.load().ftp.port,
+            username = creds.username(),
+            password = if (ctrl?.state == FtpState.RUNNING) creds.password() else null,
             wifiUp = ws.wifi,
         )
     }
 
+    fun startConfiguredDaemons() {
+        startTransmissionSupervisor()
+        maybeStartFtp()
+    }
+
+    fun applyTransmissionSettings(s: com.torrent.app.config.TransmissionSettings, liveOnly: Boolean): com.torrent.app.config.ApplyResult {
+        val vr = com.torrent.app.config.ConfigValidator.validateTransmission(s)
+        if (!vr.ok) return com.torrent.app.config.ApplyResult(false, vr.errors.joinToString("; "), false)
+        val before = configStore.load().transmission
+        configStore.snapshotLastKnownGood(before)
+        configStore.saveTransmission(s)
+        lastApplyRolledBack = false
+        if (liveOnly) {
+            val rpc = com.torrent.app.transmission.TransmissionRpcClient(before.username, before.password)
+            val args = JSONObject()
+                .put("speed-limit-down", s.speedLimitDown)
+                .put("speed-limit-up", s.speedLimitUp)
+                .put("alt-speed-down", s.altSpeedDown)
+                .put("alt-speed-up", s.altSpeedUp)
+            val ok = rpc.sessionSet(args)
+            return com.torrent.app.config.ApplyResult(ok, if (ok) "applied via RPC" else "daemon not reachable; restart required", false)
+        }
+        val sup = supervisors.firstOrNull { it.status.value.label == "transmission" }
+        sup?.stop()
+        transmissionConfig.ensureSettingsJson()
+        sup?.start()
+        val statusAtApply = sup?.status?.value ?: ProcessStatus("transmission", ProcessState.STOPPED)
+        launchRollbackWatcher(sup, statusAtApply, before)
+        return com.torrent.app.config.ApplyResult(true, "applied; restarting transmission", false)
+    }
+
+    fun applyFtpSettings(s: com.torrent.app.config.FtpSettings): com.torrent.app.config.ApplyResult {
+        val vr = com.torrent.app.config.ConfigValidator.validateFtp(s)
+        if (!vr.ok) return com.torrent.app.config.ApplyResult(false, vr.errors.joinToString("; "), false)
+        configStore.saveFtp(s)
+        ftpController?.stop()
+        val g = gateway
+        if (g != null) {
+            ftpController = FtpServerController(g, FtpCredentials(configStore), port = s.port, rootRelPath = s.exposedRoot)
+            maybeStartFtp()
+        }
+        return com.torrent.app.config.ApplyResult(true, if (g != null) "applied" else "applied; FTP starts when USB granted", false)
+    }
+
+    fun restartDaemon(label: String): Boolean {
+        val sup = supervisors.firstOrNull { it.status.value.label == label } ?: return false
+        sup.restart(); return true
+    }
+    fun stopDaemon(label: String): Boolean {
+        val sup = supervisors.firstOrNull { it.status.value.label == label } ?: return false
+        sup.stop(); return true
+    }
+    fun startDaemon(label: String): Boolean {
+        val sup = supervisors.firstOrNull { it.status.value.label == label } ?: return false
+        sup.start(); return true
+    }
+
+    fun transmissionRpcSummary(): com.torrent.app.transmission.TransmissionSummary? {
+        val tx = configStore.load().transmission
+        val rpc = com.torrent.app.transmission.TransmissionRpcClient(tx.username, tx.password)
+        val sess = rpc.sessionGet() ?: return null
+        return com.torrent.app.transmission.TransmissionSummary(
+            downloadDir = sess.optString("downloadDir"),
+            speedLimitDown = sess.optInt("speed-limit-down", 0),
+            speedLimitUp = sess.optInt("speed-limit-up", 0),
+            torrents = rpc.torrentGetSummary())
+    }
+
+    fun usbFreeSpace(): Long? {
+        val g = gateway ?: return null
+        val b = g.availableBytes()
+        return if (b == Long.MAX_VALUE) null else b
+    }
+
+    fun loadConfig(): com.torrent.app.config.AppConfig = configStore.load()
+    fun completeWizard() { configStore.setWizardCompleted(); startConfiguredDaemons() }
+
+    private fun launchRollbackWatcher(sup: ProcessSupervisor?, statusAtApply: ProcessStatus, previous: com.torrent.app.config.TransmissionSettings) {
+        rollbackJob?.cancel()
+        if (sup == null) return
+        rollbackJob = MainScope().launch {
+            val deadline = System.currentTimeMillis() + 20_000
+            while (System.currentTimeMillis() < deadline) {
+                delay(2000)
+                val cur = sup.status.value
+                if (cur.state == ProcessState.RUNNING) return@launch
+                if (RollbackPolicy.shouldRollback(statusAtApply, cur, 3)) {
+                    android.util.Log.w("DaemonService", "transmission crash-loop after apply; rolling back")
+                    lastApplyRolledBack = true
+                    configStore.saveTransmission(previous)
+                    transmissionConfig.ensureSettingsJson()
+                    sup.stop(); delay(200); sup.start()
+                    return@launch
+                }
+            }
+        }
+    }
 
     private fun acquireLocks() {
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -259,16 +377,14 @@ class DaemonService : Service() {
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
 
-        ServiceCompat.startForeground(
-            this,
-            NOTIFICATION_ID,
-            notification,
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        val type = when {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE ->
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ->
                 android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-            } else {
-                0
-            }
-        )
+            else -> 0
+        }
+        ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, type)
     }
 
     private fun createNotificationChannel() {
@@ -287,47 +403,31 @@ class DaemonService : Service() {
     }
 
     private fun startSupervisors() {
-        if (supervisors.isNotEmpty()) return  // guard against double-start from START_STICKY
+        if (supervisors.isNotEmpty()) return
         val nativeLibDir = applicationInfo.nativeLibraryDir
         val workDir = File(filesDir, "daemons")
         val logDir = File(filesDir, "logs")
-
-        // probe — minimal test binary (replaced by transmission in Stage 04)
-        val probe = ProcessSupervisor(
-            label = "probe",
-            binaryName = "libprobe.so",
-            nativeLibraryDir = nativeLibDir,
-            workDir = workDir,
-            logDir = logDir,
-        )
-        probe.start()
-        supervisors.add(probe)
-
-        // transmission-daemon (Stage 04): internal storage only, RPC on :9091 with auth.
+        val probe = ProcessSupervisor("probe", "libprobe.so", nativeLibraryDir = nativeLibDir,
+            workDir = workDir, logDir = logDir)
+        probe.start(); supervisors.add(probe)
         transmissionConfig = TransmissionConfig(this, configStore)
+        if (configStore.load().wizardCompleted) startTransmissionSupervisor()
+    }
+
+    private fun startTransmissionSupervisor() {
+        if (supervisors.any { it.status.value.label == "transmission" }) return
         transmissionConfig.ensureSettingsJson()
+        val nativeLibDir = applicationInfo.nativeLibraryDir
+        val workDir = File(filesDir, "daemons"); val logDir = File(filesDir, "logs")
         val transmission = ProcessSupervisor(
-            label = "transmission",
-            binaryName = "libtransmissiond.so",
-            args = listOf(
-                "--foreground",
-                "--config-dir", transmissionConfig.configDir.absolutePath,
-                "--logfile", File(logDir, "transmission.log").absolutePath,
-                "--log-level=info",
-            ),
-            nativeLibraryDir = nativeLibDir,
-            workDir = workDir,
-            logDir = logDir,
-            extraEnv = mapOf(
-                "TORRENT_SAF_SOCKET" to safSocketFile.absolutePath,
-                // libtransmission uses $TMPDIR (fallback /tmp) for the session-id
-                // file and other temp files; /tmp is not writable on Android.
-                "TMPDIR" to File(filesDir, "tmp").apply { mkdirs() }.absolutePath,
-            ),
-            selfLogging = true,
-        )
-        transmission.start()
-        supervisors.add(transmission)
+            label = "transmission", binaryName = "libtransmissiond.so",
+            args = listOf("--foreground", "--config-dir", transmissionConfig.configDir.absolutePath,
+                "--logfile", File(logDir, "transmission.log").absolutePath, "--log-level=info"),
+            nativeLibraryDir = nativeLibDir, workDir = workDir, logDir = logDir,
+            extraEnv = mapOf("TORRENT_SAF_SOCKET" to safSocketFile.absolutePath,
+                "TMPDIR" to File(filesDir, "tmp").apply { mkdirs() }.absolutePath),
+            selfLogging = true)
+        transmission.start(); supervisors.add(transmission)
     }
 
     private fun stopSupervisors() {

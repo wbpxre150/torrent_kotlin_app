@@ -8,6 +8,7 @@ import java.io.InputStream
 class SafFtpFileSystemView(
     private val source: FtpFileSource,
     private val streamProvider: (relPath: String, offset: Long) -> InputStream,
+    private val rootRelPath: String = "",
 ) : FileSystemView {
 
     private var cwd: String = "/"
@@ -28,7 +29,12 @@ class SafFtpFileSystemView(
     override fun getFile(path: String): FtpFile = file(resolve(path))
 
     private fun file(ftpAbs: String): SafFtpFile {
-        val rel = if (ftpAbs == "/") "" else ftpAbs.trimStart('/')
+        val trimmed = if (ftpAbs == "/") "" else ftpAbs.trimStart('/')
+        val rel = when {
+            rootRelPath.isEmpty() -> trimmed
+            trimmed.isEmpty() -> rootRelPath
+            else -> "$rootRelPath/$trimmed"
+        }
         val normalized = SafPaths.normalize(rel)
         return SafFtpFile(ftpAbs, normalized, source, streamProvider)
     }

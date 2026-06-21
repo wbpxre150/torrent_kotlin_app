@@ -10,8 +10,9 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!-- Foreground service (Android 9+) -->
+    <!-- Foreground service (Android 9+); specialUse avoids the Android 15 dataSync ~6h/24h cap. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
     <!-- Notification (Android 13+) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -33,7 +34,11 @@
         </activity>
         <service
             android:name=".DaemonService"
-            android:foregroundServiceType="dataSync"
-            android:exported="false" />
+            android:foregroundServiceType="specialUse"
+            android:exported="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="daemon_supervisor_for_local_torrent_ftp_and_storage" />
+        </service>
     </application>
 </manifest>

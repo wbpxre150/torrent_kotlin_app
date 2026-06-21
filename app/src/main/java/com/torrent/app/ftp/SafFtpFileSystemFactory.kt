@@ -8,7 +8,8 @@ import java.io.InputStream
 class SafFtpFileSystemFactory(
     private val source: FtpFileSource,
     private val streamProvider: (relPath: String, offset: Long) -> InputStream,
+    private val rootRelPath: String = "",
 ) : FileSystemFactory {
     override fun createFileSystemView(user: User): FileSystemView =
-        SafFtpFileSystemView(source, streamProvider)
+        SafFtpFileSystemView(source, streamProvider, rootRelPath)
 }

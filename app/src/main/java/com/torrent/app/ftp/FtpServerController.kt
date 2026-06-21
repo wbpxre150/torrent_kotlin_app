@@ -23,6 +23,7 @@ class FtpServerController(
     private val creds: FtpCredentials,
     private val port: Int = 2121,
     private val passivePorts: String = "30000-30009",
+    private val rootRelPath: String = "",
 ) {
     private var server: FtpServer? = null
 
@@ -74,7 +75,7 @@ class FtpServerController(
             val factory = FtpServerFactory().apply {
                 addListener("default", listener)
                 setUserManager(FtpUserManager(creds.username(), creds.password()))
-                setFileSystem(SafFtpFileSystemFactory(fileSource, streamProvider))
+                setFileSystem(SafFtpFileSystemFactory(fileSource, streamProvider, rootRelPath))
                 val defaultCmds = commandFactory
                 setCommandFactory(CommandFactory { name ->
                     val stock = defaultCmds.getCommand(name)
