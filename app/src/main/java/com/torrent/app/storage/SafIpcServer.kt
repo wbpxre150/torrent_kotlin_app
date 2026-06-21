@@ -26,6 +26,7 @@ class SafIpcServer(
 ) {
     private var scope: CoroutineScope? = null
     private var serverSocket: LocalServerSocket? = null
+    private var boundSocket: LocalSocket? = null  // keep alive so GC doesn't close its fd
     @Volatile private var running = false
 
     fun start() {
@@ -40,10 +41,12 @@ class SafIpcServer(
         // prefix). The app-private filesDir is owned by this UID, so there is no
         // permission race; the on-disk socket file is unlinked before bind and
         // on stop().
-        val ls = LocalSocket()
-        val addr = LocalSocketAddress(socketFile.absolutePath, LocalSocketAddress.Namespace.FILESYSTEM)
-        ls.bind(addr)
-        serverSocket = LocalServerSocket(ls.fileDescriptor)
+        // NB: We must keep a reference to the raw LocalSocket (boundSocket) so GC
+        // doesn't close its fd — LocalServerSocket(FileDescriptor) wraps the same
+        val bound = LocalSocket()
+        bound.bind(LocalSocketAddress(socketFile.absolutePath, LocalSocketAddress.Namespace.FILESYSTEM))
+        boundSocket = bound
+        serverSocket = LocalServerSocket(bound.fileDescriptor)
         running = true
         scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + kotlinx.coroutines.CoroutineName("saf-ipc"))
         scope!!.launch { acceptLoop() }
@@ -56,6 +59,8 @@ class SafIpcServer(
         scope = null
         try { serverSocket?.close() } catch (_: Exception) {}
         serverSocket = null
+        try { boundSocket?.close() } catch (_: Exception) {}
+        boundSocket = null
         socketFile.delete()
     }
 
