@@ -397,6 +397,20 @@ bool tr_saf_path_rename(char const* src_path, char const* dst_path, tr_error* er
     return true;
 }
 
+bool tr_saf_path_is_same(char const* path1, char const* path2, tr_error* /*error*/)
+{
+    bool const saf1 = tr_saf_is_path(path1);
+    bool const saf2 = tr_saf_is_path(path2);
+    if (!saf1 || !saf2)
+    {
+        // One is SAF, the other isn't — they can't be the same document.
+        return false;
+    }
+    auto const rel1 = strip_sentinel(path1);
+    auto const rel2 = strip_sentinel(path2);
+    return rel1 == rel2;
+}
+
 bool tr_saf_path_remove(char const* path, tr_error* error)
 {
     std::lock_guard<std::mutex> lk(g_mutex);

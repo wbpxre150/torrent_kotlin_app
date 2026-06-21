@@ -48,6 +48,20 @@ def main():
         with open(fp, "w", encoding="utf-8") as f:
             f.write(text)
 
+    # 2b. Patch file-posix.cc: dispatch tr_sys_path_is_same to SAF.
+    #     Separate guard because the include was already added by block 2
+    #     on previously-patched trees.
+    with open(fp, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "tr_saf_path_is_same" not in text:
+        sig = "bool tr_sys_path_is_same(char const* path1, char const* path2, tr_error* error)\n{\n"
+        dispatch = "    if (tr_saf_is_path(path1) || tr_saf_is_path(path2)) return tr_saf_path_is_same(path1, path2, error);\n"
+        if sig not in text:
+            sys.exit("ERROR: signature not found in file-posix.cc: " + sig)
+        text = text.replace(sig, sig + dispatch, 1)
+        with open(fp, "w", encoding="utf-8") as f:
+            f.write(text)
+
     # 3. Patch file-capacity.cc: include + dispatch in tr_sys_path_get_capacity.
     fc = os.path.join(libt, "file-capacity.cc")
     with open(fc, "r", encoding="utf-8") as f:
@@ -64,6 +78,48 @@ def main():
             sys.exit("ERROR: signature not found in file-capacity.cc")
         text = text.replace(sig, sig + dispatch, 1)
         with open(fc, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    # 3b. Patch torrent-files.cc: include + SAF short-circuit in remove().
+    tf = os.path.join(libt, "torrent-files.cc")
+    with open(tf, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "file-saf.h" not in text:
+        text = text.replace(
+            '#include "libtransmission/file.h"\n',
+            '#include "libtransmission/file.h"\n#include "libtransmission/file-saf.h"\n',
+            1,
+        )
+        # Short-circuit: for SAF paths, skip the tmpdir-move-junk-filter dance
+        # (mkdtemp/opendir don't work on the /saf/usb sentinel) and do a single
+        # recursive tr_sys_path_remove on the torrent's own folder.
+        # DocumentsContract.deleteDocument is recursive for directory documents.
+        old = (
+            "void tr_torrent_files::remove(std::string_view parent_in, std::string_view tmpdir_prefix, FileFunc const& func, tr_error* error)\n"
+            "    const\n"
+            "{\n"
+            "    auto const parent = tr_pathbuf{ parent_in };\n"
+        )
+        new = (
+            "void tr_torrent_files::remove(std::string_view parent_in, std::string_view tmpdir_prefix, FileFunc const& func, tr_error* error)\n"
+            "    const\n"
+            "{\n"
+            "    auto const parent = tr_pathbuf{ parent_in };\n"
+            "    // SAF short-circuit: the native tmpdir-move-and-junk-filter dance uses\n"
+            "    // mkdtemp/opendir/readdir which don't work on the /saf/usb sentinel.\n"
+            "    // DocumentsContract.deleteDocument is recursive, so one remove on the\n"
+            "    // torrent's own folder deletes the entire subtree.\n"
+            "    auto const saf_target = tr_pathbuf{ parent_in, '/', tmpdir_prefix };\n"
+            "    if (tr_saf_is_path(saf_target))\n"
+            "    {\n"
+            "        tr_sys_path_remove(saf_target, error);\n"
+            "        return;\n"
+            "    }\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: signature not found in torrent-files.cc for remove() short-circuit")
+        text = text.replace(old, new, 1)
+        with open(tf, "w", encoding="utf-8") as f:
             f.write(text)
 
     # 4. CMakeLists.txt: add file-saf.cc to the main add_library source list.
@@ -195,6 +251,29 @@ def main():
         with open(plat, "w", encoding="utf-8") as f:
             f.write(text)
 
+    # 9. Patch session-thread.cc: guard evthread code behind
+    #    EVENT__DISABLE_THREAD_SUPPORT so the build works when libevent
+    #    thread support is disabled (Android cross-compile).
+    st = os.path.join(libt, "session-thread.cc")
+    with open(st, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: guard evthread" not in text:
+        # Guard #include <event2/thread.h>
+        text = text.replace(
+            "#include <event2/thread.h>",
+            "#include <event2/thread.h>\n// ANDROID fork: guard evthread when thread support disabled",
+            1,
+        )
+        # Wrap the tr_evthread_init_helpers namespace
+        old = "#endif\n}\n\nvoid init_evthreads_once()\n{\n    evthread_lock_callbacks constexpr LockCbs{"
+        new = "#endif\n}\n\nvoid init_evthreads_once()\n{\n#ifndef EVENT__DISABLE_THREAD_SUPPORT\n    // ANDROID fork: guard evthread types when thread support disabled\n    evthread_lock_callbacks constexpr LockCbs{"
+        text = text.replace(old, new, 1)
+        # Close the guard before the namespace close
+        old2 = "    evthread_set_id_callback(thread_current_id);\n}\n\n} // namespace tr_evthread_init_helpers"
+        new2 = "    evthread_set_id_callback(thread_current_id);\n#endif\n}\n\n} // namespace tr_evthread_init_helpers"
+        text = text.replace(old2, new2, 1)
+        with open(st, "w", encoding="utf-8") as f:
+            f.write(text)
     print("apply_fork: OK")
 
 if __name__ == "__main__":

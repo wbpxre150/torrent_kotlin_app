@@ -17,6 +17,7 @@
 [[nodiscard]] bool tr_saf_path_exists(char const* path, tr_error* error);
 [[nodiscard]] std::optional<tr_sys_path_info> tr_saf_path_get_info(std::string_view path, int flags, tr_error* error);
 [[nodiscard]] bool tr_saf_path_rename(char const* src_path, char const* dst_path, tr_error* error);
+[[nodiscard]] bool tr_saf_path_is_same(char const* path1, char const* path2, tr_error* error);
 [[nodiscard]] bool tr_saf_path_remove(char const* path, tr_error* error);
 [[nodiscard]] bool tr_saf_dir_create(char const* path, int flags, int permissions, tr_error* error);
 [[nodiscard]] std::optional<tr_sys_path_capacity> tr_saf_path_get_capacity(std::string_view path, tr_error* error);
