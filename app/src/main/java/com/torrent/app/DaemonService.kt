@@ -100,6 +100,17 @@ class DaemonService : Service() {
         }
     }
 
+    private fun ensureUsbGateway() {
+        if (gateway != null) return
+        usbPermissionManager.treeUri()?.let { uri ->
+            gateway = SafStorageGateway(this, uri)
+            val ftp = configStore.load().ftp
+            ftpController?.stop()
+            ftpController = FtpServerController(gateway!!, FtpCredentials(configStore),
+                port = ftp.port, rootRelPath = ftp.exposedRoot)
+        }
+    }
+
     inner class LocalBinder : android.os.Binder() {
         val serviceState: StateFlow<ServiceState> = this@DaemonService.state
         fun getAuthToken(): String = this@DaemonService.getAuthToken()
@@ -128,6 +139,7 @@ class DaemonService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         _state.value = ServiceState.Starting
 
+        ensureUsbGateway()
         acquireLocks()
         startForegroundWithNotification()
 
@@ -426,6 +438,10 @@ class DaemonService : Service() {
 
     private fun startTransmissionSupervisor() {
         if (supervisors.any { it.status.value.label == "transmission" }) return
+        if (gateway == null) {
+            android.util.Log.w("DaemonService", "transmission supervisor requested but gateway is null; " +
+                "daemon will see ENODEV (-19) until USB is granted")
+        }
         transmissionConfig.ensureSettingsJson()
         val nativeLibDir = applicationInfo.nativeLibraryDir
         val workDir = File(filesDir, "daemons"); val logDir = File(filesDir, "logs")
