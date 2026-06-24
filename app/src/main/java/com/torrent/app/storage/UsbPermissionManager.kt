@@ -1,6 +1,5 @@
 package com.torrent.app.storage
 
-import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -17,7 +16,13 @@ class UsbPermissionManager(private val context: Context) {
     fun treeUri(): Uri? {
         val s = prefs.getString(KEY_TREE_URI, null) ?: return null
         val uri = Uri.parse(s)
-        return if (isStillGranted(uri)) uri else { clear(); null }
+        if (!isStillGranted(uri)) {
+            // Permission was revoked by system - clean up the stale entry.
+            // Do NOT call clear(): clear() reads via treeUri() and would recurse.
+            prefs.edit().remove(KEY_TREE_URI).apply()
+            return null
+        }
+        return uri
     }
 
     fun isGranted(): Boolean = treeUri() != null
@@ -35,7 +40,8 @@ class UsbPermissionManager(private val context: Context) {
 
     /** Release the persisted permission and forget the URI. */
     fun clear() {
-        val uri = treeUri()
+        val s = prefs.getString(KEY_TREE_URI, null)
+        val uri = if (s != null) Uri.parse(s) else null
         if (uri != null) {
             try {
                 val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or
