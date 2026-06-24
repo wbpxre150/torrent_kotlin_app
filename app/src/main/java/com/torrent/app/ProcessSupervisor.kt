@@ -165,17 +165,51 @@ class ProcessSupervisor(
         }
     }
 
-    private fun launchChild(): Process? {
-        val binary = File(nativeLibraryDir, binaryName)
-        if (!binary.canExecute()) {
-            // Try to fix permissions (shouldn't be needed with useLegacyPackaging, but
-            // some devices/setups require it)
-            binary.setExecutable(true, false)
-            if (!binary.canExecute()) {
-                Log.e(TAG, "[$label] ${binary.absolutePath} is not executable")
+    /**
+     * Stages the native binary into [workDir] (a writable, exec-capable path) and
+     * returns the staged File to exec. On Android 14+/15 the source path under
+     * [nativeLibraryDir] may live behind a noexec mount namespace where
+     * `File.canExecute()` succeeds but `execve()` fails with ENOENT; copying into
+     * the app's filesDir resolves this. Re-copies only when the staged copy is
+     * missing or its length differs from the source (handles app updates, which
+     * change the source path prefix entirely).
+     *
+     * Returns null only if the source binary does not exist or cannot be made
+     * executable after copy.
+     */
+    internal fun prepareBinary(): File? {
+        val source = File(nativeLibraryDir, binaryName)
+        if (!source.exists()) {
+            Log.e(TAG, "[$label] source binary not found: ${source.absolutePath}")
+            return null
+        }
+        val staged = File(workDir, binaryName)
+        val needsCopy = !staged.exists() || staged.length() != source.length()
+        if (needsCopy) {
+            workDir.mkdirs()
+            try {
+                source.inputStream().use { input ->
+                    staged.outputStream().use { output ->
+                        input.copyTo(output)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "[$label] failed to stage binary: ${e.message}", e)
                 return null
             }
         }
+        if (!staged.canExecute()) {
+            staged.setExecutable(true, false)
+            if (!staged.canExecute()) {
+                Log.e(TAG, "[$label] staged binary not executable: ${staged.absolutePath}")
+                return null
+            }
+        }
+        return staged
+    }
+
+    private fun launchChild(): Process? {
+        val binary = prepareBinary() ?: return null
 
         val env = ProcessBuilder().environment().apply {
             if (ldLibraryPath != null) {
