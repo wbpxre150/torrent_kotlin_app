@@ -198,6 +198,7 @@ class DaemonService : Service() {
         val uri = usbPermissionManager.treeUri()
         return SafStatus(
             granted = uri != null,
+            gatewayPresent = gateway != null,
             treeUri = uri?.toString(),
             rootSummary = if (uri != null) "USB (SAF tree)" else null,
         )

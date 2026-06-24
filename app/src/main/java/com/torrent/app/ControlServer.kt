@@ -107,6 +107,7 @@ class ControlServer(
                         val s = safStatus()
                         val json = buildString {
                             append("{\"granted\":").append(s.granted)
+                            append(",\"gatewayPresent\":").append(s.gatewayPresent)
                             append(",\"treeUri\":").append(jsonStr(s.treeUri))
                             append(",\"rootSummary\":").append(jsonStr(s.rootSummary)).append("}")
                         }
