@@ -626,6 +626,49 @@ def main():
         with open(fp2, "w", encoding="utf-8") as f:
             f.write(text)
 
+    # 11. Patch torrent.cc: set checked_pieces_ in on_piece_completed.
+    #     ANDROID fork: a piece that just passed check_piece during download
+    #     is verified against current on-disk state; mark it checked so it is
+    #     not re-verified through the cache path on the first seeding request.
+    #     Addresses Mechanism C of BUG-SEEDING-CORRUPT-FALSE-POSITIVE.
+    torrent_cc2 = os.path.join(libt, "torrent.cc")
+    with open(torrent_cc2, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: the piece just passed check_piece in on_block_received" not in text:
+        old = (
+            "    // if this piece completes any file, invoke the fileCompleted func for it\n"
+            "    for (auto [file, file_end] = fpm_.file_span_for_piece(piece); file < file_end; ++file)\n"
+            "    {\n"
+            "        if (has_file(file))\n"
+            "        {\n"
+            "            on_file_completed(file);\n"
+            "        }\n"
+            "    }\n"
+            "}\n"
+        )
+        new = (
+            "    // if this piece completes any file, invoke the fileCompleted func for it\n"
+            "    for (auto [file, file_end] = fpm_.file_span_for_piece(piece); file < file_end; ++file)\n"
+            "    {\n"
+            "        if (has_file(file))\n"
+            "        {\n"
+            "            on_file_completed(file);\n"
+            "        }\n"
+            "    }\n\n"
+            "    // ANDROID fork: the piece just passed check_piece in on_block_received,\n"
+            "    // so mark it checked. Without this, every piece is re-verified through\n"
+            "    // the cache-based path on the first seeding request, where a transient\n"
+            "    // I/O error or cache inconsistency can produce a false-positive corruption\n"
+            "    // verdict. See BUG-SEEDING-CORRUPT-FALSE-POSITIVE Mechanism C.\n"
+            "    checked_pieces_.set(piece, true);\n"
+            "}\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: torrent.cc on_piece_completed body not found")
+        text = text.replace(old, new, 1)
+        with open(torrent_cc2, "w", encoding="utf-8") as f:
+            f.write(text)
+
     print("apply_fork: OK")
 
 if __name__ == "__main__":
