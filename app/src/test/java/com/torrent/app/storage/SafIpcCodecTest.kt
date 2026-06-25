@@ -3,6 +3,8 @@ package com.torrent.app.storage
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import org.junit.Test
 
 class SafIpcCodecTest {
@@ -47,16 +49,31 @@ class SafIpcCodecTest {
         val reqPath = SafIpcCodec.parseStatRequest(
             SafIpcCodec.decodeRequest(SafIpcCodec.statRequest("root")).payload)
         assertEquals("root", reqPath)
-        val resp = SafIpcCodec.decodeResponse(SafIpcCodec.statResponse(isDir = true, size = 0L))
+        val resp = SafIpcCodec.decodeResponse(
+            SafIpcCodec.statResponse(isDir = true, size = 0L, lastModified = 0L))
         val info = SafIpcCodec.parseStatResponse(resp)
-        assertEquals(UsbFdBridge.PathInfo(true, 0L), info)
+        assertEquals(UsbFdBridge.PathInfo(true, 0L, 0L), info)
     }
 
     @Test fun statResponse_failure_returnsNull() {
         val resp = SafIpcCodec.decodeResponse(SafIpcCodec.encodeResponse(-2, ByteArray(0)))
         assertNull(SafIpcCodec.parseStatResponse(resp))
     }
-
+    @Test fun statResponse_carriesMtime() {
+        val resp = SafIpcCodec.decodeResponse(
+            SafIpcCodec.statResponse(isDir = false, size = 4096L, lastModified = 1719300000L))
+        val info = SafIpcCodec.parseStatResponse(resp)
+        assertEquals(UsbFdBridge.PathInfo(false, 4096L, 1719300000L), info)
+    }
+    @Test fun parseStatResponse_acceptsLegacy9BytePayload() {
+        val legacy = ByteBuffer.allocate(9).order(ByteOrder.LITTLE_ENDIAN)
+            .put(0.toByte())
+            .putLong(999L)
+            .array()
+        val resp = SafIpcCodec.Response(0, legacy)
+        val info = SafIpcCodec.parseStatResponse(resp)
+        assertEquals(UsbFdBridge.PathInfo(false, 999L, 0L), info)
+    }
     @Test fun renameRequest_roundTrips() {
         val (src, newName) = SafIpcCodec.parseRenameRequest(
             SafIpcCodec.decodeRequest(SafIpcCodec.renameRequest("a/b.part", "b")).payload)

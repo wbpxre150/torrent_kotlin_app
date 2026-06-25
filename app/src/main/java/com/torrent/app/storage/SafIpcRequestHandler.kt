@@ -35,7 +35,7 @@ class SafIpcRequestHandler(private val bridgeProvider: () -> UsbFdBridge?) {
                 val relPath = SafIpcCodec.parseStatRequest(req.payload)
                 val info = bridge.stat(relPath)
                 if (info == null) Handled(-2) // ENOENT
-                else Handled(0, SafIpcCodec.statPayload(info.isDir, info.size))
+                else Handled(0, SafIpcCodec.statPayload(info.isDir, info.size, info.lastModified))
             }
             SafIpcCodec.OP_RENAME -> {
                 val (relPath, newName) = SafIpcCodec.parseRenameRequest(req.payload)

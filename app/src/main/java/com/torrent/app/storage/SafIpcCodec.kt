@@ -141,16 +141,19 @@ object SafIpcCodec {
     }
     fun parseStatRequest(payload: ByteArray): String =
         readString(ByteBuffer.wrap(payload))
-    fun statResponse(isDir: Boolean, size: Long): ByteArray {
-        val buf = ByteBuffer.allocate(9).order(ByteOrder.LITTLE_ENDIAN)
-        buf.put(if (isDir) 1.toByte() else 0.toByte()); putI64(buf, size)
+    fun statResponse(isDir: Boolean, size: Long, lastModified: Long): ByteArray {
+        val buf = ByteBuffer.allocate(17).order(ByteOrder.LITTLE_ENDIAN)
+        buf.put(if (isDir) 1.toByte() else 0.toByte())
+        putI64(buf, size); putI64(buf, lastModified)
         return encodeResponse(0, buf.array())
     }
     fun parseStatResponse(resp: Response): UsbFdBridge.PathInfo? {
         if (resp.status != 0) return null
-        val bb = ByteBuffer.wrap(resp.payload)
+        val bb = ByteBuffer.wrap(resp.payload).order(ByteOrder.LITTLE_ENDIAN)
         val isDir = bb.get() == 1.toByte()
-        return UsbFdBridge.PathInfo(isDir, leI64(bb))
+        val size = leI64(bb)
+        val lastModified = if (bb.remaining() >= 8) leI64(bb) else 0L
+        return UsbFdBridge.PathInfo(isDir, size, lastModified)
     }
 
     fun renameRequest(relPath: String, newName: String): ByteArray {
@@ -181,9 +184,10 @@ object SafIpcCodec {
         if (resp.status != 0) -1L else leI64(ByteBuffer.wrap(resp.payload))
 
     /** Payload-only (no frame) for a STAT success response. */
-    fun statPayload(isDir: Boolean, size: Long): ByteArray {
-        val buf = ByteBuffer.allocate(9).order(ByteOrder.LITTLE_ENDIAN)
-        buf.put(if (isDir) 1.toByte() else 0.toByte()); putI64(buf, size)
+    fun statPayload(isDir: Boolean, size: Long, lastModified: Long): ByteArray {
+        val buf = ByteBuffer.allocate(17).order(ByteOrder.LITTLE_ENDIAN)
+        buf.put(if (isDir) 1.toByte() else 0.toByte())
+        putI64(buf, size); putI64(buf, lastModified)
         return buf.array()
     }
     /** Payload-only (no frame) for an AVAIL success response. */

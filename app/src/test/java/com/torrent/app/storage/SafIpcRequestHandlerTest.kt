@@ -53,12 +53,12 @@ class SafIpcRequestHandlerTest {
     }
 
     @Test fun stat_fileReturnsTypeAndSize() {
-        val b = FakeBridge().apply { files["a/b.bin"] = UsbFdBridge.PathInfo(false, 12345L) }
+        val b = FakeBridge().apply { files["a/b.bin"] = UsbFdBridge.PathInfo(false, 12345L, 1719300000L) }
         val h = SafIpcRequestHandler { b }
         val r = h.handle(SafIpcCodec.decodeRequest(SafIpcCodec.statRequest("a/b.bin")))
         assertEquals(0, r.status)
         val info = SafIpcCodec.parseStatResponse(SafIpcCodec.Response(0, r.payload))
-        assertEquals(UsbFdBridge.PathInfo(false, 12345L), info)
+        assertEquals(UsbFdBridge.PathInfo(false, 12345L, 1719300000L), info)
     }
 
     @Test fun stat_dirReturnsIsDir() {
@@ -66,7 +66,7 @@ class SafIpcRequestHandlerTest {
         val h = SafIpcRequestHandler { b }
         val r = h.handle(SafIpcCodec.decodeRequest(SafIpcCodec.statRequest("sub")))
         assertEquals(0, r.status)
-        assertEquals(UsbFdBridge.PathInfo(true, 0L),
+        assertEquals(UsbFdBridge.PathInfo(true, 0L, 0L),
             SafIpcCodec.parseStatResponse(SafIpcCodec.Response(0, r.payload)))
     }
 
