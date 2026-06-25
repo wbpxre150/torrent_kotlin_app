@@ -668,7 +668,42 @@ def main():
         text = text.replace(old, new, 1)
         with open(torrent_cc2, "w", encoding="utf-8") as f:
             f.write(text)
-
+    # 12. Patch torrent.cc: drop mtime==0 short-circuit in load_checked_pieces.
+    #     ANDROID fork: blanket "mtime == 0" clear forces re-verification of all
+    #     SAF pieces on restart (SAF mtime can be 0 when unstatable). With the
+    #     Kotlin stat path now populating mtime, only clear pieces on actual
+    #     mtime mismatch. If both saved and current mtime are 0, pieces are kept.
+    #     Addresses Mechanism D of BUG-SEEDING-CORRUPT-FALSE-POSITIVE.
+    torrent_cc3 = os.path.join(libt, "torrent.cc")
+    with open(torrent_cc3, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: do NOT clear pieces just because mtime == 0" not in text:
+        old = (
+            "        // if a file has changed, mark its pieces as unchecked\n"
+            "        if (mtime == 0 || mtime != mtimes[file])\n"
+            "        {\n"
+            "            auto const [piece_begin, piece_end] = tor_.piece_span_for_file(file);\n"
+            "            tor_.checked_pieces_.unset_span(piece_begin, piece_end);\n"
+            "        }\n"
+        )
+        new = (
+            "        // if a file has changed, mark its pieces as unchecked\n"
+            "        // ANDROID fork: do NOT clear pieces just because mtime == 0 —\n"
+            "        // SAF files may have mtime == 0 when the Kotlin side cannot stat\n"
+            "        // them, and this caused re-verification through the cache path,\n"
+            "        // triggering false-positive corruption verdicts. See\n"
+            "        // BUG-SEEDING-CORRUPT-FALSE-POSITIVE Mechanism D.\n"
+            "        if (mtime != mtimes[file])\n"
+            "        {\n"
+            "            auto const [piece_begin, piece_end] = tor_.piece_span_for_file(file);\n"
+            "            tor_.checked_pieces_.unset_span(piece_begin, piece_end);\n"
+            "        }\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: torrent.cc load_checked_pieces mtime check not found")
+        text = text.replace(old, new, 1)
+        with open(torrent_cc3, "w", encoding="utf-8") as f:
+            f.write(text)
     print("apply_fork: OK")
 
 if __name__ == "__main__":
