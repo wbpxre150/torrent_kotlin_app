@@ -1,7 +1,6 @@
 package com.torrent.app
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -30,7 +29,7 @@ class ProcessSupervisorBinaryPrepTest {
             pipelineMaxLines = 10,
         )
 
-    @Test fun prepareBinary_copiesSourceToWorkDir_whenStagedMissing() {
+    @Test fun resolveBinary_returnsSource_whenExecutable() {
         val sourceDir = tmp.newFolder("lib")
         val workDir = tmp.newFolder("daemons")
         val source = File(sourceDir, "libprobe.so").apply {
@@ -39,60 +38,50 @@ class ProcessSupervisorBinaryPrepTest {
         }
 
         val sup = newSupervisor(sourceDir, workDir)
-        val staged = sup.prepareBinary()
+        val resolved = sup.resolveBinary()
 
-        assertNotNull("prepareBinary must return a staged file", staged)
-        assertEquals(workDir, staged?.parentFile)
-        assertTrue("staged copy must exist", staged!!.exists())
-        assertEquals("staged copy length must match source", source.length(), staged.length())
-        assertTrue("staged copy must be executable", staged.canExecute())
+        assertTrue("resolveBinary must return the nativeLibraryDir binary", resolved != null)
+        assertEquals("must resolve in place from nativeLibraryDir, not staged",
+            source.absolutePath, resolved!!.absolutePath)
     }
 
-    @Test fun prepareBinary_reusesStaged_whenLengthMatches() {
+    @Test fun resolveBinary_makesBinaryExecutable_whenBitNotSet() {
         val sourceDir = tmp.newFolder("lib")
         val workDir = tmp.newFolder("daemons")
-        val source = File(sourceDir, "libprobe.so").apply {
+        File(sourceDir, "libprobe.so").apply {
+            writeBytes(ByteArray(64))
+            // intentionally not marked executable
+        }
+
+        val sup = newSupervisor(sourceDir, workDir)
+        val resolved = sup.resolveBinary()
+
+        assertTrue("resolveBinary must set the exec bit when missing", resolved != null)
+        assertTrue("binary must be executable after resolveBinary", resolved!!.canExecute())
+    }
+
+    @Test fun resolveBinary_returnsNull_whenSourceMissing() {
+        val sourceDir = tmp.newFolder("lib")
+        val workDir = tmp.newFolder("daemons")
+
+        val sup = newSupervisor(sourceDir, workDir)
+        val resolved = sup.resolveBinary()
+
+        assertNull("must return null when source binary does not exist", resolved)
+    }
+
+    @Test fun resolveBinary_doesNotStageIntoWorkDir() {
+        val sourceDir = tmp.newFolder("lib")
+        val workDir = tmp.newFolder("daemons")
+        File(sourceDir, "libprobe.so").apply {
             writeBytes(ByteArray(128) { it.toByte() })
             setExecutable(true, false)
         }
 
         val sup = newSupervisor(sourceDir, workDir)
-        val first = sup.prepareBinary()!!
-        val firstMtime = first.lastModified()
-        first.setLastModified(firstMtime - 60_000)
+        sup.resolveBinary()
 
-        val second = sup.prepareBinary()!!
-        assertEquals("same length must not trigger re-copy", 128, second.length().toInt())
-        assertEquals("staged file must not be rewritten when length matches",
-            firstMtime - 60_000, second.lastModified())
-    }
-
-    @Test fun prepareBinary_recopies_whenLengthDiffers() {
-        val sourceDir = tmp.newFolder("lib")
-        val workDir = tmp.newFolder("daemons")
-        val source = File(sourceDir, "libprobe.so").apply {
-            writeBytes(ByteArray(64) { it.toByte() })
-            setExecutable(true, false)
-        }
-
-        val sup = newSupervisor(sourceDir, workDir)
-        val stale = File(workDir, "libprobe.so").apply {
-            writeBytes(ByteArray(32))
-            setLastModified(0L)
-        }
-
-        val staged = sup.prepareBinary()!!
-        assertEquals("stale copy must be replaced with source length",
-            source.length(), staged.length())
-        assertTrue("staged copy must be executable after re-copy", staged.canExecute())
-    }
-
-    @Test fun prepareBinary_returnsNull_whenSourceMissing() {
-        val sourceDir = tmp.newFolder("lib")
-        val workDir = tmp.newFolder("daemons")
-
-        val sup = newSupervisor(sourceDir, workDir)
-        val staged = sup.prepareBinary()
-        assertNull("must return null when source binary does not exist", staged)
+        val staged = File(workDir, "libprobe.so")
+        assertTrue("no copy must be created in workDir", !staged.exists())
     }
 }
