@@ -166,50 +166,37 @@ class ProcessSupervisor(
     }
 
     /**
-     * Stages the native binary into [workDir] (a writable, exec-capable path) and
-     * returns the staged File to exec. On Android 14+/15 the source path under
-     * [nativeLibraryDir] may live behind a noexec mount namespace where
-     * `File.canExecute()` succeeds but `execve()` fails with ENOENT; copying into
-     * the app's filesDir resolves this. Re-copies only when the staged copy is
-     * missing or its length differs from the source (handles app updates, which
-     * change the source path prefix entirely).
-     *
-     * Returns null only if the source binary does not exist or cannot be made
-     * executable after copy.
+     * Resolves the native binary under [nativeLibraryDir] and verifies it is
+     * executable. The binary is exec'd in place from nativeLibraryDir: that
+     * path carries the SELinux label `apk_data_file`, which `untrusted_app`
+     * is permitted to execute. Staging the binary into [workDir]
+     * (label `app_data_file`) is forbidden by Android W^X enforcement and
+     * must not be done.
      */
-    internal fun prepareBinary(): File? {
-        val source = File(nativeLibraryDir, binaryName)
-        if (!source.exists()) {
-            Log.e(TAG, "[$label] source binary not found: ${source.absolutePath}")
+    internal fun resolveBinary(): File? {
+        val binary = File(nativeLibraryDir, binaryName)
+        if (!binary.exists()) {
+            Log.e(TAG, "[$label] binary not found: ${binary.absolutePath}")
             return null
         }
-        val staged = File(workDir, binaryName)
-        val needsCopy = !staged.exists() || staged.length() != source.length()
-        if (needsCopy) {
-            workDir.mkdirs()
-            try {
-                source.inputStream().use { input ->
-                    staged.outputStream().use { output ->
-                        input.copyTo(output)
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "[$label] failed to stage binary: ${e.message}", e)
+        if (!binary.canExecute()) {
+            binary.setExecutable(true, false)
+            if (!binary.canExecute()) {
+                Log.e(TAG, "[$label] binary not executable: ${binary.absolutePath}")
                 return null
             }
         }
-        if (!staged.canExecute()) {
-            staged.setExecutable(true, false)
-            if (!staged.canExecute()) {
-                Log.e(TAG, "[$label] staged binary not executable: ${staged.absolutePath}")
-                return null
-            }
-        }
-        return staged
+        return binary
     }
 
     private fun launchChild(): Process? {
-        val binary = prepareBinary() ?: return null
+        // workDir is the child's cwd (ProcessBuilder.directory). It must exist
+        // before start(): ProcessBuilder forks and calls chdir(workDir) before
+        // execve(); a missing cwd yields ENOENT that Java's IOException reports
+        // against the program path, masking the real cause.
+        workDir.mkdirs()
+
+        val binary = resolveBinary() ?: return null
 
         val env = ProcessBuilder().environment().apply {
             if (ldLibraryPath != null) {
