@@ -364,7 +364,12 @@ std::optional<tr_sys_path_info> tr_saf_path_get_info(std::string_view path, int 
     int64_t size = 0;
     std::memcpy(&size, resp.data() + 1, 8);
     info.size = static_cast<uint64_t>(size);
-    info.last_modified_at = 0;
+    int64_t mtime = 0;
+    if (resp.size() >= 17)
+    {
+        std::memcpy(&mtime, resp.data() + 9, 8);
+    }
+    info.last_modified_at = static_cast<time_t>(mtime);
     return info;
 }
 
