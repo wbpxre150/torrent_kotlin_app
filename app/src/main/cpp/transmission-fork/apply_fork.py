@@ -572,6 +572,59 @@ def main():
         text = text.replace(old, new, 1)
         with open(peer_msgs, "w", encoding="utf-8") as f:
             f.write(text)
+    # 10. Patch file-posix.cc: set tr_error on 0-byte read in
+    #     tr_sys_file_read_at. ANDROID fork: a stale SAF fd can return 0
+    #     (EOF) on pread without an errno; surface this as EIO so the caller
+    #     treats it as a read error instead of hashing an uninitialized buffer.
+    fp2 = os.path.join(libt, "file-posix.cc")
+    with open(fp2, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: a 0-byte read when bytes were requested" not in text:
+        old = (
+            "    if (my_bytes_read > 0)\n"
+            "    {\n"
+            "        if (bytes_read != nullptr)\n"
+            "        {\n"
+            "            *bytes_read = my_bytes_read;\n"
+            "        }\n\n"
+            "        ret = true;\n"
+            "    }\n"
+            "    else if (error != nullptr && my_bytes_read == -1)\n"
+            "    {\n"
+            "        error->set_from_errno(errno);\n"
+            "    }\n\n"
+            "    return ret;\n"
+            "}\n"
+        )
+        new = (
+            "    if (my_bytes_read > 0)\n"
+            "    {\n"
+            "        if (bytes_read != nullptr)\n"
+            "        {\n"
+            "            *bytes_read = my_bytes_read;\n"
+            "        }\n\n"
+            "        ret = true;\n"
+            "    }\n"
+            "    else if (error != nullptr && my_bytes_read == -1)\n"
+            "    {\n"
+            "        error->set_from_errno(errno);\n"
+            "    }\n"
+            "    else if (error != nullptr && my_bytes_read == 0 && size > 0)\n"
+            "    {\n"
+            "        // ANDROID fork: a 0-byte read when bytes were requested is an\n"
+            "        // unexpected EOF (e.g. stale SAF fd, truncated file, FUSE reset).\n"
+            "        // Set an explicit error so callers distinguish read failure from a\n"
+            "        // short read, instead of hashing an uninitialized buffer.\n"
+            "        error->set_from_errno(EIO);\n"
+            "    }\n\n"
+            "    return ret;\n"
+            "}\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: file-posix.cc tr_sys_file_read_at body not found")
+        text = text.replace(old, new, 1)
+        with open(fp2, "w", encoding="utf-8") as f:
+            f.write(text)
 
     print("apply_fork: OK")
 
