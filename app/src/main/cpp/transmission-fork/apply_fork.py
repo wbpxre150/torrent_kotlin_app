@@ -305,6 +305,273 @@ def main():
         text = text.replace(old, new)
         with open(plat, "w", encoding="utf-8") as f:
             f.write(text)
+    # 9. Patch inout.cc, torrent.cc, torrent.h, peer-msgs.cc:
+    #    ANDROID fork: distinguish read error from hash mismatch.
+    #    recalculate_hash / tr_ioTestPiece / check_piece / ensure_piece_is_checked
+    #    return a tri-state so a transient I/O failure is not misreported as
+    #    data corruption. Only a genuine hash mismatch sets the torrent error.
+    inout = os.path.join(libt, "inout.cc")
+    with open(inout, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: distinguish read error from hash mismatch" not in text:
+        # 9a. include <utility> for std::pair
+        text = text.replace(
+            "#include <optional>\n#include <string_view>\n",
+            "#include <optional>\n#include <string_view>\n#include <utility>\n",
+            1,
+        )
+        # 9b. recalculate_hash signature + read-failure return
+        old_sig = (
+            "std::optional<tr_sha1_digest_t> recalculate_hash(tr_torrent const& tor, tr_piece_index_t const piece)\n"
+            "{\n"
+            "    TR_ASSERT(piece < tor.piece_count());\n\n"
+            "    auto sha = tr_sha1{};\n"
+            "    auto buffer = std::array<uint8_t, tr_block_info::BlockSize>{};\n\n"
+            "    auto& cache = tor.session->cache;\n"
+            "    auto const [begin_byte, end_byte] = tor.block_info().byte_span_for_piece(piece);\n"
+            "    auto const [begin_block, end_block] = tor.block_span_for_piece(piece);\n"
+            "    [[maybe_unused]] auto n_bytes_checked = size_t{};\n"
+            "    for (auto block = begin_block; block < end_block; ++block)\n"
+            "    {\n"
+            "        auto const block_loc = tor.block_loc(block);\n"
+            "        auto const block_len = tor.block_size(block);\n"
+            "        if (auto const success = cache->read_block(tor, block_loc, block_len, std::data(buffer)) == 0; !success)\n"
+            "        {\n"
+            "            return {};\n"
+            "        }\n"
+        )
+        new_sig = (
+            "// ANDROID fork: distinguish read error from hash mismatch.\n"
+            "// Returns {read_ok=false, {}} on read failure; {read_ok=true, hash} on success.\n"
+            "std::pair<bool, std::optional<tr_sha1_digest_t>> recalculate_hash(tr_torrent const& tor, tr_piece_index_t const piece)\n"
+            "{\n"
+            "    TR_ASSERT(piece < tor.piece_count());\n\n"
+            "    auto sha = tr_sha1{};\n"
+            "    auto buffer = std::array<uint8_t, tr_block_info::BlockSize>{};\n\n"
+            "    auto& cache = tor.session->cache;\n"
+            "    auto const [begin_byte, end_byte] = tor.block_info().byte_span_for_piece(piece);\n"
+            "    auto const [begin_block, end_block] = tor.block_span_for_piece(piece);\n"
+            "    [[maybe_unused]] auto n_bytes_checked = size_t{};\n"
+            "    for (auto block = begin_block; block < end_block; ++block)\n"
+            "    {\n"
+            "        auto const block_loc = tor.block_loc(block);\n"
+            "        auto const block_len = tor.block_size(block);\n"
+            "        if (auto const success = cache->read_block(tor, block_loc, block_len, std::data(buffer)) == 0; !success)\n"
+            "        {\n"
+            "            return { false, {} };\n"
+            "        }\n"
+        )
+        if old_sig not in text:
+            sys.exit("ERROR: inout.cc recalculate_hash signature not found")
+        text = text.replace(old_sig, new_sig, 1)
+        # 9c. recalculate_hash return at end of function
+        old_end = (
+            "    TR_ASSERT(tor.piece_size(piece) == n_bytes_checked);\n"
+            "    return sha.finish();\n"
+            "}\n"
+        )
+        new_end = (
+            "    TR_ASSERT(tor.piece_size(piece) == n_bytes_checked);\n"
+            "    return { true, sha.finish() };\n"
+            "}\n"
+        )
+        if old_end not in text:
+            sys.exit("ERROR: inout.cc recalculate_hash end not found")
+        text = text.replace(old_end, new_end, 1)
+        # 9d. tr_ioTestPiece
+        old_tpi = (
+            "bool tr_ioTestPiece(tr_torrent const& tor, tr_piece_index_t const piece)\n"
+            "{\n"
+            "    auto const hash = recalculate_hash(tor, piece);\n"
+            "    return hash && *hash == tor.piece_hash(piece);\n"
+            "}\n"
+        )
+        new_tpi = (
+            "// ANDROID fork: distinguish read error from hash mismatch.\n"
+            "// Returns 1 = piece good, 0 = hash mismatch (corrupt), -1 = read error (transient).\n"
+            "int tr_ioTestPiece(tr_torrent const& tor, tr_piece_index_t const piece)\n"
+            "{\n"
+            "    auto const [read_ok, hash] = recalculate_hash(tor, piece);\n"
+            "    if (!read_ok)\n"
+            "    {\n"
+            "        return -1;\n"
+            "    }\n"
+            "    return hash && *hash == tor.piece_hash(piece) ? 1 : 0;\n"
+            "}\n"
+        )
+        if old_tpi not in text:
+            sys.exit("ERROR: inout.cc tr_ioTestPiece not found")
+        text = text.replace(old_tpi, new_tpi, 1)
+        with open(inout, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    # 9e. inout.h declaration
+    inout_h = os.path.join(libt, "inout.h")
+    with open(inout_h, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "int tr_ioTestPiece" not in text:
+        old_decl = "[[nodiscard]] bool tr_ioTestPiece(tr_torrent const& tor, tr_piece_index_t piece);\n"
+        new_decl = "[[nodiscard]] int tr_ioTestPiece(tr_torrent const& tor, tr_piece_index_t piece);\n"
+        if old_decl not in text:
+            sys.exit("ERROR: inout.h tr_ioTestPiece declaration not found")
+        text = text.replace(old_decl, new_decl, 1)
+        with open(inout_h, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    # 9f. torrent.h: check_piece + ensure_piece_is_checked declarations
+    torrent_h = os.path.join(libt, "torrent.h")
+    with open(torrent_h, "r", encoding="utf-8") as f:
+        text = f.read()
+    h_changed = False
+    if "int tr_torrent::check_piece" not in text and "int check_piece" not in text:
+        # check_piece
+        old = "    [[nodiscard]] bool check_piece(tr_piece_index_t piece) const;\n"
+        new = "    // ANDROID fork: tri-state: 1=good, 0=corrupt, -1=read error.\n    [[nodiscard]] int check_piece(tr_piece_index_t piece) const;\n"
+        if old not in text:
+            sys.exit("ERROR: torrent.h check_piece declaration not found")
+        text = text.replace(old, new, 1)
+        h_changed = True
+    if "int ensure_piece_is_checked" not in text:
+        old = "    [[nodiscard]] bool ensure_piece_is_checked(tr_piece_index_t piece);\n"
+        new = "    // ANDROID fork: tri-state: 1=good, 0=corrupt, -1=read error (transient).\n    [[nodiscard]] int ensure_piece_is_checked(tr_piece_index_t piece);\n"
+        if old not in text:
+            sys.exit("ERROR: torrent.h ensure_piece_is_checked declaration not found")
+        text = text.replace(old, new, 1)
+        h_changed = True
+    if h_changed:
+        with open(torrent_h, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    # 9g. torrent.cc: check_piece body
+    torrent_cc = os.path.join(libt, "torrent.cc")
+    with open(torrent_cc, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: tri-state return" not in text:
+        old = (
+            "bool tr_torrent::check_piece(tr_piece_index_t const piece) const\n"
+            "{\n"
+            "    auto const pass = tr_ioTestPiece(*this, piece);\n"
+            '    tr_logAddTraceTor(this, fmt::format("[LAZY] tr_torrent.checkPiece tested piece {}, pass=={}", piece, pass));\n'
+            "    return pass;\n"
+            "}\n"
+        )
+        new = (
+            "// ANDROID fork: tri-state return: 1=good, 0=corrupt, -1=read error.\n"
+            "int tr_torrent::check_piece(tr_piece_index_t const piece) const\n"
+            "{\n"
+            "    auto const pass = tr_ioTestPiece(*this, piece);\n"
+            '    tr_logAddTraceTor(this, fmt::format("[LAZY] tr_torrent.checkPiece tested piece {}, pass=={}", piece, pass));\n'
+            "    return pass;\n"
+            "}\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: torrent.cc check_piece body not found")
+        text = text.replace(old, new, 1)
+
+        # 9h. ensure_piece_is_checked body
+        old = (
+            "[[nodiscard]] bool tr_torrent::ensure_piece_is_checked(tr_piece_index_t piece)\n"
+            "{\n"
+            "    TR_ASSERT(piece < this->piece_count());\n\n"
+            "    if (is_piece_checked(piece))\n"
+            "    {\n"
+            "        return true;\n"
+            "    }\n\n"
+            "    bool const checked = check_piece(piece);\n"
+            "    mark_changed();\n"
+            "    set_dirty();\n\n"
+            "    checked_pieces_.set(piece, checked);\n"
+            "    return checked;\n"
+            "}\n"
+        )
+        new = (
+            "[[nodiscard]] int tr_torrent::ensure_piece_is_checked(tr_piece_index_t piece)\n"
+            "{\n"
+            "    TR_ASSERT(piece < this->piece_count());\n\n"
+            "    if (is_piece_checked(piece))\n"
+            "    {\n"
+            "        return 1;\n"
+            "    }\n\n"
+            "    // ANDROID fork: tri-state. -1 = read error (transient); do not mark the\n"
+            "    // piece corrupt, leave it unchecked so it is retried later.\n"
+            "    auto const result = check_piece(piece);\n"
+            "    mark_changed();\n"
+            "    set_dirty();\n\n"
+            "    if (result == -1)\n"
+            "    {\n"
+            "        return -1;\n"
+            "    }\n\n"
+            "    checked_pieces_.set(piece, result == 1);\n"
+            "    return result;\n"
+            "}\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: torrent.cc ensure_piece_is_checked body not found")
+        text = text.replace(old, new, 1)
+
+        # 9i. caller at line ~853 (new-seed check)
+        old_call = (
+            "    // check the first piece\n"
+            "    return ensure_piece_is_checked(0);\n"
+            "}\n"
+        )
+        new_call = (
+            '    // check the first piece. Treat read error (-1) as "not a new seed".\n'
+            "    auto const r = ensure_piece_is_checked(0);\n"
+            "    return r == 1;\n"
+            "}\n"
+        )
+        if old_call not in text:
+            sys.exit("ERROR: torrent.cc ensure_piece_is_checked(0) call site not found")
+        text = text.replace(old_call, new_call, 1)
+        with open(torrent_cc, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    # 9j. peer-msgs.cc: add_next_block
+    peer_msgs = os.path.join(libt, "peer-msgs.cc")
+    with open(peer_msgs, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: tri-state. -1 = read error (transient): reject this" not in text:
+        old = (
+            "    auto buf = std::array<uint8_t, tr_block_info::BlockSize>{};\n"
+            "    auto ok = is_valid_request(req) && tor_.has_piece(req.index);\n\n"
+            "    if (ok)\n"
+            "    {\n"
+            "        ok = tor_.ensure_piece_is_checked(req.index);\n\n"
+            "        if (!ok)\n"
+            "        {\n"
+            '            tor_.error().set_local_error(fmt::format("Please Verify Local Data! Piece #{:d} is corrupt.", req.index));\n'
+            "        }\n"
+            "    }\n\n"
+            "    if (ok)\n"
+            "    {\n"
+            "        ok = session->cache->read_block(tor_, tor_.piece_loc(req.index, req.offset), req.length, std::data(buf)) == 0;\n"
+            "    }\n"
+        )
+        new = (
+            "    auto buf = std::array<uint8_t, tr_block_info::BlockSize>{};\n"
+            "    auto ok = is_valid_request(req) && tor_.has_piece(req.index);\n\n"
+            "    if (ok)\n"
+            "    {\n"
+            "        // ANDROID fork: tri-state. -1 = read error (transient): reject this\n"
+            "        // request without flagging corruption. 0 = genuine corruption.\n"
+            "        auto const checked = tor_.ensure_piece_is_checked(req.index);\n"
+            "        ok = (checked == 1);\n\n"
+            "        if (checked == 0)\n"
+            "        {\n"
+            '            tor_.error().set_local_error(fmt::format("Please Verify Local Data! Piece #{:d} is corrupt.", req.index));\n'
+            "        }\n"
+            "    }\n\n"
+            "    if (ok)\n"
+            "    {\n"
+            "        ok = session->cache->read_block(tor_, tor_.piece_loc(req.index, req.offset), req.length, std::data(buf)) == 0;\n"
+            "    }\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: peer-msgs.cc add_next_block body not found")
+        text = text.replace(old, new, 1)
+        with open(peer_msgs, "w", encoding="utf-8") as f:
+            f.write(text)
 
     print("apply_fork: OK")
 
