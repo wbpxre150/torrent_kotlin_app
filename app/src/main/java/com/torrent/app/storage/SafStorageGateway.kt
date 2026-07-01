@@ -252,6 +252,50 @@ class SafStorageGateway(
             } ?: emptyList()
         } catch (e: Exception) { Log.e(TAG, "list: ${e.message}"); emptyList() }
     }
+    data class ChildEntry(val name: String, val isDir: Boolean, val size: Long, val lastModified: Long)
+
+    /**
+     * List children of [relPath] with full metadata (name, isDir, size, mtime) in a
+     * single SAF children query. Replaces the N+1 pattern of [list] + per-child
+     * [stat] that amplified lock contention under FTP directory listings.
+     */
+    fun listDetailed(relPath: String): List<ChildEntry> {
+        val parentUri = resolveUri(relPath) ?: return emptyList()
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
+            treeUri, DocumentsContract.getDocumentId(parentUri))
+        val out = mutableListOf<ChildEntry>()
+        return try {
+            resolver.query(childrenUri,
+                arrayOf(
+                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                    DocumentsContract.Document.COLUMN_MIME_TYPE,
+                    DocumentsContract.Document.COLUMN_SIZE,
+                    DocumentsContract.Document.COLUMN_LAST_MODIFIED),
+                null, null, null)?.use { c ->
+                val idxId = c.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                val idxName = c.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                val idxMime = c.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                val idxSize = c.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE)
+                val idxMtime = c.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+                while (c.moveToNext()) {
+                    val docId = if (idxId >= 0) c.getString(idxId) else null
+                    val name = if (idxName >= 0) c.getString(idxName) ?: continue else continue
+                    val mime = if (idxMime >= 0) c.getString(idxMime) else null
+                    val isDir = mime == DocumentsContract.Document.MIME_TYPE_DIR
+                    val size = if (idxSize >= 0 && !c.isNull(idxSize)) c.getLong(idxSize) else 0L
+                    val mtime = if (idxMtime >= 0 && !c.isNull(idxMtime)) c.getLong(idxMtime) else 0L
+                    if (docId != null) {
+                        val childPath = if (relPath.isEmpty()) name else "$relPath/$name"
+                        val childUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
+                        cache[childPath] = childUri
+                    }
+                    out.add(ChildEntry(name, isDir, size, mtime))
+                }
+                out
+            } ?: emptyList()
+        } catch (e: Exception) { Log.e(TAG, "listDetailed: ${e.message}"); emptyList() }
+    }
 
     // internals
 

@@ -7,10 +7,8 @@ class SafFtpFileSource(private val gateway: SafStorageGateway) : FtpFileSource {
 
     override fun list(relPath: String): List<FtpFileSource.Entry> {
         if (gateway.stat(relPath)?.isDir != true) return emptyList()
-        return gateway.list(relPath).map { name ->
-            val childRel = if (relPath.isEmpty()) name else "$relPath/$name"
-            val st = gateway.stat(childRel)
-            FtpFileSource.Entry(name, st?.isDir ?: false, st?.size ?: 0L, st?.lastModified ?: 0L)
+        return gateway.listDetailed(relPath).map { child ->
+            FtpFileSource.Entry(child.name, child.isDir, child.size, child.lastModified)
         }
     }
 
