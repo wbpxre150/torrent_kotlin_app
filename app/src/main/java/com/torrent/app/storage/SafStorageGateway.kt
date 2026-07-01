@@ -9,13 +9,15 @@ import android.system.Os
 import android.util.Log
 import androidx.documentfile.provider.DocumentFile
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.locks.ReentrantLock
 
 /**
  * The single SAF choke point. All USB I/O in the app goes through here.
  *
- * Thread-safety: the path->URI cache is a ConcurrentHashMap; cache misses are resolved
- * under a synchronized walk. All public methods are synchronous and safe to call from
- * transmission's disk thread (Stage 05).
+ * Thread-safety: path->URI cache is ConcurrentHashMap; cache misses resolved under
+ * per-path ReentrantLock (see [lockFor]). Lock acquisition always descendant -> ancestor
+ * (thread resolving descendant may wait ancestor's lock, never reverse), so lock graph
+ * acyclic and deadlock-free. All public methods synchronous and safe.
  */
 class SafStorageGateway(
     private val context: Context,
@@ -24,6 +26,7 @@ class SafStorageGateway(
 
     private val resolver = context.contentResolver
     private val cache = ConcurrentHashMap<String, Uri>()
+    private val pathLocks = ConcurrentHashMap<String, ReentrantLock>()
     private var cachedFreeSpace: Pair<Long, Long>? = null
 
     init {
@@ -66,36 +69,45 @@ class SafStorageGateway(
         } ?: -1L
     }
 
-    @Synchronized
     override fun renameDoc(relPath: String, newName: String): Boolean {
         val n = SafPaths.normalize(relPath)
         val parent = SafPaths.splitParent(n) ?: return false
-        val srcUri = resolveUri(n) ?: return false
         val targetPath = if (parent.first.isEmpty()) newName else "${parent.first}/$newName"
-        return try {
-            // SAF's renameDocument auto-appends " (1)" on a name collision instead of
-            // overwriting (POSIX rename replaces the target). Emulate POSIX: remove an
-            // existing target first so the rename lands on the exact requested name and
-            // transmission does not silently end up referencing a phantom " (1)" file
-            // (mirrors ensureDocument collision handling, Bug 4). @Synchronized keeps the
-            // check-delete-rename atomic w.r.t. other gateway calls, so no interleave can
-            // resurrect the target between the delete and the rename.
-            resolveUri(targetPath)?.let { existing ->
-                try {
-                    DocumentsContract.deleteDocument(resolver, existing)
-                } catch (e: Exception) {
-                    Log.e(TAG, "renameDoc: cannot remove existing target '$targetPath': ${e.message}")
-                    return false
+        // Acquire source and target locks in lexicographic order to prevent deadlock.
+        val (firstLock, secondLock) = if (n < targetPath) lockFor(n) to lockFor(targetPath) else lockFor(targetPath) to lockFor(n)
+        firstLock.lock()
+        var result = false
+        try {
+            secondLock.lock()
+            try {
+                val srcUri = resolveUri(n) ?: return false
+                // SAF's renameDocument auto-appends " (1)" on a name collision instead of
+                // overwriting (POSIX rename replaces the target). Emulate POSIX: remove an
+                // existing target first so the rename lands on the exact requested name and
+                // transmission does not silently end up referencing a phantom " (1)" file.
+                resolveUri(targetPath)?.let { existing ->
+                    try {
+                        DocumentsContract.deleteDocument(resolver, existing)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "renameDoc: cannot remove existing target '$targetPath': ${e.message}")
+                        return false
+                    }
+                    cache.keys.filter { it == targetPath || it.startsWith("$targetPath/") }
+                        .forEach { cache.remove(it) }
                 }
-                cache.keys.filter { it == targetPath || it.startsWith("$targetPath/") }
-                    .forEach { cache.remove(it) }
+                val renamed = DocumentsContract.renameDocument(resolver, srcUri, newName)
+                    ?: return false
+                cache.remove(n)
+                cache[targetPath] = renamed
+                result = true
+            } finally {
+                secondLock.unlock()
             }
-            val renamed = DocumentsContract.renameDocument(resolver, srcUri, newName)
-                ?: return false
-            cache.remove(n)
-            cache[targetPath] = renamed
-            true
-        } catch (e: Exception) { Log.e(TAG, "renameDoc: ${e.message}"); false }
+        } catch (e: Exception) { Log.e(TAG, "renameDoc: ${e.message}") }
+        finally {
+            firstLock.unlock()
+        }
+        return result
     }
 
     override fun removeDoc(relPath: String): Boolean {
@@ -224,11 +236,15 @@ class SafStorageGateway(
         } catch (e: Exception) { Log.e(TAG, "withPfd: ${e.message}"); null }
     }
 
+    /** Return or create a per-path ReentrantLock for [path]. */
+    private fun lockFor(path: String): ReentrantLock =
+        pathLocks.computeIfAbsent(path) { ReentrantLock() }
+
     /**
      * Resolve a normalized relPath to a document URI, walking + caching the tree on miss.
-     * Does NOT create documents.
+     * Does NOT create documents. Uses per-path lock for the final leaf only; recursion
+     * is lock-free (parent locks are acquired by parent calls).
      */
-    @Synchronized
     private fun resolveUri(relPath: String): Uri? {
         val n = SafPaths.normalize(relPath)
         cache[n]?.let { return it }
@@ -236,29 +252,35 @@ class SafStorageGateway(
         val parent = SafPaths.splitParent(n) ?: return null
         val parentUri = resolveUri(parent.first) ?: return null
         val leaf = parent.second
-        // query children of parentUri for a matching display name
-        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
-            treeUri, DocumentsContract.getDocumentId(parentUri))
+        // double-checked: another thread may have populated cache while we waited
+        cache[n]?.let { return it }
+        val lock = lockFor(n)
+        lock.lock()
         try {
-            resolver.query(childrenUri,
-                arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                    DocumentsContract.Document.COLUMN_DISPLAY_NAME),
-                null, null, null)?.use { c ->
-                while (c.moveToNext()) {
-                    val docId = c.getString(0)
-                    val name = c.getString(1) ?: continue
-                    val childPath = if (parent.first.isEmpty()) name else "${parent.first}/$name"
-                    val childUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
-                    cache[childPath] = childUri
-                    if (name == leaf) return childUri
+            cache[n]?.let { return it }
+            val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
+                treeUri, DocumentsContract.getDocumentId(parentUri))
+            try {
+                resolver.query(childrenUri,
+                    arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                        DocumentsContract.Document.COLUMN_DISPLAY_NAME),
+                    null, null, null)?.use { c ->
+                    while (c.moveToNext()) {
+                        val docId = c.getString(0)
+                        val name = c.getString(1) ?: continue
+                        val childPath = if (parent.first.isEmpty()) name else "${parent.first}/$name"
+                        val childUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
+                        cache[childPath] = childUri
+                        if (name == leaf) return childUri
+                    }
                 }
-            }
-        } catch (e: Exception) { Log.e(TAG, "resolveUri walk: ${e.message}"); return null }
-        return null
+            } catch (e: Exception) { Log.e(TAG, "resolveUri walk: ${e.message}"); return null }
+            return null
+        } finally {
+            lock.unlock()
+        }
     }
-
     /** Ensure [relPath] exists as a regular document, creating parents + the file. */
-    @Synchronized
     private fun ensureDocument(relPath: String): Uri? {
         val n = SafPaths.normalize(relPath)
         if (n.isEmpty()) return cache[""]
@@ -268,8 +290,14 @@ class SafStorageGateway(
         val leaf = parent.second
         // does it already exist?
         resolveUri(n)?.let { return it }
-        // create a regular document
-        return try {
+        val lock = lockFor(n)
+        var result: Uri? = null
+        lock.lock()
+        try {
+            // double-check after acquiring lock
+            cache[n]?.let { return it }
+            resolveUri(n)?.let { return it }
+            // create a regular document
             val mimeType = "application/octet-stream"
             val created = DocumentsContract.createDocument(resolver, parentUri, mimeType, leaf)
                 ?: return null
@@ -289,12 +317,15 @@ class SafStorageGateway(
                 return null
             }
             cache[n] = created
-            created
-        } catch (e: Exception) { Log.e(TAG, "ensureDocument create: ${e.message}"); null }
+            result = created
+        } catch (e: Exception) { Log.e(TAG, "ensureDocument create: ${e.message}") }
+        finally {
+            lock.unlock()
+        }
+        return result
     }
 
     /** Resolve or create [relPath] as a directory, walking+creating ancestors. */
-    @Synchronized
     private fun resolveOrCreateDir(relPath: String): Uri? {
         val n = SafPaths.normalize(relPath)
         if (n.isEmpty()) return cache[""]
@@ -303,11 +334,21 @@ class SafStorageGateway(
         val parentUri = if (parent.first.isEmpty()) cache[""]!! else resolveOrCreateDir(parent.first) ?: return null
         val leaf = parent.second
         resolveUri(n)?.let { return it }   // existing dir
-        return try {
+        val lock = lockFor(n)
+        var result: Uri? = null
+        lock.lock()
+        try {
+            // double-check after acquiring lock
+            cache[n]?.let { return it }
+            resolveUri(n)?.let { return it }
             val created = DocumentsContract.createDocument(
                 resolver, parentUri, DocumentsContract.Document.MIME_TYPE_DIR, leaf)
-            if (created != null) { cache[n] = created; created } else null
-        } catch (e: Exception) { Log.e(TAG, "mkdir create: ${e.message}"); null }
+            if (created != null) { cache[n] = created; result = created }
+        } catch (e: Exception) { Log.e(TAG, "mkdir create: ${e.message}") }
+        finally {
+            lock.unlock()
+        }
+        return result
     }
 
     companion object {
