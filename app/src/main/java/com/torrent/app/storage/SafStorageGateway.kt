@@ -27,7 +27,13 @@ class SafStorageGateway(
     private val resolver = context.contentResolver
     private val cache = ConcurrentHashMap<String, Uri>()
     private val pathLocks = ConcurrentHashMap<String, ReentrantLock>()
-    private var cachedFreeSpace: Pair<Long, Long>? = null
+    @Volatile private var cachedFreeSpace: Pair<Long, Long>? = null
+    @Volatile private var freeSpaceRefreshInFlight = false
+    private val freeSpaceExecutor =
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "saf-freespace").apply { isDaemon = true }
+        }
+    private val freeSpaceLock = Any()
 
     init {
         // Seed the cache with the tree root.
@@ -131,11 +137,32 @@ class SafStorageGateway(
         cachedFreeSpace?.let { (value, ts) ->
             if (now - ts < FREE_SPACE_TTL_MS) return value
         }
-        val free = probeFreeSpaceViaFd()
-        if (free != Long.MAX_VALUE) {
-            cachedFreeSpace = free to now
+        // Stale or missing. Trigger background refresh.
+        // Return last known value (or Long.MAX_VALUE if never probed)
+        // WITHOUT blocking the caller. This keeps HTTP handler threads
+        // and transmission's IPC disk thread off the FUSE daemon.
+        triggerFreeSpaceRefresh()
+        return cachedFreeSpace?.first ?: Long.MAX_VALUE
+    }
+
+    private fun triggerFreeSpaceRefresh() {
+        if (freeSpaceRefreshInFlight) return
+        synchronized(freeSpaceLock) {
+            if (freeSpaceRefreshInFlight) return
+            freeSpaceRefreshInFlight = true
         }
-        return free
+        freeSpaceExecutor.execute {
+            try {
+                val free = probeFreeSpaceViaFd()
+                if (free != Long.MAX_VALUE) {
+                    cachedFreeSpace = free to System.currentTimeMillis()
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "free-space refresh failed: ${e.message}")
+            } finally {
+                freeSpaceRefreshInFlight = false
+            }
+        }
     }
 
     /**
@@ -351,6 +378,9 @@ class SafStorageGateway(
         return result
     }
 
+    fun shutdown() {
+        freeSpaceExecutor.shutdown()
+    }
     companion object {
         private const val TAG = "SafStorageGateway"
         private const val FREE_SPACE_TTL_MS = 5_000L

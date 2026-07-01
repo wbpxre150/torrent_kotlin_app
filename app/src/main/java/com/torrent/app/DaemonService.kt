@@ -157,6 +157,7 @@ class DaemonService : Service() {
         controlServer.stop()
         stopSupervisors()
         safIpcServer.stop()
+        gateway?.shutdown()
         ftpObservingJob?.cancel()
         ftpController?.stop()
         wifiGateMonitor.stop()
