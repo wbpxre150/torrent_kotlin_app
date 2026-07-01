@@ -7,7 +7,6 @@ import org.apache.ftpserver.FtpServerFactory
 import org.apache.ftpserver.DataConnectionConfigurationFactory
 import org.apache.ftpserver.command.CommandFactory
 import org.apache.ftpserver.listener.ListenerFactory
-import java.io.FilterInputStream
 import java.io.IOException
 import java.io.InputStream
 
@@ -40,16 +39,19 @@ class FtpServerController(
     private val streamProvider: (String, Long) -> InputStream = { relPath, offset ->
         val pfd = fileSource.openReadPfd(relPath)
             ?: throw IOException("file not found: $relPath")
-        val fis = java.io.FileInputStream(pfd.fileDescriptor)
+        // Detach the raw fd from the pfd so the FileInputStream owns it and closes it
+        // exactly once. The previous code called both fis.close() (via
+        // FilterInputStream) and pfd.close(); the second close hit an already-closed
+        // fd, and if the kernel had recycled that fd number into a concurrent SAF
+        // operation (transmission IPC openFd), it corrupted the other operation.
+        val fd = pfd.fileDescriptor
+        pfd.detachFd()
+        val fis = java.io.FileInputStream(fd)
         if (offset > 0) {
             try { fis.channel.position(offset) }
-            catch (e: IOException) { fis.close(); pfd.close(); throw e }
+            catch (e: IOException) { fis.close(); throw e }
         }
-        object : FilterInputStream(fis) {
-            override fun close() {
-                try { super.close() } finally { pfd.close() }
-            }
-        }
+        fis
     }
 
     @Synchronized
