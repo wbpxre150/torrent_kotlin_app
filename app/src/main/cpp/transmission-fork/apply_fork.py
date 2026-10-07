@@ -14,7 +14,7 @@ def main():
     fork_dir = os.path.dirname(os.path.abspath(__file__))
 
     # 1. Copy fork sources.
-    for name in ("file-saf.h", "file-saf.cc"):
+    for name in ("file-saf.h", "file-saf.cc", "disk-timing.h"):
         shutil.copy2(os.path.join(fork_dir, name), os.path.join(libt, name))
 
     # 2. Patch file-posix.cc: include + dispatch at top of 6 functions.
@@ -703,6 +703,206 @@ def main():
             sys.exit("ERROR: torrent.cc load_checked_pieces mtime check not found")
         text = text.replace(old, new, 1)
         with open(torrent_cc3, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    # 13. Patch session-thread.cc + verify.cc: name the threads with prctl so they
+    #     can be sampled (TRANSMISSION_USB_SAF stage 0.2).
+    st = os.path.join(libt, "session-thread.cc")
+    with open(st, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: name the session thread" not in text:
+        old_inc = "#include <thread>\n"
+        new_inc = "#include <sys/prctl.h>\n#include <thread>\n"
+        if old_inc not in text:
+            sys.exit("ERROR: session-thread.cc <thread> include not found")
+        text = text.replace(old_inc, new_inc, 1)
+        old_func = "    void session_thread_func(struct event_base* evbase)\n    {\n"
+        new_func = (
+            "    void session_thread_func(struct event_base* evbase)\n"
+            "    {\n"
+            "        // ANDROID fork: name the session thread for sampling (TRANSMISSION_USB_SAF).\n"
+            "        prctl(PR_SET_NAME, \"tr-session\", 0, 0, 0);\n"
+        )
+        if old_func not in text:
+            sys.exit("ERROR: session-thread.cc session_thread_func body not found")
+        text = text.replace(old_func, new_func, 1)
+        with open(st, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    ver = os.path.join(libt, "verify.cc")
+    with open(ver, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: name the verify thread" not in text:
+        old_inc = "#include <thread>\n"
+        new_inc = "#include <sys/prctl.h>\n#include <thread>\n"
+        if old_inc not in text:
+            sys.exit("ERROR: verify.cc <thread> include not found")
+        text = text.replace(old_inc, new_inc, 1)
+        old_func = "void tr_verify_worker::verify_thread_func()\n{\n    for (;;)\n"
+        new_func = (
+            "void tr_verify_worker::verify_thread_func()\n"
+            "{\n"
+            "    // ANDROID fork: name the verify thread for sampling (TRANSMISSION_USB_SAF).\n"
+            "    prctl(PR_SET_NAME, \"tr-verify\", 0, 0, 0);\n"
+            "    for (;;)\n"
+        )
+        if old_func not in text:
+            sys.exit("ERROR: verify.cc verify_thread_func body not found")
+        text = text.replace(old_func, new_func, 1)
+        with open(ver, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    # 14. Patch inout.cc + session.cc: ANDROID fork: stage 0 timing.
+    #     Wrap the session-thread disk I/O calls in tr_disk_timer
+    #     (TRANSMISSION_USB_SAF stage 0.3) so slow operations are logged
+    #     with thread/op/path/offset/len/ms as [DISKSLOW] lines.
+    io2 = os.path.join(libt, "inout.cc")
+    with open(io2, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: stage 0 timing" not in text:
+        old_inc = '#include "libtransmission/utils.h"\n'
+        new_inc = '#include "libtransmission/utils.h"\n#include "libtransmission/disk-timing.h"\n'
+        if old_inc not in text:
+            sys.exit("ERROR: inout.cc utils.h include not found")
+        text = text.replace(old_inc, new_inc, 1)
+        # 14a. read_or_write_bytes: get_fd -> "open"
+        old_open = (
+            "    auto const fd = get_fd(session, open_files, tor, writable, file_index, error);\n"
+        )
+        new_open = (
+            "    // ANDROID fork: stage 0 timing.\n"
+            "    auto fd = std::optional<tr_sys_file_t>{};\n"
+            "    {\n"
+            "        tr_disk_timer const disk_timer{ \"open\", tor.file_subpath(file_index) };\n"
+            "        fd = get_fd(session, open_files, tor, writable, file_index, error);\n"
+            "    }\n"
+        )
+        if old_open not in text:
+            sys.exit("ERROR: inout.cc get_fd call not found")
+        text = text.replace(old_open, new_open, 1)
+        # 14b. read_or_write_bytes: write_entire_buf -> "pwrite"
+        old_pw = (
+            '        fmtstr = _("Couldn\'t save \'{path}\': {error} ({error_code})");\n'
+            "        write_entire_buf(*fd, file_offset, buf, buflen, error);\n"
+        )
+        new_pw = (
+            '        fmtstr = _("Couldn\'t save \'{path}\': {error} ({error_code})");\n'
+            "        {\n"
+            "            tr_disk_timer const disk_timer{ \"pwrite\", tor.file_subpath(file_index), file_offset, buflen };\n"
+            "            write_entire_buf(*fd, file_offset, buf, buflen, error);\n"
+            "        }\n"
+        )
+        if old_pw not in text:
+            sys.exit("ERROR: inout.cc write_entire_buf call not found")
+        text = text.replace(old_pw, new_pw, 1)
+        # 14c. read_or_write_bytes: read_entire_buf -> "pread"
+        old_pr = (
+            '        fmtstr = _("Couldn\'t read \'{path}\': {error} ({error_code})");\n'
+            "        read_entire_buf(*fd, file_offset, buf, buflen, error);\n"
+        )
+        new_pr = (
+            '        fmtstr = _("Couldn\'t read \'{path}\': {error} ({error_code})");\n'
+            "        {\n"
+            "            tr_disk_timer const disk_timer{ \"pread\", tor.file_subpath(file_index), file_offset, buflen };\n"
+            "            read_entire_buf(*fd, file_offset, buf, buflen, error);\n"
+            "        }\n"
+        )
+        if old_pr not in text:
+            sys.exit("ERROR: inout.cc read_entire_buf call not found")
+        text = text.replace(old_pr, new_pr, 1)
+        # 14d. tr_ioTestPiece whole body -> "testpiece"
+        old_tpi = (
+            "    auto const [read_ok, hash] = recalculate_hash(tor, piece);\n"
+            "    if (!read_ok)\n"
+            "    {\n"
+            "        return -1;\n"
+            "    }\n"
+            "    return hash && *hash == tor.piece_hash(piece) ? 1 : 0;\n"
+        )
+        new_tpi = (
+            "    // ANDROID fork: stage 0 timing.\n"
+            "    tr_disk_timer const disk_timer{ \"testpiece\", tor.name(), piece, tor.piece_size(piece) };\n"
+            "    auto const [read_ok, hash] = recalculate_hash(tor, piece);\n"
+            "    if (!read_ok)\n"
+            "    {\n"
+            "        return -1;\n"
+            "    }\n"
+            "    return hash && *hash == tor.piece_hash(piece) ? 1 : 0;\n"
+        )
+        if old_tpi not in text:
+            sys.exit("ERROR: inout.cc tr_ioTestPiece body not found")
+        text = text.replace(old_tpi, new_tpi, 1)
+        with open(io2, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    sess = os.path.join(libt, "session.cc")
+    with open(sess, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: stage 0 timing" not in text:
+        old_inc = '#include "libtransmission/utils.h"\n'
+        new_inc = '#include "libtransmission/utils.h"\n#include "libtransmission/disk-timing.h"\n'
+        if old_inc not in text:
+            sys.exit("ERROR: session.cc utils.h include not found")
+        text = text.replace(old_inc, new_inc, 1)
+        # 14e. tr_session::flush_torrent_files -> "flush"
+        old_flush = (
+            "void tr_session::flush_torrent_files(tr_torrent_id_t const tor_id) const noexcept\n"
+            "{\n"
+            "    this->cache->flush_torrent(tor_id);\n"
+            "}\n"
+        )
+        new_flush = (
+            "void tr_session::flush_torrent_files(tr_torrent_id_t const tor_id) const noexcept\n"
+            "{\n"
+            "    // ANDROID fork: stage 0 timing.\n"
+            "    tr_disk_timer const disk_timer{ \"flush\", \"\", static_cast<uint64_t>(tor_id) };\n"
+            "    this->cache->flush_torrent(tor_id);\n"
+            "}\n"
+        )
+        if old_flush not in text:
+            sys.exit("ERROR: session.cc flush_torrent_files body not found")
+        text = text.replace(old_flush, new_flush, 1)
+        # 14f. tr_session::close_torrent_files -> "close"
+        old_close = (
+            "void tr_session::close_torrent_files(tr_torrent_id_t const tor_id) noexcept\n"
+            "{\n"
+            "    this->cache->flush_torrent(tor_id);\n"
+            "    openFiles().close_torrent(tor_id);\n"
+            "}\n"
+        )
+        new_close = (
+            "void tr_session::close_torrent_files(tr_torrent_id_t const tor_id) noexcept\n"
+            "{\n"
+            "    // ANDROID fork: stage 0 timing.\n"
+            "    tr_disk_timer const disk_timer{ \"close\", \"\", static_cast<uint64_t>(tor_id) };\n"
+            "    this->cache->flush_torrent(tor_id);\n"
+            "    openFiles().close_torrent(tor_id);\n"
+            "}\n"
+        )
+        if old_close not in text:
+            sys.exit("ERROR: session.cc close_torrent_files body not found")
+        text = text.replace(old_close, new_close, 1)
+        # 14g. tr_session::close_torrent_file -> "closefile"
+        old_closef = (
+            "void tr_session::close_torrent_file(tr_torrent const& tor, tr_file_index_t file_num) noexcept\n"
+            "{\n"
+            "    this->cache->flush_file(tor, file_num);\n"
+            "    openFiles().close_file(tor.id(), file_num);\n"
+            "}\n"
+        )
+        new_closef = (
+            "void tr_session::close_torrent_file(tr_torrent const& tor, tr_file_index_t file_num) noexcept\n"
+            "{\n"
+            "    // ANDROID fork: stage 0 timing.\n"
+            "    tr_disk_timer const disk_timer{ \"closefile\", \"\", file_num };\n"
+            "    this->cache->flush_file(tor, file_num);\n"
+            "    openFiles().close_file(tor.id(), file_num);\n"
+            "}\n"
+        )
+        if old_closef not in text:
+            sys.exit("ERROR: session.cc close_torrent_file body not found")
+        text = text.replace(old_closef, new_closef, 1)
+        with open(sess, "w", encoding="utf-8") as f:
             f.write(text)
     print("apply_fork: OK")
 

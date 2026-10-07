@@ -211,6 +211,7 @@ tasks.register("buildTransmission") {
     outputs.file("$jniLibsArm64/libtransmissiond.so")
     inputs.file("src/main/cpp/transmission-fork/file-saf.h")
     inputs.file("src/main/cpp/transmission-fork/file-saf.cc")
+    inputs.file("src/main/cpp/transmission-fork/disk-timing.h")
     inputs.file("src/main/cpp/transmission-fork/apply_fork.py")
 
     doLast {

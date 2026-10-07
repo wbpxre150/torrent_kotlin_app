@@ -15,6 +15,7 @@
 
 #include "libtransmission/error.h"
 #include "libtransmission/file.h"
+#include "libtransmission/disk-timing.h"
 #include "libtransmission/file-saf.h"
 
 
@@ -289,6 +290,8 @@ bool tr_saf_is_path(std::string_view path) noexcept
 
 tr_sys_file_t tr_saf_file_open(char const* path, int flags, int /*permissions*/, tr_error* error)
 {
+    // ANDROID fork: stage 0 timing. Timer before the lock_guard so lock wait counts.
+    tr_disk_timer const disk_timer{ "saf-open", path };
     std::lock_guard<std::mutex> lk(g_mutex);
     std::string rel = strip_sentinel(path);
     std::vector<uint8_t> payload;
@@ -319,6 +322,8 @@ tr_sys_file_t tr_saf_file_open(char const* path, int flags, int /*permissions*/,
 
 bool tr_saf_path_exists(char const* path, tr_error* error)
 {
+    // ANDROID fork: stage 0 timing. Timer before the lock_guard so lock wait counts.
+    tr_disk_timer const disk_timer{ "saf-exists", path };
     std::lock_guard<std::mutex> lk(g_mutex);
     std::vector<uint8_t> payload;
     append_string(payload, strip_sentinel(path));
@@ -339,6 +344,8 @@ bool tr_saf_path_exists(char const* path, tr_error* error)
 
 std::optional<tr_sys_path_info> tr_saf_path_get_info(std::string_view path, int /*flags*/, tr_error* error)
 {
+    // ANDROID fork: stage 0 timing. Timer before the lock_guard so lock wait counts.
+    tr_disk_timer const disk_timer{ "saf-stat", path };
     std::lock_guard<std::mutex> lk(g_mutex);
     std::vector<uint8_t> payload;
     append_string(payload, strip_sentinel(path));
@@ -375,6 +382,8 @@ std::optional<tr_sys_path_info> tr_saf_path_get_info(std::string_view path, int 
 
 bool tr_saf_path_rename(char const* src_path, char const* dst_path, tr_error* error)
 {
+    // ANDROID fork: stage 0 timing. Timer before the lock_guard so lock wait counts.
+    tr_disk_timer const disk_timer{ "saf-rename", src_path };
     std::lock_guard<std::mutex> lk(g_mutex);
     std::string dst(dst_path);
     auto pos = dst.find_last_of('/');
@@ -418,6 +427,8 @@ bool tr_saf_path_is_same(char const* path1, char const* path2, tr_error* /*error
 
 bool tr_saf_path_remove(char const* path, tr_error* error)
 {
+    // ANDROID fork: stage 0 timing. Timer before the lock_guard so lock wait counts.
+    tr_disk_timer const disk_timer{ "saf-remove", path };
     std::lock_guard<std::mutex> lk(g_mutex);
     std::vector<uint8_t> payload;
     append_string(payload, strip_sentinel(path));
@@ -438,6 +449,8 @@ bool tr_saf_path_remove(char const* path, tr_error* error)
 
 bool tr_saf_dir_create(char const* path, int /*flags*/, int /*permissions*/, tr_error* error)
 {
+    // ANDROID fork: stage 0 timing. Timer before the lock_guard so lock wait counts.
+    tr_disk_timer const disk_timer{ "saf-mkdir", path };
     std::lock_guard<std::mutex> lk(g_mutex);
     std::vector<uint8_t> payload;
     append_string(payload, strip_sentinel(path));
@@ -456,8 +469,10 @@ bool tr_saf_dir_create(char const* path, int /*flags*/, int /*permissions*/, tr_
     return status == 0;
 }
 
-std::optional<tr_sys_path_capacity> tr_saf_path_get_capacity(std::string_view /*path*/, tr_error* error)
+std::optional<tr_sys_path_capacity> tr_saf_path_get_capacity(std::string_view path, tr_error* error)
 {
+    // ANDROID fork: stage 0 timing. Timer before the lock_guard so lock wait counts.
+    tr_disk_timer const disk_timer{ "saf-capacity", path };
     std::lock_guard<std::mutex> lk(g_mutex);
     if (!send_request(OP_AVAIL, {}))
     {
