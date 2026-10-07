@@ -212,6 +212,9 @@ tasks.register("buildTransmission") {
     inputs.file("src/main/cpp/transmission-fork/file-saf.h")
     inputs.file("src/main/cpp/transmission-fork/file-saf.cc")
     inputs.file("src/main/cpp/transmission-fork/disk-timing.h")
+    inputs.file("src/main/cpp/transmission-fork/disk-queue.h")
+    inputs.file("src/main/cpp/transmission-fork/disk-io.h")
+    inputs.file("src/main/cpp/transmission-fork/disk-io.cc")
     inputs.file("src/main/cpp/transmission-fork/apply_fork.py")
 
     doLast {

@@ -14,7 +14,7 @@ def main():
     fork_dir = os.path.dirname(os.path.abspath(__file__))
 
     # 1. Copy fork sources.
-    for name in ("file-saf.h", "file-saf.cc", "disk-timing.h"):
+    for name in ("file-saf.h", "file-saf.cc", "disk-timing.h", "disk-queue.h", "disk-io.h", "disk-io.cc"):
         shutil.copy2(os.path.join(fork_dir, name), os.path.join(libt, name))
 
     # 2. Patch file-posix.cc: include + dispatch at top of 6 functions.
@@ -138,6 +138,26 @@ def main():
             sys.exit("ERROR: CMakeLists NOT WIN32 block not found")
         text = text.replace(cond_target, cond_repl, 1)
         with open(cm, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    # 4b. CMakeLists.txt: add disk-io.cc to the main add_library source list and
+    #     the NOT WIN32 list. Separate guard because block 4's guard
+    #     ("file-saf.cc" not in text) is already false on previously-patched trees.
+    cm2 = os.path.join(libt, "CMakeLists.txt")
+    with open(cm2, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "disk-io.cc" not in text:
+        main_target = "        file-saf.cc\n        file-win32.cc"
+        main_repl = "        file-saf.cc\n        disk-io.cc\n        file-win32.cc"
+        if main_target not in text:
+            sys.exit("ERROR: CMakeLists main source list (file-saf.cc) not found")
+        text = text.replace(main_target, main_repl, 1)
+        cond_target = "        file-saf.cc\n        subprocess-posix.cc)"
+        cond_repl = "        file-saf.cc\n        disk-io.cc\n        subprocess-posix.cc)"
+        if cond_target not in text:
+            sys.exit("ERROR: CMakeLists NOT WIN32 block (file-saf.cc) not found")
+        text = text.replace(cond_target, cond_repl, 1)
+        with open(cm2, "w", encoding="utf-8") as f:
             f.write(text)
 
     # 5. Patch log.cc: under __ANDROID__, logAddImpl only writes to logcat and
@@ -903,6 +923,433 @@ def main():
             sys.exit("ERROR: session.cc close_torrent_file body not found")
         text = text.replace(old_closef, new_closef, 1)
         with open(sess, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    # 15. Patch cache.h + cache.cc: ANDROID fork: copy_cached_block
+    #     (TRANSMISSION_USB_SAF stage 1.4). Copy a cached block without
+    #     falling back to disk; used by tr_disk_make_piece_overlay on the
+    #     session thread before a piece check is posted to the disk worker.
+    cache_h = os.path.join(libt, "cache.h")
+    with open(cache_h, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: copy_cached_block" not in text:
+        text = text.replace(
+            "#include <memory> // for std::unique_ptr\n#include <utility> // for std::pair\n",
+            "#include <memory> // for std::unique_ptr\n#include <optional>\n#include <utility> // for std::pair\n",
+            1,
+        )
+        old = "    int flush_file(tr_torrent const& tor, tr_file_index_t file);\n"
+        new = (
+            "    int flush_file(tr_torrent const& tor, tr_file_index_t file);\n"
+            "\n"
+            "    // ANDROID fork: copy_cached_block — copy a cached block without\n"
+            "    // falling back to disk. Empty if not cached.\n"
+            "    [[nodiscard]] std::optional<std::vector<uint8_t>> copy_cached_block(tr_torrent_id_t tor_id, tr_block_index_t block) const;\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: cache.h flush_file declaration not found")
+        text = text.replace(old, new, 1)
+        with open(cache_h, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    cache_cc = os.path.join(libt, "cache.cc")
+    with open(cache_cc, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: copy_cached_block" not in text:
+        text = text.replace(
+            "#include <memory>\n#include <numeric> // std::accumulate()\n",
+            "#include <memory>\n#include <optional>\n#include <numeric> // std::accumulate()\n",
+            1,
+        )
+        old = (
+            "        begin < end)\n"
+            "    {\n"
+            "        return begin;\n"
+            "    }\n"
+            "\n"
+            "    return std::end(blocks_);\n"
+            "}\n"
+        )
+        new = (
+            "        begin < end)\n"
+            "    {\n"
+            "        return begin;\n"
+            "    }\n"
+            "\n"
+            "    return std::end(blocks_);\n"
+            "}\n"
+            "\n"
+            "// ANDROID fork: copy_cached_block — never touches the disk\n"
+            "// (TRANSMISSION_USB_SAF stage 1.4).\n"
+            "std::optional<std::vector<uint8_t>> Cache::copy_cached_block(tr_torrent_id_t tor_id, tr_block_index_t block) const\n"
+            "{\n"
+            "    if (auto const [begin, end] = std::equal_range(\n"
+            "            std::begin(blocks_),\n"
+            "            std::end(blocks_),\n"
+            "            Key{ tor_id, block },\n"
+            "            CompareCacheBlockByKey);\n"
+            "        begin < end)\n"
+            "    {\n"
+            "        auto const& buf = *begin->buf;\n"
+            "        return std::vector<uint8_t>{ std::begin(buf), std::end(buf) };\n"
+            "    }\n"
+            "\n"
+            "    return {};\n"
+            "}\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: cache.cc get_block body not found")
+        text = text.replace(old, new, 1)
+        with open(cache_cc, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    # 16. Patch session.h + session.cc: ANDROID fork: disk I/O worker wiring
+    #     (TRANSMISSION_USB_SAF stage 1.5). Create the worker in initImpl,
+    #     shut it down in closeImplPart1, forward close_torrent_files /
+    #     close_torrent_file to it (null-checked: it is reset first on close).
+    sess_h = os.path.join(libt, "session.h")
+    with open(sess_h, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "disk I/O worker (TRANSMISSION_USB_SAF stage 1.5)" not in text:
+        text = text.replace(
+            '#include "libtransmission/cache.h"\n',
+            '#include "libtransmission/cache.h"\n#include "libtransmission/disk-io.h"\n',
+            1,
+        )
+        old = (
+            "    [[nodiscard]] constexpr auto& openFiles() noexcept\n"
+            "    {\n"
+            "        return open_files_;\n"
+            "    }\n"
+        )
+        new = (
+            "    [[nodiscard]] constexpr auto& openFiles() noexcept\n"
+            "    {\n"
+            "        return open_files_;\n"
+            "    }\n"
+            "\n"
+            "    // ANDROID fork: disk I/O worker (TRANSMISSION_USB_SAF stage 1.5).\n"
+            "    [[nodiscard]] tr_disk_io& disk_io() noexcept\n"
+            "    {\n"
+            "        return *disk_io_;\n"
+            "    }\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: session.h openFiles() accessor not found")
+        text = text.replace(old, new, 1)
+        old = "    std::unique_ptr<Cache> cache = std::make_unique<Cache>(torrents_, Memory{ 2U, Memory::Units::MBytes });\n"
+        new = (
+            "    std::unique_ptr<Cache> cache = std::make_unique<Cache>(torrents_, Memory{ 2U, Memory::Units::MBytes });\n"
+            "    std::unique_ptr<tr_disk_io> disk_io_; // ANDROID fork\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: session.h cache member not found")
+        text = text.replace(old, new, 1)
+        with open(sess_h, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    sess_cc = os.path.join(libt, "session.cc")
+    with open(sess_cc, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "stage 1.5 session wiring" not in text:
+        old = (
+            "void tr_session::initImpl(init_data& data)\n"
+            "{\n"
+            "    auto lock = unique_lock();\n"
+            "    TR_ASSERT(am_in_session_thread());\n"
+        )
+        new = (
+            "void tr_session::initImpl(init_data& data)\n"
+            "{\n"
+            "    auto lock = unique_lock();\n"
+            "    TR_ASSERT(am_in_session_thread());\n"
+            "\n"
+            "    disk_io_ = std::make_unique<tr_disk_io>(*this); // ANDROID fork: stage 1.5 session wiring\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: session.cc initImpl body not found")
+        text = text.replace(old, new, 1)
+        old = (
+            "    utp_timer.reset();\n"
+            "    verifier_.reset();\n"
+            "    save_timer_.reset();\n"
+        )
+        new = (
+            "    utp_timer.reset();\n"
+            "    verifier_.reset();\n"
+            "    disk_io_->shutdown(); disk_io_.reset(); // ANDROID fork: stage 1.5 session wiring\n"
+            "    save_timer_.reset();\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: session.cc closeImplPart1 verifier_.reset() not found")
+        text = text.replace(old, new, 1)
+        old = (
+            "    this->cache->flush_torrent(tor_id);\n"
+            "    openFiles().close_torrent(tor_id);\n"
+            "}\n"
+        )
+        new = (
+            "    this->cache->flush_torrent(tor_id);\n"
+            "    openFiles().close_torrent(tor_id);\n"
+            "    if (disk_io_) disk_io_->close_torrent(tor_id); // ANDROID fork: stage 1.5 session wiring\n"
+            "}\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: session.cc close_torrent_files body not found")
+        text = text.replace(old, new, 1)
+        old = (
+            "    this->cache->flush_file(tor, file_num);\n"
+            "    openFiles().close_file(tor.id(), file_num);\n"
+            "}\n"
+        )
+        new = (
+            "    this->cache->flush_file(tor, file_num);\n"
+            "    openFiles().close_file(tor.id(), file_num);\n"
+            "    if (disk_io_) disk_io_->close_file(tor.id(), file_num); // ANDROID fork: stage 1.5 session wiring\n"
+            "}\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: session.cc close_torrent_file body not found")
+        text = text.replace(old, new, 1)
+        with open(sess_cc, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    # 17. Patch torrent.h + torrent.cc: ANDROID fork: per-torrent pending-check
+    #     set + async post-download piece verification (TRANSMISSION_USB_SAF
+    #     stages 1.6/1.7). While a piece is pending it is masked from the peer
+    #     bitfield, the resume file, HAVE-ALL and upload requests, and
+    #     recheck_completeness() is deferred until the checks finish.
+    tor_h = os.path.join(libt, "torrent.h")
+    with open(tor_h, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "stage 1.6 pending-check set" not in text:
+        text = text.replace(
+            "#include <optional>\n#include <string>\n",
+            "#include <optional>\n#include <set>\n#include <string>\n",
+            1,
+        )
+        old = "        [[nodiscard]] tr_bitfield const& blocks() const noexcept;\n"
+        new = (
+            "        // ANDROID fork: stage 1.6/1.7 — by value so pending pieces can be masked.\n"
+            "        [[nodiscard]] tr_bitfield blocks() const;\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: torrent.h ResumeHelper::blocks() declaration not found")
+        text = text.replace(old, new, 1)
+        # The main tr_torrent body is public (struct default) up to the
+        # unindented `private:` label; put the accessors before it and the
+        # methods/member inside the private section.
+        old = (
+            "    time_t lpdAnnounceAt = 0;\n"
+            "\n"
+            "private:\n"
+            "    friend bool tr_torrentSetMetainfoFromFile(tr_torrent* tor, tr_torrent_metainfo const* metainfo, char const* filename);\n"
+        )
+        new = (
+            "    time_t lpdAnnounceAt = 0;\n"
+            "\n"
+            "    // ANDROID fork: stage 1.6 pending-check set (TRANSMISSION_USB_SAF).\n"
+            "    [[nodiscard]] bool is_piece_check_pending(tr_piece_index_t piece) const { return pending_checks_.count(piece) != 0U; }\n"
+            "    [[nodiscard]] bool has_pending_checks() const noexcept { return !std::empty(pending_checks_); }\n"
+            "    void clear_pending_checks() noexcept { pending_checks_.clear(); }\n"
+            "\n"
+            "private:\n"
+            "    // ANDROID fork: stage 1.6/1.7 async piece checks (TRANSMISSION_USB_SAF)\n"
+            "    void enqueue_piece_check(tr_piece_index_t piece);\n"
+            "    void on_piece_check_done(tr_piece_index_t piece, int result);\n"
+            "    void on_piece_read_error(tr_piece_index_t piece);\n"
+            "    std::set<tr_piece_index_t> pending_checks_; // ANDROID fork\n"
+            "\n"
+            "    friend bool tr_torrentSetMetainfoFromFile(tr_torrent* tor, tr_torrent_metainfo const* metainfo, char const* filename);\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: torrent.h lpdAnnounceAt/private section not found")
+        text = text.replace(old, new, 1)
+        old = (
+            "    [[nodiscard]] auto create_piece_bitfield() const\n"
+            "    {\n"
+            "        return completion_.create_piece_bitfield();\n"
+            "    }\n"
+        )
+        new = (
+            "    [[nodiscard]] auto create_piece_bitfield() const\n"
+            "    {\n"
+            "        auto bits = completion_.create_piece_bitfield();\n"
+            "        // ANDROID fork: stage 1.6 — mask pieces whose check is pending.\n"
+            "        for (auto const piece : pending_checks_)\n"
+            "        {\n"
+            "            bits[piece / 8U] &= static_cast<uint8_t>(~(0x80U >> (piece % 8U)));\n"
+            "        }\n"
+            "        return bits;\n"
+            "    }\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: torrent.h create_piece_bitfield body not found")
+        text = text.replace(old, new, 1)
+        with open(tor_h, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    tor_cc = os.path.join(libt, "torrent.cc")
+    with open(tor_cc, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "stage 1.6/1.7 async piece checks" not in text:
+        old = (
+            "        if (check_piece(piece))\n"
+            "        {\n"
+            "            on_piece_completed(piece);\n"
+            "        }\n"
+            "        else\n"
+            "        {\n"
+            "            on_piece_failed(piece);\n"
+            "        }\n"
+        )
+        new = (
+            "        // ANDROID fork: verify on the disk worker (TRANSMISSION_USB_SAF stage 1).\n"
+            "        if (!is_piece_check_pending(piece))\n"
+            "        {\n"
+            "            enqueue_piece_check(piece);\n"
+            "        }\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: torrent.cc on_block_received check_piece block not found")
+        text = text.replace(old, new, 1)
+        old = (
+            "void tr_torrent::recheck_completeness()\n"
+            "{\n"
+            "    using namespace completeness_helpers;\n"
+            "\n"
+            "    auto const lock = unique_lock();\n"
+        )
+        new = (
+            "void tr_torrent::recheck_completeness()\n"
+            "{\n"
+            "    using namespace completeness_helpers;\n"
+            "\n"
+            "    auto const lock = unique_lock();\n"
+            "\n"
+            "    if (has_pending_checks())\n"
+            "    {\n"
+            "        return; // ANDROID fork: re-run when checks finish\n"
+            "    }\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: torrent.cc recheck_completeness body not found")
+        text = text.replace(old, new, 1)
+        old = "            session->verify_remove(tor);\n"
+        new = (
+            "            session->verify_remove(tor);\n"
+            "            tor->clear_pending_checks(); // ANDROID fork: a full verify recomputes every piece\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: torrent.cc tr_torrentVerify lambda verify_remove not found")
+        text = text.replace(old, new, 1)
+        old = (
+            "tr_bitfield const& tr_torrent::ResumeHelper::blocks() const noexcept\n"
+            "{\n"
+            "    return tor_.completion_.blocks();\n"
+            "}\n"
+        )
+        new = (
+            "// ANDROID fork: stage 1.6/1.7 — exclude pieces whose check is pending.\n"
+            "tr_bitfield tr_torrent::ResumeHelper::blocks() const\n"
+            "{\n"
+            "    auto copy = tor_.completion_.blocks();\n"
+            "    for (auto const p : tor_.pending_checks_)\n"
+            "    {\n"
+            "        auto const [begin, end] = tor_.block_span_for_piece(p);\n"
+            "        copy.unset_span(begin, end);\n"
+            "    }\n"
+            "    return copy;\n"
+            "}\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: torrent.cc ResumeHelper::blocks() definition not found")
+        text = text.replace(old, new, 1)
+        old = (
+            "void tr_torrent::on_block_received(tr_block_index_t const block)\n"
+            "{\n"
+        )
+        new = (
+            "// ANDROID fork: stage 1.6/1.7 async piece checks (TRANSMISSION_USB_SAF).\n"
+            "void tr_torrent::enqueue_piece_check(tr_piece_index_t const piece)\n"
+            "{\n"
+            "    pending_checks_.insert(piece);\n"
+            "    session->disk_io().test_piece(\n"
+            "        tr_disk_queue::Prio::Low,\n"
+            "        tr_disk_make_segments(*this, piece_loc(piece), piece_size(piece), false),\n"
+            "        tr_disk_make_piece_overlay(*this, piece),\n"
+            "        piece_hash(piece),\n"
+            "        [session = session, tor_id = id(), piece](int result)\n"
+            "        {\n"
+            "            if (auto* const tor = session->torrents().get(tor_id); tor != nullptr)\n"
+            "            {\n"
+            "                tor->on_piece_check_done(piece, result);\n"
+            "            }\n"
+            "        });\n"
+            "}\n"
+            "\n"
+            "void tr_torrent::on_piece_check_done(tr_piece_index_t const piece, int const result)\n"
+            "{\n"
+            "    if (pending_checks_.erase(piece) == 0)\n"
+            "    {\n"
+            "        return; // stale result (e.g. a full verify cleared the set)\n"
+            "    }\n"
+            "\n"
+            "    if (result == 1)\n"
+            "    {\n"
+            "        on_piece_completed(piece);\n"
+            "    }\n"
+            "    else if (result == 0)\n"
+            "    {\n"
+            "        on_piece_failed(piece);\n"
+            "    }\n"
+            "    else\n"
+            "    {\n"
+            "        on_piece_read_error(piece);\n"
+            "    }\n"
+            "\n"
+            "    set_dirty();\n"
+            "    set_needs_completeness_check();\n"
+            "}\n"
+            "\n"
+            "void tr_torrent::on_piece_read_error(tr_piece_index_t const piece)\n"
+            "{\n"
+            '    tr_logAddWarnTor(this, fmt::format("Piece {} could not be read back for verification; re-downloading", piece));\n'
+            "    bytes_downloaded_.reduce(piece_size(piece));\n"
+            "    set_has_piece(piece, false);\n"
+            "}\n"
+            "\n"
+            "void tr_torrent::on_block_received(tr_block_index_t const block)\n"
+            "{\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: torrent.cc on_block_received definition not found")
+        text = text.replace(old, new, 1)
+        with open(tor_cc, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    # 18. Patch peer-msgs.cc: ANDROID fork: peer-facing masking of pieces whose
+    #     post-download check is pending (TRANSMISSION_USB_SAF stage 1.8).
+    #     No HAVE-ALL while checks are pending (the masked bitfield is sent
+    #     instead), and upload requests for pending pieces are rejected/dropped.
+    pm = os.path.join(libt, "peer-msgs.cc")
+    with open(pm, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "stage 1.8 peer-facing masking" not in text:
+        old = "    if (fext && tor_.has_all())\n"
+        new = "    if (fext && tor_.has_all() && !tor_.has_pending_checks()) // ANDROID fork: stage 1.8 peer-facing masking\n"
+        if old not in text:
+            sys.exit("ERROR: peer-msgs.cc protocol_send_bitfield has_all() not found")
+        text = text.replace(old, new, 1)
+        old = "    auto ok = is_valid_request(req) && tor_.has_piece(req.index);\n"
+        new = (
+            "    auto ok = is_valid_request(req) && tor_.has_piece(req.index) && !tor_.is_piece_check_pending(req.index); "
+            "// ANDROID fork: stage 1.8 peer-facing masking\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: peer-msgs.cc add_next_block ok= line not found")
+        text = text.replace(old, new, 1)
+        with open(pm, "w", encoding="utf-8") as f:
             f.write(text)
     print("apply_fork: OK")
 
