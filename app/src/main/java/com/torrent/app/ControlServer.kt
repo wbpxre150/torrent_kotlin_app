@@ -19,7 +19,7 @@ class ControlServer(
     private val daemonStatuses: () -> List<ProcessStatus>,
     private val safStatus: () -> com.torrent.app.storage.SafStatus,
     private val runSafValidation: suspend () -> com.torrent.app.storage.SafValidationResult,
-    private val ftpStatus: () -> com.torrent.app.ftp.FtpStatus,
+    private val wifiIp: () -> String?,
     private val loadConfig: () -> com.torrent.app.config.AppConfig,
     private val wizardCompleted: () -> Boolean,
     private val rpcSummary: () -> com.torrent.app.transmission.TransmissionSummary?,
@@ -29,7 +29,6 @@ class ControlServer(
     private val stopDaemon: (String) -> Boolean,
     private val startDaemon: (String) -> Boolean,
     private val applyTransmission: (com.torrent.app.config.TransmissionSettings, Boolean) -> com.torrent.app.config.ApplyResult,
-    private val applyFtp: (com.torrent.app.config.FtpSettings) -> com.torrent.app.config.ApplyResult,
     private val port: Int = 8090,
 ) {
     @Volatile private var server: EmbeddedServer<*, *>? = null
@@ -122,19 +121,6 @@ class ControlServer(
                         }
                         call.respondText(json, ContentType.Application.Json)
                     }
-                    get("ftp/status") {
-                        val f = ftpStatus()
-                        val json = buildString {
-                            append("{\"running\":").append(f.running)
-                            append(",\"state\":").append(jsonStr(f.state))
-                            append(",\"ip\":").append(jsonStr(f.ip))
-                            append(",\"port\":").append(f.port)
-                            append(",\"username\":").append(jsonStr(f.username))
-                            append(",\"password\":").append(jsonStr(f.password))
-                            append(",\"wifiUp\":").append(f.wifiUp).append("}")
-                        }
-                        call.respondText(json, ContentType.Application.Json)
-                    }
                     get("settings/transmission") {
                         val msg = call.request.queryParameters["msg"]
                         val ok = call.request.queryParameters["ok"]?.toBoolean() ?: false
@@ -159,27 +145,6 @@ class ControlServer(
                         val token = parseCookieToken(call.request.headers["Cookie"]) ?: call.request.queryParameters["token"] ?: ""
                         val mode = if (liveOnly) "live+RPC" else "restart"
                         call.respondRedirect("/settings/transmission?msg=${urlEnc(r.message + " ($mode)")}&ok=${r.ok}&token=$token")
-                    }
-
-                    get("settings/ftp") {
-                        val msg = call.request.queryParameters["msg"]
-                        val ok = call.request.queryParameters["ok"]?.toBoolean() ?: false
-                        call.respondText(buildFtpPanel(msg, ok), ContentType.Text.Html)
-                    }
-                    post("settings/ftp") {
-                        val form = parseForm(call.receiveText())
-                        val current = loadConfig().ftp
-                        val password = form["password"]?.takeIf { it.isNotEmpty() } ?: current.password
-                        val s = com.torrent.app.config.FtpSettings(
-                            username = form["username"] ?: current.username,
-                            password = password,
-                            port = form["port"]?.toIntOrNull() ?: current.port,
-                            wifiOnly = form.containsKey("wifiOnly"),
-                            exposedRoot = form["exposedRoot"] ?: current.exposedRoot,
-                        )
-                        val r = applyFtp(s)
-                        val token = parseCookieToken(call.request.headers["Cookie"]) ?: call.request.queryParameters["token"] ?: ""
-                        call.respondRedirect("/settings/ftp?msg=${urlEnc(r.message)}&ok=${r.ok}&token=$token")
                     }
 
                     get("settings/storage") {
@@ -208,7 +173,7 @@ class ControlServer(
         .box{background:#fff3cd;border:1px solid #ffeeba;border-radius:6px;padding:1em}</style></head>
         <body><h1>Setup required</h1>
         <div class="box"><p>Open the <strong>Torrent App</strong> on this Android device and complete
-        the first-run wizard (grant the USB drive, set Transmission and FTP credentials).</p>
+        the first-run wizard (grant the USB drive, set Transmission credentials).</p>
         <p>This control page becomes available once setup is finished.</p></div>
         <p><a href="/login">Log in</a></p></body></html>
     """.trimIndent()
@@ -288,7 +253,7 @@ class ControlServer(
             }
         }
 
-        val txLink = "http://${ftpStatus().ip ?: "127.0.0.1"}:9091/"
+        val txLink = "http://${wifiIp() ?: "127.0.0.1"}:9091/"
 
         return """
             <!DOCTYPE html><html><head><title>Torrent App — Control</title>
@@ -311,7 +276,6 @@ class ControlServer(
             <p class="meta">Service: <span class="state $state">$state</span>$rollbackBanner</p>
             <p>
               <a class="cfg" href="/settings/transmission">Transmission settings</a>
-              <a class="cfg" href="/settings/ftp">FTP settings</a>
               <a class="cfg" href="/settings/storage">Storage</a>
               <a class="cfg" href="/settings/crawler" aria-disabled="true">Crawler (soon)</a>
               <a class="cfg" href="/settings/rclone" aria-disabled="true">Backups (soon)</a>
@@ -324,8 +288,6 @@ class ControlServer(
             $downloadsSection
             <h2>USB Storage</h2>
             $usbSection
-            <h2>FTP Server (wifi only)</h2>
-            ${ftpStatusSection()}
             </body></html>
         """.trimIndent()
     }
@@ -333,15 +295,12 @@ class ControlServer(
     private fun buildStatusJson(): String {
         val daemons = daemonStatuses()
         val usb = usbFreeSpace()
-        val f = ftpStatus()
         val s = safStatus()
         return buildString {
             append("{\"service\":\"").append(serviceState.value.toString()).append("\"")
             append(",\"wizardCompleted\":").append(wizardCompleted())
             append(",\"rolledBack\":").append(lastApplyRolledBack())
             append(",\"usb\":{\"granted\":").append(s.granted).append(",\"freeBytes\":").append(usb ?: "null").append("}")
-            append(",\"wifiUp\":").append(f.wifiUp)
-            append(",\"ftp\":{\"running\":").append(f.running).append(",\"port\":").append(f.port).append("}")
             append(",\"daemons\":[")
             append(daemons.joinToString(",") { d ->
                 "{\"label\":\"" + d.label + "\",\"state\":\"" + d.state + "\",\"pid\":" + (d.pid ?: "null") +
@@ -365,17 +324,6 @@ class ControlServer(
             })
             append("]}")
         }
-    }
-
-    private fun ftpStatusSection(): String {
-        val f = ftpStatus()
-        val url = if (f.running && f.ip != null && f.password != null)
-            "ftp://${f.username}:${f.password}@${f.ip}:${f.port}/" else "—"
-        return """
-            <p class="meta">State: <span class="state ${f.state}">${f.state}</span>
-               &nbsp; wifi: <strong>${if (f.wifiUp) "up" else "down"}</strong></p>
-            <p>URL: <code>$url</code></p>
-        """.trimIndent()
     }
 
     // ── settings panel builders ───────────────────────────────────────────
@@ -408,33 +356,9 @@ class ControlServer(
         """.trimIndent()
     }
 
-    private fun buildFtpPanel(msg: String?, ok: Boolean): String {
-        val s = loadConfig().ftp
-        val banner = if (msg != null)
-            """<div class="${if (ok) "ok" else "err"}">${esc(msg)}</div>""" else ""
-        val checked = if (s.wifiOnly) "checked" else ""
-        return """
-            <!DOCTYPE html><html><head><title>FTP settings</title>
-            <meta name="viewport" content="width=device-width, initial-scale=1">
-            <style>$panelCss</style></head><body>
-            <h1>FTP settings</h1>$banner
-            <form method="post" action="/settings/ftp">
-              <label>Username<input name="username" value="${esc(s.username)}"></label>
-              <label>Password (leave blank to keep)<input type="password" name="password" placeholder="unchanged"></label>
-              <label>Port<input name="port" value="${s.port}"></label>
-              <label class="row"><input type="checkbox" name="wifiOnly" $checked> WiFi only</label>
-              <label>Exposed root (under USB root; blank = root)<input name="exposedRoot" value="${esc(s.exposedRoot)}"></label>
-              <button type="submit">Apply</button>
-            </form>
-            <p><a href="/">Back to dashboard</a></p>
-            </body></html>
-        """.trimIndent()
-    }
-
     private fun buildStoragePanel(): String {
         val s = safStatus()
         val free = usbFreeSpace()
-        val f = ftpStatus()
         return """
             <!DOCTYPE html><html><head><title>Storage</title>
             <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -443,7 +367,6 @@ class ControlServer(
             <p class="meta">Granted: <strong>${s.granted}</strong></p>
             <p class="meta">Tree: <code>${esc(s.treeUri ?: "—")}</code></p>
             <p class="meta">Free: <strong>${free?.let { formatBytes(it) } ?: "unknown"}</strong></p>
-            <p class="meta">WiFi: <strong>${if (f.wifiUp) "up" else "down"}</strong></p>
             <div class="warn">To re-grant or change the USB drive, open the Torrent App on the
             Android device and tap <strong>Grant USB</strong>. The download subpath is set in
             <a href="/settings/transmission">Transmission settings</a>.</div>

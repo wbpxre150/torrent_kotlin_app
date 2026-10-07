@@ -18,17 +18,6 @@ object ConfigValidator {
         return ValidationResult(errors.isEmpty(), errors)
     }
 
-    fun validateFtp(s: FtpSettings): ValidationResult {
-        val errors = mutableListOf<String>()
-        if (s.username.isBlank()) errors.add("username must not be empty")
-        if (s.password.length < ConfigDefaults.PASSWORD_MIN_LEN)
-            errors.add("password must be at least ${ConfigDefaults.PASSWORD_MIN_LEN} characters")
-        if (!validPort(s.port)) errors.add("port must be 1..65535")
-        if (!validSubpath(s.exposedRoot))
-            errors.add("exposed root must be relative, no '..', alphanumeric/./-/_/space only")
-        return ValidationResult(errors.isEmpty(), errors)
-    }
-
     private fun validPort(p: Int) = p in 1..65535
 
     private fun validSubpath(p: String): Boolean {

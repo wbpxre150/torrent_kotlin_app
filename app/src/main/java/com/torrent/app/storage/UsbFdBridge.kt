@@ -38,7 +38,7 @@ interface UsbFdBridge {
      */
     fun availableBytes(): Long
 
-    // higher-level helpers (used by the UI / future FTP stage)
+    // higher-level helpers (used by the UI)
     fun exists(relPath: String): Boolean
     fun list(relPath: String): List<String>   // child names
 

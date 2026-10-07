@@ -10,7 +10,6 @@ import org.junit.Test
 class WizardSubmitTest {
     private fun validForm() = WizardSubmit.Form(
         txUsername = "torrentapp", txPassword = "secret123", peerPort = 51413, downloadSubpath = "Downloads",
-        ftpUsername = "kodi", ftpPassword = "kodiallday", ftpPort = 2121, ftpWifiOnly = true, ftpExposedRoot = "Media",
     )
 
     @Test fun validForm_producesSettings() {
@@ -18,28 +17,24 @@ class WizardSubmitTest {
         assertTrue(o.ok)
         assertTrue(o.errors.isEmpty())
         assertNotNull(o.transmission)
-        assertNotNull(o.ftp)
         assertEquals("torrentapp", o.transmission!!.username)
-        assertEquals("Media", o.ftp!!.exposedRoot)
     }
 
-    @Test fun aggregatesTransmissionAndFtpErrors() {
-        val f = validForm().copy(txPassword = "x", ftpPort = 0)
+    @Test fun aggregatesTransmissionErrors() {
+        val f = validForm().copy(txPassword = "x")
         val o = WizardSubmit.submit(f)
         assertFalse(o.ok)
         assertNull(o.transmission)
-        assertNull(o.ftp)
         assertTrue(o.errors.any { it.contains("password", true) })
-        assertTrue(o.errors.any { it.contains("port", true) })
     }
 
     @Test fun blankDownloadSubpath_passes() {
         assertTrue(WizardSubmit.submit(validForm().copy(downloadSubpath = "")).ok)
     }
 
-    @Test fun zeroPortFailsValidation() {
-        val o = WizardSubmit.submit(validForm().copy(ftpPort = 0))
+    @Test fun dotDotSubpathFailsValidation() {
+        val o = WizardSubmit.submit(validForm().copy(downloadSubpath = "../etc"))
         assertFalse(o.ok)
-        assertTrue(o.errors.any { it.contains("port", true) })
+        assertTrue(o.errors.any { it.contains("download", true) })
     }
 }

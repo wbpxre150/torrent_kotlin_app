@@ -20,8 +20,6 @@ class ConfigStoreTest {
         assertEquals(ConfigDefaults.TRANSMISSION.username, c.transmission.username)
         assertEquals("test", c.transmission.password)
         assertEquals(51413, c.transmission.peerPort)
-        assertEquals(2121, c.ftp.port)
-        assertTrue(c.ftp.wifiOnly)
     }
 
     @Test fun saveTransmission_persistsAndReloads() {
@@ -36,29 +34,11 @@ class ConfigStoreTest {
         assertEquals("Dl", loaded.downloadSubpath)
     }
 
-    @Test fun saveFtp_persistsAndReloads() {
-        val s = store()
-        s.saveFtp(FtpSettings("u", "password1", 2200, false, "Media"))
-        val loaded = s.load().ftp
-        assertEquals("u", loaded.username)
-        assertEquals("password1", loaded.password)
-        assertEquals(2200, loaded.port)
-        assertFalse(loaded.wifiOnly)
-        assertEquals("Media", loaded.exposedRoot)
-    }
-
     @Test fun setWizardCompleted_persists() {
         val s = store()
         assertFalse(s.load().wizardCompleted)
         s.setWizardCompleted()
         assertTrue(s.load().wizardCompleted)
-    }
-
-    @Test fun ftpPassword_autoGeneratesWhenEmpty_thenIdempotent() {
-        val s = store()
-        val p = s.ftpPassword()
-        assertTrue(p.length >= 16)
-        assertEquals(p, s.ftpPassword())
     }
 
     @Test fun snapshotAndRestoreLastKnownGoodTransmission() {

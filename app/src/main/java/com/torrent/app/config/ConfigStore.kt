@@ -19,13 +19,6 @@ class ConfigStore(context: Context) {
             altSpeedUp = prefs.getInt(KEY_TX_ALT_UP, ConfigDefaults.TRANSMISSION.altSpeedUp),
             downloadSubpath = prefs.getString(KEY_TX_SUBPATH, ConfigDefaults.TRANSMISSION.downloadSubpath)!!,
         ),
-        ftp = FtpSettings(
-            username = prefs.getString(KEY_FTP_USER, ConfigDefaults.FTP.username)!!,
-            password = prefs.getString(KEY_FTP_PASS, ConfigDefaults.FTP.password)!!,
-            port = prefs.getInt(KEY_FTP_PORT, ConfigDefaults.FTP.port),
-            wifiOnly = prefs.getBoolean(KEY_FTP_WIFI_ONLY, ConfigDefaults.FTP.wifiOnly),
-            exposedRoot = prefs.getString(KEY_FTP_ROOT, ConfigDefaults.FTP.exposedRoot)!!,
-        ),
     )
 
     fun saveTransmission(s: TransmissionSettings) {
@@ -41,27 +34,9 @@ class ConfigStore(context: Context) {
             .apply()
     }
 
-    fun saveFtp(s: FtpSettings) {
-        prefs.edit()
-            .putString(KEY_FTP_USER, s.username)
-            .putString(KEY_FTP_PASS, s.password)
-            .putInt(KEY_FTP_PORT, s.port)
-            .putBoolean(KEY_FTP_WIFI_ONLY, s.wifiOnly)
-            .putString(KEY_FTP_ROOT, s.exposedRoot)
-            .apply()
-    }
-
     fun setWizardCompleted() { prefs.edit().putBoolean(KEY_WIZARD, true).apply() }
 
-    /** FTP password auto-generates + persists on first access (preserves Stage 06 behavior). */
-    fun ftpPassword(): String {
-        prefs.getString(KEY_FTP_PASS, null)?.let { if (it.isNotEmpty()) return it }
-        val gen = ConfigDefaults.randomPassword()
-        prefs.edit().putString(KEY_FTP_PASS, gen).apply()
-        return gen
-    }
-
-    // last-known-good rollback snapshot (transmission only; FTP is non-fatal to rebind)
+    // last-known-good rollback snapshot (transmission only)
     fun snapshotLastKnownGood(s: TransmissionSettings) {
         prefs.edit()
             .putString(KEY_LKG_TX_USER, s.username)
@@ -103,11 +78,6 @@ class ConfigStore(context: Context) {
         private const val KEY_TX_ALT_DOWN = "tx_alt_speed_down"
         private const val KEY_TX_ALT_UP = "tx_alt_speed_up"
         private const val KEY_TX_SUBPATH = "tx_download_subpath"
-        private const val KEY_FTP_USER = "ftp_username"
-        private const val KEY_FTP_PASS = "ftp_password"
-        private const val KEY_FTP_PORT = "ftp_port"
-        private const val KEY_FTP_WIFI_ONLY = "ftp_wifi_only"
-        private const val KEY_FTP_ROOT = "ftp_exposed_root"
         private const val KEY_LKG_PRESENT = "lkg_present"
         private const val KEY_LKG_TX_USER = "lkg_tx_username"
         private const val KEY_LKG_TX_PASS = "lkg_tx_password"

@@ -25,11 +25,6 @@ import com.torrent.app.storage.SafValidator
 import com.torrent.app.storage.SafIpcRequestHandler
 import com.torrent.app.storage.SafIpcServer
 import com.torrent.app.storage.UsbPermissionManager
-import com.torrent.app.ftp.FtpCredentials
-import com.torrent.app.ftp.FtpServerController
-import com.torrent.app.ftp.FtpState
-import com.torrent.app.ftp.FtpStatus
-import com.torrent.app.ftp.WifiGateMonitor
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.launch
@@ -54,9 +49,6 @@ class DaemonService : Service() {
     private val supervisors = mutableListOf<ProcessSupervisor>()
     private lateinit var usbPermissionManager: UsbPermissionManager
     private var gateway: SafStorageGateway? = null
-    private var ftpController: FtpServerController? = null
-    private lateinit var wifiGateMonitor: WifiGateMonitor
-    private var ftpObservingJob: Job? = null
     private lateinit var safSocketFile: java.io.File
     private lateinit var safIpcServer: SafIpcServer
     private lateinit var transmissionConfig: TransmissionConfig
@@ -81,7 +73,7 @@ class DaemonService : Service() {
             daemonStatuses = ::getDaemonStatuses,
             safStatus = ::getSafStatus,
             runSafValidation = ::runSafValidation,
-            ftpStatus = ::getFtpStatus,
+            wifiIp = ::getWifiIpAddress,
             loadConfig = ::loadConfig,
             wizardCompleted = { configStore.load().wizardCompleted },
             rpcSummary = ::transmissionRpcSummary,
@@ -91,23 +83,13 @@ class DaemonService : Service() {
             stopDaemon = ::stopDaemon,
             startDaemon = ::startDaemon,
             applyTransmission = ::applyTransmissionSettings,
-            applyFtp = ::applyFtpSettings,
 )
-        wifiGateMonitor = WifiGateMonitor(this)
-        gateway?.let {
-            val ftp = configStore.load().ftp
-            ftpController = FtpServerController(it, FtpCredentials(configStore), port = ftp.port, rootRelPath = ftp.exposedRoot)
-        }
     }
 
     private fun ensureUsbGateway() {
         if (gateway != null) return
         usbPermissionManager.treeUri()?.let { uri ->
             gateway = SafStorageGateway(this, uri)
-            val ftp = configStore.load().ftp
-            ftpController?.stop()
-            ftpController = FtpServerController(gateway!!, FtpCredentials(configStore),
-                port = ftp.port, rootRelPath = ftp.exposedRoot)
         }
     }
 
@@ -119,12 +101,10 @@ class DaemonService : Service() {
         fun setUsbTree(uri: Uri) = this@DaemonService.setUsbTree(uri)
         fun clearUsbTree() = this@DaemonService.clearUsbTree()
         fun getSafStatus(): SafStatus = this@DaemonService.getSafStatus()
-        fun getFtpStatus(): FtpStatus = this@DaemonService.getFtpStatus()
         suspend fun runSafValidation(): SafValidationResult = this@DaemonService.runSafValidation()
         fun loadConfig(): com.torrent.app.config.AppConfig = this@DaemonService.loadConfig()
         fun applyTransmissionSettings(s: com.torrent.app.config.TransmissionSettings, liveOnly: Boolean) =
             this@DaemonService.applyTransmissionSettings(s, liveOnly)
-        fun applyFtpSettings(s: com.torrent.app.config.FtpSettings) = this@DaemonService.applyFtpSettings(s)
         fun restartDaemon(label: String) = this@DaemonService.restartDaemon(label)
         fun stopDaemon(label: String) = this@DaemonService.stopDaemon(label)
         fun startDaemon(label: String) = this@DaemonService.startDaemon(label)
@@ -146,8 +126,6 @@ class DaemonService : Service() {
         _state.value = ServiceState.Running
         controlServer.start()
         safIpcServer.start()
-        wifiGateMonitor.start()
-        observeWifiForFtp()
         startSupervisors()
         return START_STICKY
     }
@@ -158,9 +136,6 @@ class DaemonService : Service() {
         stopSupervisors()
         safIpcServer.stop()
         gateway?.shutdown()
-        ftpObservingJob?.cancel()
-        ftpController?.stop()
-        wifiGateMonitor.stop()
         _state.value = ServiceState.Stopping
         releaseLocks()
         _state.value = ServiceState.Stopped
@@ -180,18 +155,11 @@ class DaemonService : Service() {
 
     fun setUsbTree(uri: Uri) {
         usbPermissionManager.grant(uri)
-        val g = SafStorageGateway(this, uri)
-        gateway = g
-        val ftp = configStore.load().ftp
-        ftpController?.stop()
-        ftpController = FtpServerController(g, FtpCredentials(configStore), port = ftp.port, rootRelPath = ftp.exposedRoot)
-        maybeStartFtp()
+        gateway = SafStorageGateway(this, uri)
     }
 
     fun clearUsbTree() {
         usbPermissionManager.clear()
-        ftpController?.stop()
-        ftpController = null
         gateway = null
     }
 
@@ -212,46 +180,8 @@ class DaemonService : Service() {
         return SafValidator(g).run()
     }
 
-    private fun observeWifiForFtp() {
-        ftpObservingJob?.cancel()
-        ftpObservingJob = MainScope().launch {
-            wifiGateMonitor.state.collect { ws ->
-                val ftp = configStore.load().ftp
-                if (ws.wifi && ws.ip != null) maybeStartFtp(ws.ip)
-                else if (ftp.wifiOnly) ftpController?.stop()
-            }
-        }
-    }
-
-    private fun maybeStartFtp(ip: String? = null) {
-        if (!configStore.load().wizardCompleted) return
-        val ctrl = ftpController ?: return
-        val ws = wifiGateMonitor.state.value
-        val useIp = ip ?: ws.ip
-        if (ws.wifi && useIp != null) {
-            try { ctrl.rebind(useIp) }
-            catch (e: Exception) { android.util.Log.w("DaemonService", "ftp start failed: ${e.message}") }
-        }
-    }
-
-    fun getFtpStatus(): FtpStatus {
-        val ctrl = ftpController
-        val ws = wifiGateMonitor.state.value
-        val creds = FtpCredentials(configStore)
-        return FtpStatus(
-            running = ctrl?.state == FtpState.RUNNING,
-            state = (ctrl?.state ?: FtpState.STOPPED).name,
-            ip = ctrl?.ip,
-            port = configStore.load().ftp.port,
-            username = creds.username(),
-            password = if (ctrl?.state == FtpState.RUNNING) creds.password() else null,
-            wifiUp = ws.wifi,
-        )
-    }
-
     fun startConfiguredDaemons() {
         startTransmissionSupervisor()
-        maybeStartFtp()
     }
 
     fun applyTransmissionSettings(s: com.torrent.app.config.TransmissionSettings, liveOnly: Boolean): com.torrent.app.config.ApplyResult {
@@ -278,19 +208,6 @@ class DaemonService : Service() {
         val statusAtApply = sup?.status?.value ?: ProcessStatus("transmission", ProcessState.STOPPED)
         launchRollbackWatcher(sup, statusAtApply, before)
         return com.torrent.app.config.ApplyResult(true, "applied; restarting transmission", false)
-    }
-
-    fun applyFtpSettings(s: com.torrent.app.config.FtpSettings): com.torrent.app.config.ApplyResult {
-        val vr = com.torrent.app.config.ConfigValidator.validateFtp(s)
-        if (!vr.ok) return com.torrent.app.config.ApplyResult(false, vr.errors.joinToString("; "), false)
-        configStore.saveFtp(s)
-        ftpController?.stop()
-        val g = gateway
-        if (g != null) {
-            ftpController = FtpServerController(g, FtpCredentials(configStore), port = s.port, rootRelPath = s.exposedRoot)
-            maybeStartFtp()
-        }
-        return com.torrent.app.config.ApplyResult(true, if (g != null) "applied" else "applied; FTP starts when USB granted", false)
     }
 
     fun restartDaemon(label: String): Boolean {

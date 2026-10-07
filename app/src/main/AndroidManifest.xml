@@ -39,7 +39,7 @@
             android:exported="false">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="daemon_supervisor_for_local_torrent_ftp_and_storage" />
+                android:value="daemon_supervisor_for_local_torrent_and_storage" />
         </service>
     </application>
 </manifest>
