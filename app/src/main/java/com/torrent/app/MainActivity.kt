@@ -15,9 +15,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import android.net.Uri
 import com.torrent.app.storage.SafStatus
-import com.torrent.app.storage.SafValidationResult
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -41,7 +39,6 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
     private var wifiIp = MutableStateFlow("")
     private val safStatus = MutableStateFlow<SafStatus?>(null)
-    private val safValidation = MutableStateFlow<SafValidationResult?>(null)
     private val wizardCompleted = MutableStateFlow(true)
     private val serviceState = MutableStateFlow<ServiceState>(ServiceState.Stopped)
     private var authToken = MutableStateFlow("")
@@ -130,19 +127,7 @@ class MainActivity : ComponentActivity() {
                             authToken = token,
                             wifiIp = ip,
                             safStatus = safStatus.collectAsState().value,
-                            safValidation = safValidation.collectAsState().value,
                             onGrantUsb = { usbTreeLauncher.launch(null) },
-                            onValidateUsb = {
-                                lifecycleScope.launch {
-                                    safValidation.value = SafValidationResult(
-                                        ok = false, message = "running…",
-                                        throughputMBs = null)
-                                    safValidation.value = boundService?.runSafValidation()
-                                        ?: SafValidationResult(
-                                            ok = false, message = "service not bound",
-                                            throughputMBs = null)
-                                }
-                            },
                         )
                     }
                 }
@@ -206,9 +191,7 @@ fun MainScreen(
     authToken: String,
     wifiIp: String,
     safStatus: SafStatus?,
-    safValidation: SafValidationResult?,
     onGrantUsb: () -> Unit,
-    onValidateUsb: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -262,31 +245,7 @@ fun MainScreen(
             style = MaterialTheme.typography.bodyMedium
         )
         Spacer(modifier = Modifier.height(8.dp))
-        Row {
-            Button(onClick = onGrantUsb) { Text("Grant USB") }
-            Spacer(modifier = Modifier.width(8.dp))
-            Button(
-                onClick = onValidateUsb,
-                enabled = status?.granted == true,
-            ) { Text("Validate SAF fd") }
-        }
-        safValidation?.let { v ->
-            Spacer(modifier = Modifier.height(12.dp))
-            SelectionContainer {
-                Column {
-                    Text(
-                        text = if (v.ok) "VALIDATION: PASS" else "VALIDATION: FAIL",
-                        color = if (v.ok) MaterialTheme.colorScheme.primary
-                                else MaterialTheme.colorScheme.error
-                    )
-                    Text(text = v.message, style = MaterialTheme.typography.bodySmall)
-                    v.throughputMBs?.let { mbps ->
-                        Text(text = "throughput: %.1f MB/s".format(mbps),
-                            style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-            }
-        }
+        Button(onClick = onGrantUsb) { Text("Grant USB") }
     }
 }
 

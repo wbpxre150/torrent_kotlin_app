@@ -20,8 +20,6 @@ import java.io.File
 import android.net.Uri
 import com.torrent.app.storage.SafStatus
 import com.torrent.app.storage.SafStorageGateway
-import com.torrent.app.storage.SafValidationResult
-import com.torrent.app.storage.SafValidator
 import com.torrent.app.storage.SafIpcRequestHandler
 import com.torrent.app.storage.SafIpcServer
 import com.torrent.app.storage.UsbPermissionManager
@@ -72,7 +70,6 @@ class DaemonService : Service() {
             serviceState = _state,
             daemonStatuses = ::getDaemonStatuses,
             safStatus = ::getSafStatus,
-            runSafValidation = ::runSafValidation,
             wifiIp = ::getWifiIpAddress,
             loadConfig = ::loadConfig,
             wizardCompleted = { configStore.load().wizardCompleted },
@@ -101,7 +98,6 @@ class DaemonService : Service() {
         fun setUsbTree(uri: Uri) = this@DaemonService.setUsbTree(uri)
         fun clearUsbTree() = this@DaemonService.clearUsbTree()
         fun getSafStatus(): SafStatus = this@DaemonService.getSafStatus()
-        suspend fun runSafValidation(): SafValidationResult = this@DaemonService.runSafValidation()
         fun loadConfig(): com.torrent.app.config.AppConfig = this@DaemonService.loadConfig()
         fun applyTransmissionSettings(s: com.torrent.app.config.TransmissionSettings, liveOnly: Boolean) =
             this@DaemonService.applyTransmissionSettings(s, liveOnly)
@@ -171,13 +167,6 @@ class DaemonService : Service() {
             treeUri = uri?.toString(),
             rootSummary = if (uri != null) "USB (SAF tree)" else null,
         )
-    }
-
-    suspend fun runSafValidation(): SafValidationResult {
-        val g = gateway ?: return SafValidationResult(
-            ok = false, message = "USB tree not granted",
-            throughputMBs = null)
-        return SafValidator(g).run()
     }
 
     fun startConfiguredDaemons() {
@@ -345,12 +334,6 @@ class DaemonService : Service() {
 
     private fun startSupervisors() {
         if (supervisors.isNotEmpty()) return
-        val nativeLibDir = applicationInfo.nativeLibraryDir
-        val workDir = File(filesDir, "daemons")
-        val logDir = File(filesDir, "logs")
-        val probe = ProcessSupervisor("probe", "libprobe.so", nativeLibraryDir = nativeLibDir,
-            workDir = workDir, logDir = logDir)
-        probe.start(); supervisors.add(probe)
         transmissionConfig = TransmissionConfig(this, configStore)
         if (configStore.load().wizardCompleted) startTransmissionSupervisor()
     }

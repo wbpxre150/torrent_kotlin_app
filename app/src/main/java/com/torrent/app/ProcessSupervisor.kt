@@ -30,7 +30,7 @@ enum class ProcessState { STOPPED, STARTING, RUNNING, STOPPING }
  */
 class ProcessSupervisor(
     private val label: String,
-    private val binaryName: String,              // e.g. "libprobe.so"
+    private val binaryName: String,              // e.g. "libtransmissiond.so"
     private val args: List<String> = emptyList(),
     private val nativeLibraryDir: String,         // applicationInfo.nativeLibraryDir
     private val workDir: File,                    // child process cwd

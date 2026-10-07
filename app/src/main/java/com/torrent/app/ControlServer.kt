@@ -18,7 +18,6 @@ class ControlServer(
     private val serviceState: StateFlow<ServiceState>,
     private val daemonStatuses: () -> List<ProcessStatus>,
     private val safStatus: () -> com.torrent.app.storage.SafStatus,
-    private val runSafValidation: suspend () -> com.torrent.app.storage.SafValidationResult,
     private val wifiIp: () -> String?,
     private val loadConfig: () -> com.torrent.app.config.AppConfig,
     private val wizardCompleted: () -> Boolean,
@@ -109,15 +108,6 @@ class ControlServer(
                             append(",\"gatewayPresent\":").append(s.gatewayPresent)
                             append(",\"treeUri\":").append(jsonStr(s.treeUri))
                             append(",\"rootSummary\":").append(jsonStr(s.rootSummary)).append("}")
-                        }
-                        call.respondText(json, ContentType.Application.Json)
-                    }
-                    post("saf/validate") {
-                        val r = runSafValidation()
-                        val json = buildString {
-                            append("{\"ok\":").append(r.ok)
-                            append(",\"message\":").append(jsonStr(r.message))
-                            append(",\"throughputMBs\":").append(r.throughputMBs ?: "null").append("}")
                         }
                         call.respondText(json, ContentType.Application.Json)
                     }
