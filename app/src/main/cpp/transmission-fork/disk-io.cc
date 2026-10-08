@@ -319,6 +319,55 @@ void tr_disk_io::test_piece(
         });
 }
 
+void tr_disk_io::read(
+    std::vector<tr_disk_segment> segments,
+    std::function<void(tr_disk_read_result)> done)
+{
+    // Session thread: count the read as in-flight before the worker starts.
+    ++*reads_in_flight_;
+
+    queue_.push(
+        tr_disk_queue::Prio::High,
+        [this,
+         session = &session_,
+         reads_in_flight = reads_in_flight_,
+         segments = std::move(segments),
+         done = std::move(done)]() mutable
+        {
+            // Worker part.
+            auto result = tr_disk_read_result{};
+            {
+                auto total = uint64_t{};
+                for (auto const& seg : segments)
+                {
+                    total += seg.length;
+                }
+
+                tr_disk_timer const timer{ "pread", std::empty(segments) ? "" : segments.front().file.subpath, 0, total };
+
+                result.data.resize(total);
+
+                auto error = tr_error{};
+                if (!read_range(files_, segments, 0, total, std::data(result.data), error))
+                {
+                    result.err = error.code() != 0 ? error.code() : EIO;
+                    result.data.clear();
+                }
+            }
+
+            // Session part. Must not capture `this` (and must be const-callable:
+            // run_in_session_thread wraps it in a std::function). `result` is held
+            // in a shared_ptr so the data is moved, not copied, into `done`.
+            session->run_in_session_thread(
+                [reads_in_flight, done = std::move(done), result = std::make_shared<tr_disk_read_result>(std::move(result))]()
+                {
+                    // Decrement before `done` so the count is right even when the peer is gone.
+                    --*reads_in_flight;
+                    done(std::move(*result));
+                });
+        });
+}
+
 void tr_disk_io::write(
     std::vector<tr_disk_segment> segments,
     std::vector<std::shared_ptr<Cache::BlockData const>> buffers,

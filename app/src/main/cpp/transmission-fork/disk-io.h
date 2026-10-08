@@ -46,6 +46,13 @@ struct tr_disk_write_result
     std::string message;
 };
 
+// Result of a tr_disk_io::read job, delivered to `done` on the session thread.
+struct tr_disk_read_result
+{
+    int err = 0;
+    std::vector<uint8_t> data;
+};
+
 // Bytes already in memory (from the Cache), relative to the start of the job's byte range.
 struct tr_disk_overlay_chunk
 {
@@ -74,6 +81,11 @@ public:
         tr_sha1_digest_t expected,
         std::function<void(int result)> done);
 
+    // High queue. Reads exactly the bytes covered by `segments`. `done` runs on the session
+    // thread. The global in-flight read count is incremented here (session thread) and
+    // decremented by the completion wrapper before `done` is called.
+    void read(std::vector<tr_disk_segment> segments, std::function<void(tr_disk_read_result)> done);
+
     // Write `buffers` (concatenated, in order) at the byte range described by `segments`.
     // Low queue. `done` runs on the session thread.
     void write(
@@ -92,6 +104,9 @@ public:
     // Session thread. Backpressure with hysteresis (64 MiB / 32 MiB).
     [[nodiscard]] bool writes_backlogged();
 
+    // Session thread. Global read cap (64) bookkeeping; checked before enqueuing a read.
+    [[nodiscard]] bool can_start_read() const noexcept { return *reads_in_flight_ < 64U; }
+
     // Fire-and-forget: close the worker's fds (Low queue, so after earlier Low jobs).
     void close_torrent(tr_torrent_id_t tor_id);
     void close_file(tr_torrent_id_t tor_id, tr_file_index_t file);
@@ -106,6 +121,7 @@ private:
     tr_open_files files_; // worker thread only
     std::atomic<uint64_t> queued_write_bytes_{0};
     bool backlogged_ = false; // session thread only
+    std::shared_ptr<size_t> reads_in_flight_ = std::make_shared<size_t>(0); // session thread only
     tr_disk_queue queue_; // last member: its thread starts in the constructor
 
     static uint64_t const HighWater = 64U * 1024U * 1024U; // 64 MiB

@@ -220,3 +220,32 @@ Stage 2 notes:
   attributed to bad peers, unconfirmed.
 - Remaining `tr-session` disk work is upload-side: read opens/`pread` in `tr_ioRead` and
   `ensure_piece_is_checked` (`testpiece`) for unchecked pieces. Stage 3 scope.
+
+| stage | scenario | RPC p50 | RPC p99 | RPC max | session-thread D/67/68 samples | worst DISKSLOW op |
+|---|---|---|---|---|---|---|
+| 3 | 2: 8 local libtorrent peers leeching from the phone only (~31 MiB/s up, 9.4 GB in 300 s) while the torrent downloads ~1.4 MiB/s; RPC via `rpc_probe.sh` over wireless adb | 463.7 ms | 809.8 ms | 1215.2 ms | 0/0/0 of 380 (`tr-diskio` 106/91/16) | `tr-diskio` testpiece 352 ms; no `tr-session` pread/testpiece |
+| 3 | 2, same load (8 peers, ~31 MiB/s), RPC measured **on the device** (`curl` to 127.0.0.1) | 3.4 ms | 527.6 ms | 854.1 ms | n/a | 2 of 130 samples > 50 ms |
+| 3 | 2, 12 peers (~21 MiB/s), RPC on device + 50 ms device-side `tr-session` syscall sampler | 3.6 ms | 14.5 ms | 31.9 ms | sampler: never outside epoll/ppoll | none on `tr-session` |
+| 3 | no upload load (download only), RPC on device | 3.5 ms | 8.1 ms | 8.8 ms | n/a | — |
+
+Stage 3 notes:
+- Load generator: `libtorrent` 2.1 (python) with N sessions, IP-filtered so they only talk to
+  the phone, plaintext, TCP only. Each peer verifies every piece: ~21,000 pieces received over
+  all runs, **0 hash failures**. `error` stayed 0 and there were no "corrupt" local errors.
+  (`corruptEver` rose 0 → 6 MiB during the session from internet peers on the download side,
+  which stage 3 doesn't touch.)
+- The `rpc_probe.sh` numbers under upload load measure the saturated WiFi link that wireless
+  adb shares with the peer traffic, not the session thread. On the device itself p50 stays
+  ~3.5 ms. The two 0.5–0.85 s on-device outliers in the 31 MiB/s run didn't reproduce in
+  later runs with the device-side sampler, which never caught `tr-session` outside its
+  poll wait.
+- `tr-session` was at 17% CPU at ~30 MiB/s up. Once the page cache is cold, seeding throughput
+  is bound by the single `tr-diskio` thread doing random 16 KiB reads (`D`/`pread64` ~60% of
+  samples, ~3–8 MiB/s total). A possible later improvement is piece-sized read-ahead.
+- Restart (SIGKILL via force-stop) left ~6 pieces unchecked. Uploads resumed right away and
+  lazy checks ran on `tr-diskio` (`testpiece`). The only `tr-session` DISKSLOW after restart
+  is one `saf-stat` (128 ms) at torrent load, outside stage 3's scope.
+- The per-call-site log rate limit ("Too many messages like this") mutes `[DISKSLOW]` after
+  ~30 lines per daemon session, so the thread sampler is the main evidence.
+- Beyond the spec: `on_block_read` calls `fill_output_buffer` after each completion, so queued
+  requests keep flowing. Otherwise a peer would get only 4 blocks per pulse.

@@ -548,10 +548,13 @@ def main():
             f.write(text)
 
     # 9j. peer-msgs.cc: add_next_block
+    #     Note: step 26 (stage 3 async reads) replaces this whole body and removes
+    #     the tri-state marker, so also skip when the stage 3 marker is present.
     peer_msgs = os.path.join(libt, "peer-msgs.cc")
     with open(peer_msgs, "r", encoding="utf-8") as f:
         text = f.read()
-    if "ANDROID fork: tri-state. -1 = read error (transient): reject this" not in text:
+    if "ANDROID fork: tri-state. -1 = read error (transient): reject this" not in text and \
+       "ANDROID fork: TRANSMISSION_USB_SAF stage 3 async reads" not in text:
         old = (
             "    auto buf = std::array<uint8_t, tr_block_info::BlockSize>{};\n"
             "    auto ok = is_valid_request(req) && tor_.has_piece(req.index);\n\n"
@@ -2227,6 +2230,501 @@ def main():
         text = text.replace(old, new, 1)
         with open(ses_cc2, "w", encoding="utf-8") as f:
             f.write(text)
+
+    # 24. Patch cache.h + cache.cc: ANDROID fork: stage 3 read_block_if_cached
+    #     (TRANSMISSION_USB_SAF 3.2). True and fills `setme` only if the
+    #     block is in the cache; never reads disk. The existing read_block
+    #     (with its disk fallback) is unchanged.
+    cache_h3 = os.path.join(libt, "cache.h")
+    with open(cache_h3, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: stage 3 read_block_if_cached" not in text:
+        old = (
+            "    int read_block(tr_torrent const& tor, tr_block_info::Location const& loc, size_t len, uint8_t* setme);\n"
+        )
+        new = (
+            "    int read_block(tr_torrent const& tor, tr_block_info::Location const& loc, size_t len, uint8_t* setme);\n"
+            "\n"
+            "    // ANDROID fork: stage 3 read_block_if_cached — true and fills `setme` only if\n"
+            "    // the block is in the cache; never reads disk.\n"
+            "    [[nodiscard]] bool read_block_if_cached(tr_torrent const& tor, tr_block_info::Location const& loc, size_t len, uint8_t* setme);\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: cache.h read_block declaration not found")
+        text = text.replace(old, new, 1)
+        with open(cache_h3, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    cache_cc3 = os.path.join(libt, "cache.cc")
+    with open(cache_cc3, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: stage 3 read_block_if_cached" not in text:
+        old = (
+            "int Cache::read_block(tr_torrent const& tor, tr_block_info::Location const& loc, size_t len, uint8_t* setme)\n"
+            "{\n"
+            "    if (auto const iter = get_block(tor, loc); iter != std::end(blocks_))\n"
+            "    {\n"
+            "        std::copy_n(std::begin(*iter->buf), len, setme);\n"
+            "        return {};\n"
+            "    }\n"
+            "\n"
+            "    return tr_ioRead(tor, loc, len, setme);\n"
+            "}\n"
+        )
+        new = (
+            old
+            + "\n"
+            + "// ANDROID fork: stage 3 read_block_if_cached (TRANSMISSION_USB_SAF 3.2) —\n"
+            + "// never touches the disk.\n"
+            + "bool Cache::read_block_if_cached(tr_torrent const& tor, tr_block_info::Location const& loc, size_t len, uint8_t* setme)\n"
+            + "{\n"
+            + "    if (auto const iter = get_block(tor, loc); iter != std::end(blocks_))\n"
+            + "    {\n"
+            + "        if (loc.block_offset + len <= std::size(*iter->buf))\n"
+            + "        {\n"
+            + "            std::copy_n(std::begin(*iter->buf) + loc.block_offset, len, setme);\n"
+            + "            return true;\n"
+            + "        }\n"
+            + "    }\n"
+            + "\n"
+            + "    return false;\n"
+            + "}\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: cache.cc read_block body not found")
+        text = text.replace(old, new, 1)
+        with open(cache_cc3, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    # 25. Patch torrent.h + torrent.cc: ANDROID fork: stage 3 lazy check
+    #     (TRANSMISSION_USB_SAF 3.3). Upload requests for unchecked pieces
+    #     start a lazy test_piece job (High queue, with the cache overlay);
+    #     the session-thread completion applies what the synchronous
+    #     ensure_piece_is_checked used to do after its check_piece call.
+    tor_h2 = os.path.join(libt, "torrent.h")
+    with open(tor_h2, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: stage 3 lazy check" not in text:
+        old = (
+            "    void clear_pending_checks() noexcept { pending_checks_.clear(); }\n"
+        )
+        new = (
+            "    void clear_pending_checks() noexcept { pending_checks_.clear(); }\n"
+            "    void clear_lazy_checks() noexcept { lazy_checks_.clear(); } // ANDROID fork: stage 3 lazy check\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: torrent.h clear_pending_checks declaration not found")
+        text = text.replace(old, new, 1)
+        old = (
+            "    [[nodiscard]] constexpr bool is_unhaving_for_read_error() const noexcept { return unhaving_for_read_error_; }\n"
+            "\n"
+            "private:\n"
+        )
+        new = (
+            "    [[nodiscard]] constexpr bool is_unhaving_for_read_error() const noexcept { return unhaving_for_read_error_; }\n"
+            "\n"
+            "    // ANDROID fork: stage 3 lazy check (TRANSMISSION_USB_SAF).\n"
+            "    void request_lazy_check(tr_piece_index_t piece);\n"
+            "\n"
+            "private:\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: torrent.h is_unhaving_for_read_error/private section not found")
+        text = text.replace(old, new, 1)
+        old = (
+            "    std::set<tr_piece_index_t> pending_checks_; // ANDROID fork\n"
+            "    bool unhaving_for_read_error_ = false; // ANDROID fork\n"
+        )
+        new = (
+            "    std::set<tr_piece_index_t> pending_checks_; // ANDROID fork\n"
+            "    bool unhaving_for_read_error_ = false; // ANDROID fork\n"
+            "    // ANDROID fork: stage 3 lazy check (TRANSMISSION_USB_SAF)\n"
+            "    void on_lazy_check_done(tr_piece_index_t piece, int result);\n"
+            "    std::set<tr_piece_index_t> lazy_checks_;\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: torrent.h pending_checks_ member not found")
+        text = text.replace(old, new, 1)
+        with open(tor_h2, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    tor_cc3 = os.path.join(libt, "torrent.cc")
+    with open(tor_cc3, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: stage 3 lazy check" not in text:
+        old = (
+            "            session->verify_remove(tor);\n"
+            "            tor->clear_pending_checks(); // ANDROID fork: a full verify recomputes every piece\n"
+        )
+        new = (
+            "            session->verify_remove(tor);\n"
+            "            tor->clear_pending_checks(); // ANDROID fork: a full verify recomputes every piece\n"
+            "            tor->clear_lazy_checks(); // ANDROID fork: stage 3 lazy check\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: torrent.cc tr_torrentVerify clear_pending_checks not found")
+        text = text.replace(old, new, 1)
+        old = (
+            "    unhaving_for_read_error_ = true;\n"
+            "    got_bad_piece_.emit(this, piece); // ANDROID fork: re-add to the wishlist; peer-mgr skips blame\n"
+            "    unhaving_for_read_error_ = false;\n"
+            "}\n"
+        )
+        new = (
+            "    unhaving_for_read_error_ = true;\n"
+            "    got_bad_piece_.emit(this, piece); // ANDROID fork: re-add to the wishlist; peer-mgr skips blame\n"
+            "    unhaving_for_read_error_ = false;\n"
+            "}\n"
+            "\n"
+            "// ANDROID fork: stage 3 lazy check (TRANSMISSION_USB_SAF 3.3).\n"
+            "void tr_torrent::request_lazy_check(tr_piece_index_t const piece)\n"
+            "{\n"
+            "    if (is_piece_checked(piece) || !lazy_checks_.insert(piece).second)\n"
+            "    {\n"
+            "        return;\n"
+            "    }\n"
+            "    session->disk_io().test_piece(\n"
+            "        tr_disk_queue::Prio::High,\n"
+            "        tr_disk_make_segments(*this, piece_loc(piece), piece_size(piece), false),\n"
+            "        tr_disk_make_piece_overlay(*this, piece),\n"
+            "        piece_hash(piece),\n"
+            "        [session = session, tor_id = id(), piece](int result)\n"
+            "        {\n"
+            "            if (auto* const tor = session->torrents().get(tor_id); tor != nullptr)\n"
+            "            {\n"
+            "                tor->on_lazy_check_done(piece, result);\n"
+            "            }\n"
+            "        });\n"
+            "}\n"
+            "\n"
+            "void tr_torrent::on_lazy_check_done(tr_piece_index_t const piece, int const result)\n"
+            "{\n"
+            "    if (lazy_checks_.erase(piece) == 0)\n"
+            "    {\n"
+            "        return; // stale result (e.g. a full verify cleared the set)\n"
+            "    }\n"
+            "\n"
+            "    mark_changed();\n"
+            "    set_dirty();\n"
+            "\n"
+            "    if (result == -1)\n"
+            "    {\n"
+            "        return; // read error (transient); leave it unchecked, it is retried on the next request\n"
+            "    }\n"
+            "\n"
+            "    checked_pieces_.set(piece, result == 1);\n"
+            "    if (result == 0)\n"
+            "    {\n"
+            '        error().set_local_error(fmt::format("Please Verify Local Data! Piece #{:d} is corrupt.", piece));\n'
+            "    }\n"
+            "}\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: torrent.cc on_piece_read_error body not found")
+        text = text.replace(old, new, 1)
+        with open(tor_cc3, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    # 26. Patch peer-msgs.cc: ANDROID fork: TRANSMISSION_USB_SAF stage 3
+    #     async reads (TRANSMISSION_USB_SAF 3.4). Serving a peer's block
+    #     request never reads the disk on the session thread: cache hits are
+    #     sent synchronously, misses become tr_disk_io::read jobs (High
+    #     queue) and the Piece is sent from the session-thread completion.
+    #     Unchecked pieces get a lazy test_piece and are rejected once.
+    pm3 = os.path.join(libt, "peer-msgs.cc")
+    with open(pm3, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: TRANSMISSION_USB_SAF stage 3 async reads" not in text:
+        # 26a. Members next to peer_requested_ (disk-io.h arrives via session.h).
+        old = (
+            "    std::deque<peer_request> peer_requested_;\n"
+            "\n"
+            "    std::array<std::vector<tr_pex>, NUM_TR_AF_INET_TYPES> pex_;\n"
+        )
+        new = (
+            "    std::deque<peer_request> peer_requested_;\n"
+            "\n"
+            "    // ANDROID fork: TRANSMISSION_USB_SAF stage 3 async reads.\n"
+            "    std::vector<peer_request> reads_pending_;\n"
+            "    static constexpr size_t MaxReadsPerPeer = 4U;\n"
+            "\n"
+            "    std::array<std::vector<tr_pex>, NUM_TR_AF_INET_TYPES> pex_;\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: peer-msgs.cc peer_requested_ member not found")
+        text = text.replace(old, new, 1)
+        # 26b. on_block_read declaration next to add_next_block.
+        old = (
+            "    [[nodiscard]] size_t add_next_block(time_t now_sec, uint64_t now_msec);\n"
+        )
+        new = (
+            "    [[nodiscard]] size_t add_next_block(time_t now_sec, uint64_t now_msec);\n"
+            "    void on_block_read(peer_request const& req, tr_disk_read_result r); // ANDROID fork: TRANSMISSION_USB_SAF stage 3 async reads\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: peer-msgs.cc add_next_block declaration not found")
+        text = text.replace(old, new, 1)
+        # 26c. reject_all_requests: reject + clear the in-flight reads too.
+        old = (
+            "    void reject_all_requests()\n"
+            "    {\n"
+            "        auto& queue = peer_requested_;\n"
+            "\n"
+            "        if (auto const must_send_rej = io_->supports_fext(); must_send_rej)\n"
+            "        {\n"
+            "            std::for_each(std::begin(queue), std::end(queue), [this](peer_request const& req) { protocol_send_reject(req); });\n"
+            "        }\n"
+            "\n"
+            "        queue.clear();\n"
+            "    }\n"
+        )
+        new = (
+            "    void reject_all_requests()\n"
+            "    {\n"
+            "        auto& queue = peer_requested_;\n"
+            "\n"
+            "        if (auto const must_send_rej = io_->supports_fext(); must_send_rej)\n"
+            "        {\n"
+            "            std::for_each(std::begin(queue), std::end(queue), [this](peer_request const& req) { protocol_send_reject(req); });\n"
+            "            std::for_each(std::begin(reads_pending_), std::end(reads_pending_), [this](peer_request const& req) { protocol_send_reject(req); }); // ANDROID fork: TRANSMISSION_USB_SAF stage 3 async reads\n"
+            "        }\n"
+            "\n"
+            "        queue.clear();\n"
+            "        reads_pending_.clear(); // ANDROID fork: TRANSMISSION_USB_SAF stage 3 async reads\n"
+            "    }\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: peer-msgs.cc reject_all_requests body not found")
+        text = text.replace(old, new, 1)
+        # 26d. Cancel handler: also erase from reads_pending_ (BEP 6 reject).
+        old = (
+            "            auto& requests = peer_requested_;\n"
+            "            if (auto iter = std::find(std::begin(requests), std::end(requests), r); iter != std::end(requests))\n"
+            "            {\n"
+            "                requests.erase(iter);\n"
+            "\n"
+            "                // bep6: \"Even when a request is cancelled, the peer\n"
+            "                // receiving the cancel should respond with either the\n"
+            "                // corresponding reject or the corresponding piece\"\n"
+            "                if (fext)\n"
+            "                {\n"
+            "                    protocol_send_reject(r);\n"
+            "                }\n"
+            "            }\n"
+        )
+        new = (
+            "            auto& requests = peer_requested_;\n"
+            "            if (auto iter = std::find(std::begin(requests), std::end(requests), r); iter != std::end(requests))\n"
+            "            {\n"
+            "                requests.erase(iter);\n"
+            "\n"
+            "                // bep6: \"Even when a request is cancelled, the peer\n"
+            "                // receiving the cancel should respond with either the\n"
+            "                // corresponding reject or the corresponding piece\"\n"
+            "                if (fext)\n"
+            "                {\n"
+            "                    protocol_send_reject(r);\n"
+            "                }\n"
+            "            }\n"
+            "            else if (auto const read_iter = std::find(std::begin(reads_pending_), std::end(reads_pending_), r); read_iter != std::end(reads_pending_))\n"
+            "            {\n"
+            "                // ANDROID fork: TRANSMISSION_USB_SAF stage 3 async reads — the request is in\n"
+            "                // flight on the disk worker; erase it (its completion is dropped) and\n"
+            "                // reply with a reject like bep6 requires.\n"
+            "                reads_pending_.erase(read_iter);\n"
+            "                if (fext)\n"
+            "                {\n"
+            "                    protocol_send_reject(r);\n"
+            "                }\n"
+            "            }\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: peer-msgs.cc Cancel handler not found")
+        text = text.replace(old, new, 1)
+        # 26e. add_next_block body: async read path + on_block_read definition.
+        #     Replaces the synchronous ensure_piece_is_checked / cache->read_block
+        #     path (stage 1.8 masking kept in the ok= condition).
+        old = (
+            "    auto const req = peer_requested_.front();\n"
+            "    peer_requested_.pop_front();\n"
+            "\n"
+            "    auto buf = std::array<uint8_t, tr_block_info::BlockSize>{};\n"
+            "    auto ok = is_valid_request(req) && tor_.has_piece(req.index) && !tor_.is_piece_check_pending(req.index); // ANDROID fork: stage 1.8 peer-facing masking\n"
+            "\n"
+            "    if (ok)\n"
+            "    {\n"
+            "        // ANDROID fork: tri-state. -1 = read error (transient): reject this\n"
+            "        // request without flagging corruption. 0 = genuine corruption.\n"
+            "        auto const checked = tor_.ensure_piece_is_checked(req.index);\n"
+            "        ok = (checked == 1);\n"
+            "\n"
+            "        if (checked == 0)\n"
+            "        {\n"
+            '            tor_.error().set_local_error(fmt::format("Please Verify Local Data! Piece #{:d} is corrupt.", req.index));\n'
+            "        }\n"
+            "    }\n"
+            "\n"
+            "    if (ok)\n"
+            "    {\n"
+            "        ok = session->cache->read_block(tor_, tor_.piece_loc(req.index, req.offset), req.length, std::data(buf)) == 0;\n"
+            "    }\n"
+            "\n"
+            "    if (ok)\n"
+            "    {\n"
+            "        blocks_sent_to_peer.add(now_sec, 1);\n"
+            "        auto const piece_data = std::string_view{ reinterpret_cast<char const*>(std::data(buf)), req.length };\n"
+            "        return protocol_send_message(BtPeerMsgs::Piece, req.index, req.offset, piece_data);\n"
+            "    }\n"
+            "\n"
+            "    if (io_->supports_fext())\n"
+            "    {\n"
+            "        return protocol_send_reject(req);\n"
+            "    }\n"
+            "\n"
+            "    return {};\n"
+            "}\n"
+        )
+        new = (
+            "    // ANDROID fork: TRANSMISSION_USB_SAF stage 3 async reads.\n"
+            "    auto const req = peer_requested_.front();\n"
+            "    peer_requested_.pop_front();\n"
+            "\n"
+            "    auto ok = is_valid_request(req) && tor_.has_piece(req.index) && !tor_.is_piece_check_pending(req.index);\n"
+            "\n"
+            "    if (ok && !tor_.is_piece_checked(req.index))\n"
+            "    {\n"
+            "        // Unchecked piece: start a lazy check on the disk worker (High queue,\n"
+            "        // with the cache overlay) and reject/drop this request; the peer\n"
+            "        // will re-request once the piece is checked.\n"
+            "        tor_.request_lazy_check(req.index);\n"
+            "        ok = false;\n"
+            "    }\n"
+            "\n"
+            "    if (ok)\n"
+            "    {\n"
+            "        auto const loc = tor_.piece_loc(req.index, req.offset);\n"
+            "        auto buf = std::array<uint8_t, tr_block_info::BlockSize>{};\n"
+            "        if (session->cache->read_block_if_cached(tor_, loc, req.length, std::data(buf)))\n"
+            "        {\n"
+            "            blocks_sent_to_peer.add(now_sec, 1);\n"
+            "            auto const piece_data = std::string_view{ reinterpret_cast<char const*>(std::data(buf)), req.length };\n"
+            "            return protocol_send_message(BtPeerMsgs::Piece, req.index, req.offset, piece_data);\n"
+            "        }\n"
+            "\n"
+            "        if (std::size(reads_pending_) >= MaxReadsPerPeer || !session->disk_io().can_start_read())\n"
+            "        {\n"
+            "            // Cap hit: put the request back at the front and stop filling; the\n"
+            "            // next pulse()/fill_output_buffer retries. Returning 0 stops the\n"
+            "            // fill_output_buffer_impl loop even with requests still queued.\n"
+            "            peer_requested_.push_front(req);\n"
+            "            return {};\n"
+            "        }\n"
+            "\n"
+            "        reads_pending_.push_back(req);\n"
+            "        session->disk_io().read(\n"
+            "            tr_disk_make_segments(tor_, loc, req.length, false),\n"
+            "            [weak = weak_from_this(), req](tr_disk_read_result r)\n"
+            "            {\n"
+            "                if (auto self = weak.lock())\n"
+            "                {\n"
+            "                    self->on_block_read(req, std::move(r));\n"
+            "                }\n"
+            "            });\n"
+            "        return {};\n"
+            "    }\n"
+            "\n"
+            "    if (io_->supports_fext())\n"
+            "    {\n"
+            "        return protocol_send_reject(req);\n"
+            "    }\n"
+            "\n"
+            "    return {};\n"
+            "}\n"
+            "\n"
+            "// ANDROID fork: TRANSMISSION_USB_SAF stage 3 async reads. The disk read\n"
+            "// completion, delivered on the session thread.\n"
+            "void tr_peerMsgsImpl::on_block_read(peer_request const& req, tr_disk_read_result r)\n"
+            "{\n"
+            "    auto iter = std::find(std::begin(reads_pending_), std::end(reads_pending_), req);\n"
+            "    if (iter == std::end(reads_pending_))\n"
+            "    {\n"
+            "        return; // cancelled or cleared meanwhile\n"
+            "    }\n"
+            "    reads_pending_.erase(iter);\n"
+            "\n"
+            "    if (r.err != 0 || std::size(r.data) != static_cast<size_t>(req.length))\n"
+            "    {\n"
+            "        // Read errors are transient: reject if fext, do not flag the torrent\n"
+            "        // (matches the tri-state fix).\n"
+            "        if (io_->supports_fext())\n"
+            "        {\n"
+            "            protocol_send_reject(req);\n"
+            "        }\n"
+            "    }\n"
+            "    else\n"
+            "    {\n"
+            "        blocks_sent_to_peer.add(tr_time(), 1);\n"
+            "        auto const piece_data = std::string_view{ reinterpret_cast<char const*>(std::data(r.data)), req.length };\n"
+            "        protocol_send_message(BtPeerMsgs::Piece, req.index, req.offset, piece_data);\n"
+            "    }\n"
+            "\n"
+            "    // Serve the next queued requests without waiting for the next pulse\n"
+            "    // (completions are always posted to the session thread, no re-entrancy).\n"
+            "    fill_output_buffer(tr_time(), tr_time_msec());\n"
+            "}\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: peer-msgs.cc add_next_block body not found")
+        text = text.replace(old, new, 1)
+        with open(pm3, "w", encoding="utf-8") as f:
+            f.write(text)
+        # 26f. torrent.h: move is_piece_checked to the public section — the peer
+        # upload path (add_next_block) needs it to choose between a lazy check
+        # and a read. The private inline copy is removed.
+        tor_h3 = os.path.join(libt, "torrent.h")
+        with open(tor_h3, "r", encoding="utf-8") as f:
+            text = f.read()
+        old = (
+            "    [[nodiscard]] auto has_piece(tr_piece_index_t piece) const\n"
+            "    {\n"
+            "        return completion_.has_piece(piece);\n"
+            "    }\n"
+        )
+        new = (
+            "    [[nodiscard]] auto has_piece(tr_piece_index_t piece) const\n"
+            "    {\n"
+            "        return completion_.has_piece(piece);\n"
+            "    }\n"
+            "\n"
+            "    // ANDROID fork: TRANSMISSION_USB_SAF stage 3 async reads — the peer upload\n"
+            "    // path needs this to choose between a lazy check and a read.\n"
+            "    [[nodiscard]] TR_CONSTEXPR20 bool is_piece_checked(tr_piece_index_t piece) const\n"
+            "    {\n"
+            "        return checked_pieces_.test(piece);\n"
+            "    }\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: torrent.h has_piece body not found")
+        text = text.replace(old, new, 1)
+        old = (
+            "    [[nodiscard]] TR_CONSTEXPR20 bool is_piece_checked(tr_piece_index_t piece) const\n"
+            "    {\n"
+            "        return checked_pieces_.test(piece);\n"
+            "    }\n"
+            "\n"
+            "    // ANDROID fork: tri-state: 1=good, 0=corrupt, -1=read error.\n"
+            "    [[nodiscard]] int check_piece(tr_piece_index_t piece) const;\n"
+        )
+        new = (
+            "    // ANDROID fork: tri-state: 1=good, 0=corrupt, -1=read error.\n"
+            "    [[nodiscard]] int check_piece(tr_piece_index_t piece) const;\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: torrent.h private is_piece_checked not found")
+        text = text.replace(old, new, 1)
+        with open(tor_h3, "w", encoding="utf-8") as f:
+            f.write(text)
+
     print("apply_fork: OK")
 
 if __name__ == "__main__":
