@@ -4,7 +4,6 @@
 #include <cstdlib>
 #include <cstddef>
 #include <fcntl.h>
-#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -38,8 +37,19 @@ constexpr uint8_t OP_MKDIRS = 6;
 constexpr uint8_t OP_AVAIL = 7;
 constexpr uint8_t OP_EXISTS = 8;
 
-int g_sock = -1;
-std::mutex g_mutex;
+// ANDROID fork: one connection per native thread (TRANSMISSION_USB_SAF stage 4).
+struct SafSock
+{
+    int fd = -1;
+    ~SafSock()
+    {
+        if (fd >= 0)
+        {
+            ::close(fd);
+        }
+    }
+};
+thread_local SafSock t_sock;
 
 void set_err(tr_error* error, int e)
 {
@@ -70,9 +80,9 @@ void append_string(std::vector<uint8_t>& out, std::string const& s)
 
 int ensure_sock()
 {
-    if (g_sock >= 0)
+    if (t_sock.fd >= 0)
     {
-        return g_sock;
+        return t_sock.fd;
     }
     char const* path = std::getenv("TORRENT_SAF_SOCKET");
     if (path == nullptr || path[0] == '\0')
@@ -125,16 +135,16 @@ int ensure_sock()
         ::close(s);
         return -1;
     }
-    g_sock = s;
-    return g_sock;
+    t_sock.fd = s;
+    return t_sock.fd;
 }
 
 void drop_sock()
 {
-    if (g_sock >= 0)
+    if (t_sock.fd >= 0)
     {
-        ::close(g_sock);
-        g_sock = -1;
+        ::close(t_sock.fd);
+        t_sock.fd = -1;
     }
 }
 
@@ -200,7 +210,7 @@ bool send_request(uint8_t op, std::vector<uint8_t> const& payload)
 
 bool recv_response(std::vector<uint8_t>& payload, int32_t& status)
 {
-    int s = g_sock;
+    int s = t_sock.fd;
     if (s < 0)
     {
         saf_log_e("recv_response: no socket");
@@ -229,7 +239,7 @@ bool recv_response(std::vector<uint8_t>& payload, int32_t& status)
 // Returns the fd (>=0) on success, or -1 on failure.
 int recv_response_with_fd(int32_t& status)
 {
-    int s = g_sock;
+    int s = t_sock.fd;
     if (s < 0)
     {
         return -1;
@@ -290,9 +300,8 @@ bool tr_saf_is_path(std::string_view path) noexcept
 
 tr_sys_file_t tr_saf_file_open(char const* path, int flags, int /*permissions*/, tr_error* error)
 {
-    // ANDROID fork: stage 0 timing. Timer before the lock_guard so lock wait counts.
+    // ANDROID fork: stage 0 timing.
     tr_disk_timer const disk_timer{ "saf-open", path };
-    std::lock_guard<std::mutex> lk(g_mutex);
     std::string rel = strip_sentinel(path);
     std::vector<uint8_t> payload;
     payload.push_back((flags & TR_SYS_FILE_WRITE) != 0 ? 1 : 0); // MODE_RW / MODE_R
@@ -322,9 +331,8 @@ tr_sys_file_t tr_saf_file_open(char const* path, int flags, int /*permissions*/,
 
 bool tr_saf_path_exists(char const* path, tr_error* error)
 {
-    // ANDROID fork: stage 0 timing. Timer before the lock_guard so lock wait counts.
+    // ANDROID fork: stage 0 timing.
     tr_disk_timer const disk_timer{ "saf-exists", path };
-    std::lock_guard<std::mutex> lk(g_mutex);
     std::vector<uint8_t> payload;
     append_string(payload, strip_sentinel(path));
     if (!send_request(OP_EXISTS, payload))
@@ -344,9 +352,8 @@ bool tr_saf_path_exists(char const* path, tr_error* error)
 
 std::optional<tr_sys_path_info> tr_saf_path_get_info(std::string_view path, int /*flags*/, tr_error* error)
 {
-    // ANDROID fork: stage 0 timing. Timer before the lock_guard so lock wait counts.
+    // ANDROID fork: stage 0 timing.
     tr_disk_timer const disk_timer{ "saf-stat", path };
-    std::lock_guard<std::mutex> lk(g_mutex);
     std::vector<uint8_t> payload;
     append_string(payload, strip_sentinel(path));
     if (!send_request(OP_STAT, payload))
@@ -382,15 +389,20 @@ std::optional<tr_sys_path_info> tr_saf_path_get_info(std::string_view path, int 
 
 bool tr_saf_path_rename(char const* src_path, char const* dst_path, tr_error* error)
 {
-    // ANDROID fork: stage 0 timing. Timer before the lock_guard so lock wait counts.
+    // ANDROID fork: stage 0 timing.
     tr_disk_timer const disk_timer{ "saf-rename", src_path };
-    std::lock_guard<std::mutex> lk(g_mutex);
-    std::string dst(dst_path);
-    auto pos = dst.find_last_of('/');
-    std::string newName = (pos == std::string::npos) ? dst : dst.substr(pos + 1);
+    // The destination must stay inside the SAF tree. A rename to a foreign path
+    // is EXDEV so transmission's move falls back to copy+remove.
+    if (!tr_saf_is_path(dst_path))
+    {
+        set_err(error, EXDEV);
+        return false;
+    }
     std::vector<uint8_t> payload;
     append_string(payload, strip_sentinel(src_path));
-    append_string(payload, newName);
+    // Full destination relpath (Kotlin OP_RENAME: src relpath + dst relpath).
+    // A bare basename (no '/') is treated by the gateway as the same parent.
+    append_string(payload, strip_sentinel(dst_path));
     if (!send_request(OP_RENAME, payload))
     {
         set_err(error, EIO);
@@ -427,9 +439,8 @@ bool tr_saf_path_is_same(char const* path1, char const* path2, tr_error* /*error
 
 bool tr_saf_path_remove(char const* path, tr_error* error)
 {
-    // ANDROID fork: stage 0 timing. Timer before the lock_guard so lock wait counts.
+    // ANDROID fork: stage 0 timing.
     tr_disk_timer const disk_timer{ "saf-remove", path };
-    std::lock_guard<std::mutex> lk(g_mutex);
     std::vector<uint8_t> payload;
     append_string(payload, strip_sentinel(path));
     if (!send_request(OP_REMOVE, payload))
@@ -449,9 +460,8 @@ bool tr_saf_path_remove(char const* path, tr_error* error)
 
 bool tr_saf_dir_create(char const* path, int /*flags*/, int /*permissions*/, tr_error* error)
 {
-    // ANDROID fork: stage 0 timing. Timer before the lock_guard so lock wait counts.
+    // ANDROID fork: stage 0 timing.
     tr_disk_timer const disk_timer{ "saf-mkdir", path };
-    std::lock_guard<std::mutex> lk(g_mutex);
     std::vector<uint8_t> payload;
     append_string(payload, strip_sentinel(path));
     if (!send_request(OP_MKDIRS, payload))
@@ -471,9 +481,8 @@ bool tr_saf_dir_create(char const* path, int /*flags*/, int /*permissions*/, tr_
 
 std::optional<tr_sys_path_capacity> tr_saf_path_get_capacity(std::string_view path, tr_error* error)
 {
-    // ANDROID fork: stage 0 timing. Timer before the lock_guard so lock wait counts.
+    // ANDROID fork: stage 0 timing.
     tr_disk_timer const disk_timer{ "saf-capacity", path };
-    std::lock_guard<std::mutex> lk(g_mutex);
     if (!send_request(OP_AVAIL, {}))
     {
         set_err(error, EIO);

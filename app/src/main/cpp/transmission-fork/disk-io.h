@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility> // std::pair
 #include <vector>
 
 #include "libtransmission/block-info.h"
@@ -97,9 +98,9 @@ public:
     // enqueued before it has finished.
     void barrier(std::function<void()> done);
 
-    // Session thread. Blocks until a barrier passes or `timeout` elapses. Returns false on timeout.
-    // TEMPORARY (removed in stage 4).
-    bool wait_idle(std::chrono::milliseconds timeout);
+    // Low queue. Runs `fn` on the worker thread (it must not touch torrent/session state), then
+    // `done(err, message)` on the session thread.
+    void run_low(std::function<std::pair<int, std::string>()> fn, std::function<void(int, std::string)> done);
 
     // Session thread. Backpressure with hysteresis (64 MiB / 32 MiB).
     [[nodiscard]] bool writes_backlogged();

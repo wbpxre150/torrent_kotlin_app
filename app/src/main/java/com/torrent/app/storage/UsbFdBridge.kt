@@ -23,8 +23,12 @@ interface UsbFdBridge {
     /** Current file size in bytes, or -1 on failure. */
     fun statSize(relPath: String): Long
 
-    /** Rename the leaf of [relPath] to [newName] (same parent). Returns false on failure. */
-    fun renameDoc(relPath: String, newName: String): Boolean
+    /**
+     * Rename/move [relPath] to [dstRelPath] (a relpath under the same tree; a value
+     * without '/' means the same parent as [relPath]). Replaces an existing target
+     * (POSIX rename semantics). Returns false on failure.
+     */
+    fun renameDoc(relPath: String, dstRelPath: String): Boolean
 
     /** Recursively remove [relPath]. Returns false on failure (or if absent). */
     fun removeDoc(relPath: String): Boolean

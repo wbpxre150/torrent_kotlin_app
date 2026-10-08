@@ -2725,6 +2725,503 @@ def main():
         with open(tor_h3, "w", encoding="utf-8") as f:
             f.write(text)
 
+    # 27. Patch session.cc: ANDROID fork: stage 4 (TRANSMISSION_USB_SAF 4.3).
+    #     close_torrent_files no longer waits for the queued writes: the flush
+    #     and the worker close are only enqueued. The Low-queue remove/relocate
+    #     jobs (stage 4) run after them (FIFO), so they never race the writes.
+    ses_cc3 = os.path.join(libt, "session.cc")
+    with open(ses_cc3, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: stage 4 no wait" not in text:
+        old = (
+            "    this->cache->flush_torrent(tor_id);\n"
+            "    if (disk_io_)\n"
+            "    {\n"
+            "        disk_io_->close_torrent(tor_id);\n"
+            "        // ANDROID fork: TEMPORARY synchronous wait so remove/relocate never race queued\n"
+            "        // writes. Removed in TRANSMISSION_USB_SAF stage 4.\n"
+            "        auto const timeout = isClosing() ? std::chrono::milliseconds{ 20000 } : std::chrono::milliseconds{ 3600000 };\n"
+            "        if (!disk_io_->wait_idle(timeout))\n"
+            "        {\n"
+            "            tr_logAddWarn(\"Timed out waiting for queued disk writes\");\n"
+            "        }\n"
+            "    }\n"
+            "    openFiles().close_torrent(tor_id);\n"
+        )
+        new = (
+            "    this->cache->flush_torrent(tor_id);\n"
+            "    if (disk_io_)\n"
+            "    {\n"
+            "        disk_io_->close_torrent(tor_id);\n"
+            "        // ANDROID fork: stage 4 no wait\n"
+            "    }\n"
+            "    openFiles().close_torrent(tor_id);\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: session.cc close_torrent_files stage 2 wait block not found")
+        text = text.replace(old, new, 1)
+        with open(ses_cc3, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    # 28. Patch torrent.h + torrent.cc: ANDROID fork: stage 4 two-phase
+    #     remove and relocate (TRANSMISSION_USB_SAF 4.4, 4.5). Removing with
+    #     data and relocating with a move no longer block the session thread:
+    #     phase 1 stops/closes the torrent (enqueued) and enqueues a Low job
+    #     for the file deletion/move; phase 2 (the job's completion, on the
+    #     session thread) frees the torrent / applies the new location and
+    #     restarts it. Between the phases the torrent is flagged so it can't
+    #     be started, removed again or relocated.
+    tor_h4 = os.path.join(libt, "torrent.h")
+    with open(tor_h4, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: stage 4 two-phase remove/relocate" not in text:
+        # 28a. Public getters before the private section.
+        old = (
+            "    // ANDROID fork: stage 3 lazy check (TRANSMISSION_USB_SAF).\n"
+            "    void request_lazy_check(tr_piece_index_t piece);\n"
+            "\n"
+            "private:\n"
+        )
+        new = (
+            "    // ANDROID fork: stage 3 lazy check (TRANSMISSION_USB_SAF).\n"
+            "    void request_lazy_check(tr_piece_index_t piece);\n"
+            "\n"
+            "    // ANDROID fork: stage 4 two-phase remove/relocate (TRANSMISSION_USB_SAF).\n"
+            "    [[nodiscard]] constexpr auto is_remove_pending() const noexcept { return remove_pending_; }\n"
+            "    [[nodiscard]] constexpr auto is_relocate_pending() const noexcept { return relocate_pending_; }\n"
+            "\n"
+            "private:\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: torrent.h request_lazy_check/private section not found")
+        text = text.replace(old, new, 1)
+        # 28b. Members next to is_deleting_.
+        old = "    bool is_deleting_ = false;\n"
+        new = (
+            "    bool is_deleting_ = false;\n"
+            "    bool remove_pending_ = false; // ANDROID fork\n"
+            "    bool relocate_pending_ = false; // ANDROID fork\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: torrent.h is_deleting_ member not found")
+        text = text.replace(old, new, 1)
+        # 28c. finish_set_location declaration next to set_location_in_session_thread.
+        old = "    void set_location_in_session_thread(std::string_view path, bool move_from_old_path, int volatile* setme_state);\n"
+        new = (
+            "    void set_location_in_session_thread(std::string_view path, bool move_from_old_path, int volatile* setme_state);\n"
+            "    void finish_set_location(std::string_view path, bool move_from_old_path, int err, std::string const& msg, int volatile* setme_state); // ANDROID fork\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: torrent.h set_location_in_session_thread declaration not found")
+        text = text.replace(old, new, 1)
+        with open(tor_h4, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    tor_cc4 = os.path.join(libt, "torrent.cc")
+    with open(tor_cc4, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: stage 4 two-phase" not in text:
+        # 28d. tr_torrent::start: don't start while a remove/relocate job is in flight.
+        old = (
+            "void tr_torrent::start(bool bypass_queue, std::optional<bool> has_any_local_data)\n"
+            "{\n"
+            "    using namespace start_stop_helpers;\n"
+            "\n"
+            "    auto const lock = unique_lock();\n"
+            "\n"
+            "    switch (activity())\n"
+        )
+        new = (
+            "void tr_torrent::start(bool bypass_queue, std::optional<bool> has_any_local_data)\n"
+            "{\n"
+            "    using namespace start_stop_helpers;\n"
+            "\n"
+            "    auto const lock = unique_lock();\n"
+            "\n"
+            "    // ANDROID fork: stage 4 - a remove/relocate job is in flight.\n"
+            "    if (is_remove_pending() || is_relocate_pending())\n"
+            "    {\n"
+            "        return;\n"
+            "    }\n"
+            "\n"
+            "    switch (activity())\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: torrent.cc tr_torrent::start body not found")
+        text = text.replace(old, new, 1)
+        # 28e. start_in_session_thread: the same guard, after the lock.
+        old = (
+            "void tr_torrent::start_in_session_thread()\n"
+            "{\n"
+            "    using namespace start_stop_helpers;\n"
+            "\n"
+            "    TR_ASSERT(session->am_in_session_thread());\n"
+            "    auto const lock = unique_lock();\n"
+            "\n"
+            "    // We are after `torrentStart` and before announcing to trackers/peers,\n"
+        )
+        new = (
+            "void tr_torrent::start_in_session_thread()\n"
+            "{\n"
+            "    using namespace start_stop_helpers;\n"
+            "\n"
+            "    TR_ASSERT(session->am_in_session_thread());\n"
+            "    auto const lock = unique_lock();\n"
+            "\n"
+            "    // ANDROID fork: stage 4 - a remove/relocate job is in flight.\n"
+            "    if (is_remove_pending() || is_relocate_pending())\n"
+            "    {\n"
+            "        return;\n"
+            "    }\n"
+            "\n"
+            "    // We are after `torrentStart` and before announcing to trackers/peers,\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: torrent.cc start_in_session_thread body not found")
+        text = text.replace(old, new, 1)
+        # 28f. tr_torrentRemoveInSessionThread: two-phase remove.
+        old = (
+            "void tr_torrentRemoveInSessionThread(tr_torrent* tor, bool delete_flag, tr_fileFunc delete_func, void* delete_user_data)\n"
+            "{\n"
+            "    auto const lock = tor->unique_lock();\n"
+            "\n"
+            "    if (delete_flag && tor->has_metainfo())\n"
+            "    {\n"
+            "        // ensure the files are all closed and idle before moving\n"
+            "        tor->session->close_torrent_files(tor->id());\n"
+            "        tor->session->verify_remove(tor);\n"
+            "\n"
+            "        if (delete_func == nullptr)\n"
+            "        {\n"
+            "            delete_func = start_stop_helpers::removeTorrentFile;\n"
+            "        }\n"
+            "\n"
+            "        auto const delete_func_wrapper = [&delete_func, delete_user_data](char const* filename)\n"
+            "        {\n"
+            "            delete_func(filename, delete_user_data, nullptr);\n"
+            "        };\n"
+            "\n"
+            "        auto error = tr_error{};\n"
+            "        tor->files().remove(tor->current_dir(), tor->name(), delete_func_wrapper, &error);\n"
+            "        if (error)\n"
+            "        {\n"
+            "            tr_logAddWarnTor(\n"
+            "                tor,\n"
+            "                fmt::format(\n"
+            "                    fmt::runtime(_(\"Couldn't remove all torrent files: {error} ({error_code})\")),\n"
+            "                    fmt::arg(\"error\", error.message()),\n"
+            "                    fmt::arg(\"error_code\", error.code())));\n"
+            "        }\n"
+            "    }\n"
+            "\n"
+            "    tr_torrentFreeInSessionThread(tor);\n"
+            "}"
+        )
+        new = (
+            "void tr_torrentRemoveInSessionThread(tr_torrent* tor, bool delete_flag, tr_fileFunc delete_func, void* delete_user_data)\n"
+            "{\n"
+            "    auto const lock = tor->unique_lock();\n"
+            "\n"
+            "    if (tor->is_remove_pending())\n"
+            "    {\n"
+            "        return; // ANDROID fork: stage 4 - a remove job is already in flight\n"
+            "    }\n"
+            "\n"
+            "    if (tor->is_relocate_pending())\n"
+            "    {\n"
+            "        // ANDROID fork: stage 4 - remove requested while a move job is queued;\n"
+            "        // don't drop it (tr_torrentRemove already set is_deleting_). Enqueue a\n"
+            "        // no-op Low job: the Low queue is FIFO and completions post to the\n"
+            "        // session thread in order, so its completion runs after the move job's\n"
+            "        // completion has cleared relocate_pending_ and updated current_dir_.\n"
+            "        auto* const sess = tor->session;\n"
+            "        auto const tor_id = tor->id();\n"
+            "        sess->disk_io().run_low(\n"
+            "            []() -> std::pair<int, std::string>\n"
+            "            { return { 0, {} }; },\n"
+            "            [sess, tor_id, delete_flag, delete_func, delete_user_data](int, std::string)\n"
+            "            {\n"
+            "                if (auto* const t = sess->torrents().get(tor_id); t != nullptr)\n"
+            "                {\n"
+            "                    tr_torrentRemoveInSessionThread(t, delete_flag, delete_func, delete_user_data);\n"
+            "                }\n"
+            "            });\n"
+            "        return;\n"
+            "    }\n"
+            "\n"
+            "    if (delete_flag && tor->has_metainfo())\n"
+            "    {\n"
+            "        // ANDROID fork: stage 4 two-phase remove (TRANSMISSION_USB_SAF 4.4).\n"
+            "        // Phase 1: flag the torrent, stop it (or close its files) so the flush\n"
+            "        // and close are enqueued, then delete the files on the disk worker\n"
+            "        // (Low queue: after every queued write). Phase 2 (the completion, on\n"
+            "        // the session thread) frees the torrent.\n"
+            "        tor->remove_pending_ = true;\n"
+            "        tor->session->verify_remove(tor);\n"
+            "\n"
+            "        if (tor->is_running())\n"
+            "        {\n"
+            "            tor->stop_now();\n"
+            "        }\n"
+            "        else\n"
+            "        {\n"
+            "            tor->session->close_torrent_files(tor->id());\n"
+            "        }\n"
+            "\n"
+            "        if (delete_func == nullptr)\n"
+            "        {\n"
+            "            delete_func = start_stop_helpers::removeTorrentFile;\n"
+            "        }\n"
+            "\n"
+            "        // Copies for the worker (it must not touch the torrent/session).\n"
+            "        auto const files = tor->files();\n"
+            "        auto const dir = std::string{ tor->current_dir() };\n"
+            "        auto const name = std::string{ tor->name() };\n"
+            "        auto* const session = tor->session;\n"
+            "        auto const tor_id = tor->id();\n"
+            "\n"
+            "        session->disk_io().run_low(\n"
+            "            [files, dir, name, delete_func, delete_user_data]() -> std::pair<int, std::string>\n"
+            "            {\n"
+            "                auto error = tr_error{};\n"
+            "                files.remove(dir, name, [delete_func, delete_user_data](char const* f)\n"
+            "                             { delete_func(f, delete_user_data, nullptr); }, &error);\n"
+            "                return { error.code(), std::string{ error.message() } };\n"
+            "            },\n"
+            "            [session, tor_id, name](int err, std::string msg)\n"
+            "            {\n"
+            "                if (err != 0)\n"
+            "                {\n"
+            "                    tr_logAddWarn(fmt::format(\n"
+            "                        fmt::runtime(_(\"Couldn't remove all torrent files for '{name}': {error} ({error_code})\")),\n"
+            "                        fmt::arg(\"name\", name),\n"
+            "                        fmt::arg(\"error\", msg),\n"
+            "                        fmt::arg(\"error_code\", err)));\n"
+            "                }\n"
+            "                if (auto* const t = session->torrents().get(tor_id); t != nullptr)\n"
+            "                {\n"
+            "                    tr_torrentFreeInSessionThread(t);\n"
+            "                }\n"
+            "            });\n"
+            "        return;\n"
+            "    }\n"
+            "\n"
+            "    tr_torrentFreeInSessionThread(tor);\n"
+            "}"
+        )
+        if old not in text:
+            sys.exit("ERROR: torrent.cc tr_torrentRemoveInSessionThread body not found")
+        text = text.replace(old, new, 1)
+        # 28g. set_location: don't relocate while a remove/relocate job is in flight.
+        old = (
+            "void tr_torrent::set_location(std::string_view location, bool move_from_old_path, int volatile* setme_state)\n"
+            "{\n"
+            "    if (setme_state != nullptr)\n"
+            "    {\n"
+            "        *setme_state = TR_LOC_MOVING;\n"
+            "    }\n"
+        )
+        new = (
+            "void tr_torrent::set_location(std::string_view location, bool move_from_old_path, int volatile* setme_state)\n"
+            "{\n"
+            "    // ANDROID fork: stage 4 - a remove/relocate job is in flight.\n"
+            "    if (is_remove_pending() || is_relocate_pending())\n"
+            "    {\n"
+            "        if (setme_state != nullptr)\n"
+            "        {\n"
+            "            *setme_state = TR_LOC_ERROR;\n"
+            "        }\n"
+            "        return;\n"
+            "    }\n"
+            "\n"
+            "    if (setme_state != nullptr)\n"
+            "    {\n"
+            "        *setme_state = TR_LOC_MOVING;\n"
+            "    }\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: torrent.cc tr_torrent::set_location body not found")
+        text = text.replace(old, new, 1)
+        # 28h. tr_torrentSetLocation: the same guard, report the error to the caller.
+        old = (
+            "    tor->set_location(location, move_from_old_path, setme_state);\n"
+            "}"
+        )
+        new = (
+            "    // ANDROID fork: stage 4 - a remove/relocate job is in flight.\n"
+            "    if (tor->is_remove_pending() || tor->is_relocate_pending())\n"
+            "    {\n"
+            "        if (setme_state != nullptr)\n"
+            "        {\n"
+            "            *setme_state = TR_LOC_ERROR;\n"
+            "        }\n"
+            "        return;\n"
+            "    }\n"
+            "\n"
+            "    tor->set_location(location, move_from_old_path, setme_state);\n"
+            "}"
+        )
+        if old not in text:
+            sys.exit("ERROR: torrent.cc tr_torrentSetLocation body not found")
+        text = text.replace(old, new, 1)
+        # 28i. set_location_in_session_thread: two-phase relocate; the old tail
+        #     moves to finish_set_location (shared with the non-move path).
+        old = (
+            "void tr_torrent::set_location_in_session_thread(std::string_view const path, bool move_from_old_path, int volatile* setme_state)\n"
+            "{\n"
+            "    TR_ASSERT(session->am_in_session_thread());\n"
+            "\n"
+            "    auto ok = true;\n"
+            "    if (move_from_old_path)\n"
+            "    {\n"
+            "        if (setme_state != nullptr)\n"
+            "        {\n"
+            "            *setme_state = TR_LOC_MOVING;\n"
+            "        }\n"
+            "\n"
+            "        // ensure the files are all closed and idle before moving\n"
+            "        session->close_torrent_files(id());\n"
+            "        session->verify_remove(this);\n"
+            "\n"
+            "        auto error = tr_error{};\n"
+            "        ok = files().move(current_dir(), path, name(), &error);\n"
+            "        if (error)\n"
+            "        {\n"
+            "            this->error().set_local_error(\n"
+            "                fmt::format(\n"
+            "                    fmt::runtime(_(\"Couldn't move '{old_path}' to '{path}': {error} ({error_code})\")),\n"
+            "                    fmt::arg(\"old_path\", current_dir()),\n"
+            "                    fmt::arg(\"path\", path),\n"
+            "                    fmt::arg(\"error\", error.message()),\n"
+            "                    fmt::arg(\"error_code\", error.code())));\n"
+            "            tr_torrentStop(this);\n"
+            "        }\n"
+            "    }\n"
+            "\n"
+            "    // tell the torrent where the files are\n"
+            "    if (ok)\n"
+            "    {\n"
+            "        set_download_dir(path);\n"
+            "\n"
+            "        if (move_from_old_path)\n"
+            "        {\n"
+            "            incomplete_dir_.clear();\n"
+            "            current_dir_ = download_dir();\n"
+            "        }\n"
+            "    }\n"
+            "\n"
+            "    if (setme_state != nullptr)\n"
+            "    {\n"
+            "        *setme_state = ok ? TR_LOC_DONE : TR_LOC_ERROR;\n"
+            "    }\n"
+            "}"
+        )
+        new = (
+            "void tr_torrent::set_location_in_session_thread(std::string_view const path, bool move_from_old_path, int volatile* setme_state)\n"
+            "{\n"
+            "    TR_ASSERT(session->am_in_session_thread());\n"
+            "\n"
+            "    if (!move_from_old_path)\n"
+            "    {\n"
+            "        finish_set_location(path, false, 0, {}, setme_state);\n"
+            "        return;\n"
+            "    }\n"
+            "\n"
+            "    // ANDROID fork: stage 4 two-phase relocate (TRANSMISSION_USB_SAF 4.5).\n"
+            "    // Phase 1: remember if the torrent was running, stop it (or close its\n"
+            "    // files) so the flush and close are enqueued, then move the files on\n"
+            "    // the disk worker (Low queue: after every queued write). Phase 2 (the\n"
+            "    // completion, on the session thread) applies the new location and\n"
+            "    // restarts the torrent if it was running.\n"
+            "    if (setme_state != nullptr)\n"
+            "    {\n"
+            "        *setme_state = TR_LOC_MOVING;\n"
+            "    }\n"
+            "\n"
+            "    relocate_pending_ = true; // ANDROID fork: guard until the move job completes\n"
+            "    auto const was_running = is_running();\n"
+            "    if (was_running)\n"
+            "    {\n"
+            "        stop_now();\n"
+            "    }\n"
+            "    else\n"
+            "    {\n"
+            "        session->close_torrent_files(id());\n"
+            "    }\n"
+            "    session->verify_remove(this);\n"
+            "\n"
+            "    // Copies for the worker (it must not touch the torrent/session).\n"
+            "    auto const files = this->files();\n"
+            "    auto const old_dir = std::string{ current_dir() };\n"
+            "    auto const new_dir = std::string{ path };\n"
+            "    auto const nm = std::string{ name() };\n"
+            "    auto* const sess = session;\n"
+            "    auto const tor_id = id();\n"
+            "\n"
+            "    sess->disk_io().run_low(\n"
+            "        [files, old_dir, new_dir, nm]() -> std::pair<int, std::string>\n"
+            "        {\n"
+            "            auto error = tr_error{};\n"
+            "            auto const ok = files.move(old_dir, new_dir, nm, &error);\n"
+            "            return { ok ? 0 : (error.code() != 0 ? error.code() : EIO), std::string{ error.message() } };\n"
+            "        },\n"
+            "        [sess, tor_id, new_dir, was_running, setme_state](int err, std::string msg)\n"
+            "        {\n"
+            "            auto* tor = sess->torrents().get(tor_id);\n"
+            "            if (tor == nullptr)\n"
+            "            {\n"
+            "                return; // the session closed before the move finished\n"
+            "            }\n"
+            "            auto const lock = tor->unique_lock();\n"
+            "            tor->relocate_pending_ = false;\n"
+            "            tor->finish_set_location(new_dir, true, err, msg, setme_state);\n"
+            "            if (was_running && err == 0 && !tor->is_deleting_)\n"
+            "            {\n"
+            "                tr_torrentStart(tor);\n"
+            "            }\n"
+            "        });\n"
+            "}\n"
+            "\n"
+            "// ANDROID fork: stage 4 two-phase relocate (TRANSMISSION_USB_SAF 4.5).\n"
+            "// The old tail of set_location_in_session_thread, run on the session thread\n"
+            "// from the move job's completion (or directly for the non-move path).\n"
+            "void tr_torrent::finish_set_location(std::string_view path, bool move_from_old_path, int err, std::string const& msg, int volatile* setme_state)\n"
+            "{\n"
+            "    if (err != 0)\n"
+            "    {\n"
+            "        this->error().set_local_error(\n"
+            "            fmt::format(\n"
+            "                fmt::runtime(_(\"Couldn't move '{old_path}' to '{path}': {error} ({error_code})\")),\n"
+            "                fmt::arg(\"old_path\", current_dir()),\n"
+            "                fmt::arg(\"path\", path),\n"
+            "                fmt::arg(\"error\", msg),\n"
+            "                fmt::arg(\"error_code\", err)));\n"
+            "        tr_torrentStop(this);\n"
+            "    }\n"
+            "\n"
+            "    // tell the torrent where the files are\n"
+            "    if (err == 0)\n"
+            "    {\n"
+            "        set_download_dir(path);\n"
+            "\n"
+            "        if (move_from_old_path)\n"
+            "        {\n"
+            "            incomplete_dir_.clear();\n"
+            "            current_dir_ = download_dir();\n"
+            "        }\n"
+            "    }\n"
+            "\n"
+            "    if (setme_state != nullptr)\n"
+            "    {\n"
+            "        *setme_state = err == 0 ? TR_LOC_DONE : TR_LOC_ERROR;\n"
+            "    }\n"
+            "}"
+        )
+        if old not in text:
+            sys.exit("ERROR: torrent.cc set_location_in_session_thread body not found")
+        text = text.replace(old, new, 1)
+        with open(tor_cc4, "w", encoding="utf-8") as f:
+            f.write(text)
     print("apply_fork: OK")
 
 if __name__ == "__main__":

@@ -14,7 +14,7 @@ class SafIpcRequestHandlerTest {
         override fun openFd(relPath: String, mode: String): Int { lastOpenMode = mode; return -1 }
         override fun truncate(relPath: String, len: Long): Boolean = files.containsKey(relPath)
         override fun statSize(relPath: String): Long = files[relPath]?.size ?: -1L
-        override fun renameDoc(relPath: String, newName: String): Boolean = files.containsKey(relPath)
+        override fun renameDoc(relPath: String, dstRelPath: String): Boolean = files.containsKey(relPath)
         override fun removeDoc(relPath: String): Boolean =
             files.remove(relPath) != null || dirs.remove(relPath)
         override fun mkdirs(relPath: String): Boolean { dirs.add(relPath); return true }
@@ -88,6 +88,7 @@ class SafIpcRequestHandlerTest {
         val b = FakeBridge().apply { files["a.part"] = UsbFdBridge.PathInfo(false, 0) }
         val h = SafIpcRequestHandler { b }
         assertEquals(0, h.handle(SafIpcCodec.decodeRequest(SafIpcCodec.renameRequest("a.part", "a"))).status)
+        assertEquals(0, h.handle(SafIpcCodec.decodeRequest(SafIpcCodec.renameRequest("a.part", "sub/a"))).status)
         assertEquals(-5, h.handle(SafIpcCodec.decodeRequest(SafIpcCodec.renameRequest("nope", "a"))).status)
     }
 

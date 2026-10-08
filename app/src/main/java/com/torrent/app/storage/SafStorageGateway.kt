@@ -75,12 +75,19 @@ class SafStorageGateway(
         } ?: -1L
     }
 
-    override fun renameDoc(relPath: String, newName: String): Boolean {
+    override fun renameDoc(relPath: String, dstRelPath: String): Boolean {
         val n = SafPaths.normalize(relPath)
-        val parent = SafPaths.splitParent(n) ?: return false
-        val targetPath = if (parent.first.isEmpty()) newName else "${parent.first}/$newName"
+        val srcSplit = SafPaths.splitParent(n) ?: return false
+        // Backward compat: a dst without '/' means "basename in the same parent as src".
+        val d0 = SafPaths.normalize(dstRelPath)
+        val d = if (d0.contains('/')) d0
+            else if (srcSplit.first.isEmpty()) d0
+            else "${srcSplit.first}/$d0"
+        // Same normalized path: no-op. NEVER delete in this case.
+        if (n == d) return true
+        val dstSplit = SafPaths.splitParent(d) ?: return false
         // Acquire source and target locks in lexicographic order to prevent deadlock.
-        val (firstLock, secondLock) = if (n < targetPath) lockFor(n) to lockFor(targetPath) else lockFor(targetPath) to lockFor(n)
+        val (firstLock, secondLock) = if (n < d) lockFor(n) to lockFor(d) else lockFor(d) to lockFor(n)
         firstLock.lock()
         var result = false
         try {
@@ -91,20 +98,51 @@ class SafStorageGateway(
                 // overwriting (POSIX rename replaces the target). Emulate POSIX: remove an
                 // existing target first so the rename lands on the exact requested name and
                 // transmission does not silently end up referencing a phantom " (1)" file.
-                resolveUri(targetPath)?.let { existing ->
+                resolveUri(d)?.let { existing ->
                     try {
                         DocumentsContract.deleteDocument(resolver, existing)
                     } catch (e: Exception) {
-                        Log.e(TAG, "renameDoc: cannot remove existing target '$targetPath': ${e.message}")
+                        Log.e(TAG, "renameDoc: cannot remove existing target '$d': ${e.message}")
                         return false
                     }
-                    cache.keys.filter { it == targetPath || it.startsWith("$targetPath/") }
+                    cache.keys.filter { it == d || it.startsWith("$d/") }
                         .forEach { cache.remove(it) }
                 }
-                val renamed = DocumentsContract.renameDocument(resolver, srcUri, newName)
-                    ?: return false
-                cache.remove(n)
-                cache[targetPath] = renamed
+                val (srcParent, srcLeaf) = srcSplit
+                val (dstParent, dstLeaf) = dstSplit
+                val finalUri: Uri
+                if (srcParent == dstParent) {
+                    finalUri = DocumentsContract.renameDocument(resolver, srcUri, dstLeaf)
+                        ?: return false
+                } else {
+                    // Cross-parent: SAF renameDocument cannot change the parent, so move
+                    // the document to the destination parent (created if missing), then
+                    // rename the leaf there if the name changed. ExternalStorageProvider
+                    // moves within the same volume via File.renameTo, so this is cheap.
+                    val srcParentUri = resolveUri(srcParent) ?: return false
+                    val dstParentUri =
+                        (if (dstParent.isEmpty()) resolveUri(dstParent) else resolveOrCreateDir(dstParent))
+                            ?: return false
+                    val moved = try {
+                        DocumentsContract.moveDocument(resolver, srcUri, srcParentUri, dstParentUri)
+                    } catch (e: Exception) {
+                        // Provider without FLAG_SUPPORTS_MOVE: fail WITHOUT deleting the
+                        // source so transmission falls back to copy+remove.
+                        Log.e(TAG, "renameDoc: moveDocument '$n' -> '$d' failed: ${e.message}")
+                        return false
+                    }
+                    if (moved == null) return false
+                    finalUri = if (dstLeaf != srcLeaf) {
+                        DocumentsContract.renameDocument(resolver, moved, dstLeaf) ?: return false
+                    } else {
+                        moved
+                    }
+                }
+                // src may be a directory: drop src and any cached descendants, then
+                // record the new location.
+                cache.keys.filter { it == n || it.startsWith("$n/") }
+                    .forEach { cache.remove(it) }
+                cache[d] = finalUri
                 result = true
             } finally {
                 secondLock.unlock()

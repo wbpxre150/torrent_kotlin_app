@@ -5,7 +5,6 @@
 #include <array>
 #include <cerrno>
 #include <cstddef>
-#include <future>
 #include <utility>
 
 #include <fmt/format.h>
@@ -436,15 +435,23 @@ void tr_disk_io::barrier(std::function<void()> done)
         });
 }
 
-bool tr_disk_io::wait_idle(std::chrono::milliseconds const timeout)
+void tr_disk_io::run_low(
+    std::function<std::pair<int, std::string>()> fn,
+    std::function<void(int, std::string)> done)
 {
-    auto p = std::make_shared<std::promise<void>>();
-    auto f = p->get_future();
-    queue_.push(tr_disk_queue::Prio::Low, [p]
-                {
-                    p->set_value();
-                });
-    return f.wait_for(timeout) == std::future_status::ready;
+    queue_.push(
+        tr_disk_queue::Prio::Low,
+        [session = &session_, fn = std::move(fn), done = std::move(done)]() mutable
+        {
+            // Worker part. `fn` must not touch torrent/session state.
+            auto const [err, msg] = fn();
+
+            // Session part. Must not capture `this`.
+            session->run_in_session_thread([done = std::move(done), err, msg = std::move(msg)]()
+                                           {
+                                               done(err, std::move(msg));
+                                           });
+        });
 }
 
 bool tr_disk_io::writes_backlogged()

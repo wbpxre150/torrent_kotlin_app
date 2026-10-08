@@ -156,10 +156,12 @@ object SafIpcCodec {
         return UsbFdBridge.PathInfo(isDir, size, lastModified)
     }
 
-    fun renameRequest(relPath: String, newName: String): ByteArray {
+    // OP_RENAME payload: src relpath + dst relpath. The dst is the full destination
+    // relpath; a value without '/' means "basename in the same parent as src".
+    fun renameRequest(relPath: String, dstRelPath: String): ByteArray {
         val buf = ByteBuffer.allocate(2 + relPath.toByteArray(Charsets.UTF_8).size +
-            2 + newName.toByteArray(Charsets.UTF_8).size).order(ByteOrder.LITTLE_ENDIAN)
-        putString(buf, relPath); putString(buf, newName)
+            2 + dstRelPath.toByteArray(Charsets.UTF_8).size).order(ByteOrder.LITTLE_ENDIAN)
+        putString(buf, relPath); putString(buf, dstRelPath)
         return encodeRequest(OP_RENAME, buf.array())
     }
     fun parseRenameRequest(payload: ByteArray): Pair<String, String> {

@@ -74,11 +74,22 @@ class SafIpcCodecTest {
         val info = SafIpcCodec.parseStatResponse(resp)
         assertEquals(UsbFdBridge.PathInfo(false, 999L, 0L), info)
     }
-    @Test fun renameRequest_roundTrips() {
-        val (src, newName) = SafIpcCodec.parseRenameRequest(
+    @Test fun renameRequest_basenameDst_roundTrips() {
+        // Backward compat: a dst without '/' means "basename in the same parent as src".
+        val (src, dstRelPath) = SafIpcCodec.parseRenameRequest(
             SafIpcCodec.decodeRequest(SafIpcCodec.renameRequest("a/b.part", "b")).payload)
         assertEquals("a/b.part", src)
-        assertEquals("b", newName)
+        assertEquals("b", dstRelPath)
+    }
+
+    @Test fun renameRequest_fullDstRelPath_roundTrips() {
+        // New payload: dst is the full destination relpath (cross-parent move).
+        val (src, dstRelPath) = SafIpcCodec.parseRenameRequest(
+            SafIpcCodec.decodeRequest(
+                SafIpcCodec.renameRequest("torrent_data/s4c/file00.bin", "torrent_moved/s4c/file00.bin"))
+                .payload)
+        assertEquals("torrent_data/s4c/file00.bin", src)
+        assertEquals("torrent_moved/s4c/file00.bin", dstRelPath)
     }
 
     @Test fun stringRequest_roundTrips_forRemoveMkdirsExists() {

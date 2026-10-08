@@ -249,3 +249,16 @@ Stage 3 notes:
   ~30 lines per daemon session, so the thread sampler is the main evidence.
 - Beyond the spec: `on_block_read` calls `fill_output_buffer` after each completion, so queued
   requests keep flowing. Otherwise a peer would get only 4 blocks per pulse.
+
+| stage | scenario | RPC p50 | RPC p99 | RPC max | session-thread D/67/68 samples | worst DISKSLOW op |
+|---|---|---|---|---|---|---|
+| 4 | 3: stop/start + remove with data mid-download, USB busy (15 min, RPC on device) | 3.1 ms | 6.7 ms | 10.4 ms | 0/0/0 of 2406 (`tr-diskio` 82/1/82) | `tr-diskio` pwrite 8482 ms; no `tr-session` DISKSLOW |
+| 4 | 3: same, RPC via `rpc_probe.sh` over wireless adb | 15.1 ms | 198.7 ms | 273.9 ms | (same run) | — |
+| 4 | 3: relocate (move) mid-download + remove, while 2 LAN libtorrent leechers pull `s4a`/`s4b` (10 min, RPC on device) | 2.9 ms | 104.7 ms | 543.8 ms | 0/0/0 of 700 (`tr-diskio` 183/160/25) | `tr-diskio` pwrite 4791 ms; no `tr-session` DISKSLOW |
+
+Stage 4 notes:
+- Rows recovered from the stage 4 session's logs (`/tmp/s4`); `rpc_probe.sh` over wireless adb
+  during the relocate run measured the WiFi link saturated by the leechers (p50 648 ms), not the
+  session thread, as in stage 3.
+- A separate device-side sampler on `tr-session` (3600 samples) saw only `epoll_pwait` (22),
+  running, or 73/98/203, never 67/68.

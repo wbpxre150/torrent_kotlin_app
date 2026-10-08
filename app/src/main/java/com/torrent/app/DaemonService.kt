@@ -46,7 +46,7 @@ class DaemonService : Service() {
     private lateinit var tokenManager: TokenManager
     private val supervisors = mutableListOf<ProcessSupervisor>()
     private lateinit var usbPermissionManager: UsbPermissionManager
-    private var gateway: SafStorageGateway? = null
+    @Volatile private var gateway: SafStorageGateway? = null
     private lateinit var safSocketFile: java.io.File
     private lateinit var safIpcServer: SafIpcServer
     private lateinit var transmissionConfig: TransmissionConfig
