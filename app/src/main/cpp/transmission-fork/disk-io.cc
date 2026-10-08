@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cerrno>
 #include <cstddef>
 #include <utility>
@@ -322,6 +323,9 @@ void tr_disk_io::read(
     std::vector<tr_disk_segment> segments,
     std::function<void(tr_disk_read_result)> done)
 {
+    // ANDROID fork: stage 5 DISKREAD temporary (TRANSMISSION_USB_SAF 5.1, delete in 5.3).
+    auto const enqueued_at = std::chrono::steady_clock::now();
+    // ANDROID fork: end stage 5 DISKREAD temporary
     // Session thread: count the read as in-flight before the worker starts.
     ++*reads_in_flight_;
 
@@ -330,6 +334,7 @@ void tr_disk_io::read(
         [this,
          session = &session_,
          reads_in_flight = reads_in_flight_,
+         enqueued_at,
          segments = std::move(segments),
          done = std::move(done)]() mutable
         {
@@ -358,10 +363,16 @@ void tr_disk_io::read(
             // run_in_session_thread wraps it in a std::function). `result` is held
             // in a shared_ptr so the data is moved, not copied, into `done`.
             session->run_in_session_thread(
-                [reads_in_flight, done = std::move(done), result = std::make_shared<tr_disk_read_result>(std::move(result))]()
+                [reads_in_flight, enqueued_at, done = std::move(done), result = std::make_shared<tr_disk_read_result>(std::move(result))]()
                 {
                     // Decrement before `done` so the count is right even when the peer is gone.
                     --*reads_in_flight;
+                    // ANDROID fork: stage 5 DISKREAD temporary (TRANSMISSION_USB_SAF 5.1, delete in 5.3).
+                    if (auto const ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - enqueued_at).count(); ms > 0)
+                    {
+                        tr_logAddInfo(fmt::format("[DISKREAD] ms={}", ms));
+                    }
+                    // ANDROID fork: end stage 5 DISKREAD temporary
                     done(std::move(*result));
                 });
         });
