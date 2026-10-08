@@ -190,3 +190,33 @@ existing seeding-corruption regressions (Mechanisms C/D, Fix B/E in `apply_fork.
   synchronous I/O. On `main`, the async series (#8742) deleted the write cache and added an
   unused `tr::LocalData`, then stalled in March 2026. Decision: write our own worker on 4.1.2,
   with an API loosely shaped like `LocalData`.
+
+---
+
+## Measurements
+
+RPC = `tools/usb-io/rpc_probe.sh` (`session-get` every 1 s, HTTP 200/409 only, no failures in
+any run). Samples = `tools/usb-io/sample_threads.sh` on `tr-session` (200 ms interval), as
+D / 67 (`pread64`) / 68 (`pwrite64`). Device: phone over wireless adb, USB drive via SAF,
+`cache-size-mb` 4, preallocation 0.
+
+Stage 0/1 rows were never recorded. Reference baseline from the 2026-10-07 evidence above:
+one RPC call took **188 s** while `tr-session` sat in `pwrite64`.
+
+| stage | scenario | RPC p50 | RPC p99 | RPC max | session-thread D/67/68 samples | worst DISKSLOW op |
+|---|---|---|---|---|---|---|
+| 2 | 1: new 4.4 GB 8-file torrent, first 5 min (1–2.4 MiB/s, backlog paused once) | 15.2 ms | 47.5 ms | 52.6 ms | 1/1/0 of 837 | `tr-diskio` pwrite 8574 ms (no `tr-session` DISKSLOW) |
+| 2 | 1 + 3 + 4: stop/start, kill -9 + full verify, download to 100%, full verify, remove with data (≈23 min) | 15.0 ms | 300.3 ms | 924.9 ms | 1 pread event, 0 pwrite (summary lost) | `tr-diskio` pwrite 6696 ms; `tr-session` only read opens (≤346 ms) |
+| 2 | seeding + full verify (final build) | 13.9 ms | 51.0 ms | 82.5 ms | 0/0/0 of 336 | none |
+
+Stage 2 notes:
+- `kill -9` at 22.9%, restart, full verify: 241 pieces "have" before, 251 after, 0 lost.
+- Remove with "delete data" of a completed 4.4 GB torrent: RPC returned in 1.3 s; files gone
+  and not recreated.
+- A re-download of the same torrent at up to ~10 MiB/s: 0 failed post-download checks,
+  `corruptEver` 0, full verify 100%. The first download (after the `kill -9` restart) logged
+  `corruptEver` 557 MB (~133 pieces). The data verified 100% afterwards and no cause in the write
+  path was found (a diagnostic build that re-checked failed pieces saw no failures), so it is
+  attributed to bad peers, unconfirmed.
+- Remaining `tr-session` disk work is upload-side: read opens/`pread` in `tr_ioRead` and
+  `ensure_piece_is_checked` (`testpiece`) for unchecked pieces. Stage 3 scope.

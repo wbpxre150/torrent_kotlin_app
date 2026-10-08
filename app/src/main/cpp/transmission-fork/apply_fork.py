@@ -1385,6 +1385,848 @@ def main():
         with open(pmgr, "w", encoding="utf-8") as f:
             f.write(text)
 
+    # 20. Patch cache.h + cache.cc: ANDROID fork: stage 2 async cache writes
+    #     (TRANSMISSION_USB_SAF 2.2). The session thread never calls tr_ioWrite:
+    #     contiguous block runs are marked in-flight and handed to the disk
+    #     worker with shared buffer copies; the write completion (session
+    #     thread) erases the blocks. The cache limit counts non-in-flight
+    #     blocks only; in-flight blocks stay readable until they are written.
+    cache_h2 = os.path.join(libt, "cache.h")
+    with open(cache_h2, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: stage 2 async cache writes" not in text:
+        old = "#include <memory> // for std::unique_ptr\n#include <optional>\n"
+        new = "#include <memory> // for std::shared_ptr, std::unique_ptr\n#include <optional>\n"
+        if old not in text:
+            sys.exit("ERROR: cache.h <memory>/<optional> includes not found")
+        text = text.replace(old, new, 1)
+        old = "class tr_torrents;\nstruct tr_torrent;\n"
+        new = (
+            "class tr_torrents;\n"
+            "struct tr_torrent;\n"
+            "struct tr_disk_write_result; // ANDROID fork: stage 2\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: cache.h forward declarations not found")
+        text = text.replace(old, new, 1)
+        old = "    int flush_file(tr_torrent const& tor, tr_file_index_t file);\n"
+        new = (
+            "    int flush_file(tr_torrent const& tor, tr_file_index_t file);\n"
+            "    int flush_piece(tr_torrent const& tor, tr_piece_index_t piece); // ANDROID fork: stage 2\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: cache.h flush_file declaration not found")
+        text = text.replace(old, new, 1)
+        old = "    [[nodiscard]] std::optional<std::vector<uint8_t>> copy_cached_block(tr_torrent_id_t tor_id, tr_block_index_t block) const;\n"
+        new = (
+            "    [[nodiscard]] std::optional<std::vector<uint8_t>> copy_cached_block(tr_torrent_id_t tor_id, tr_block_index_t block) const;\n"
+            "\n"
+            "    // ANDROID fork: stage 2 async cache writes — internal; called from\n"
+            "    // the disk write completion on the session thread.\n"
+            "    using Key = std::pair<tr_torrent_id_t, tr_block_index_t>;\n"
+            "    // `written` holds shared_ptr copies so a freed buffer's address can't be reused by a\n"
+            "    // re-downloaded block before this runs (ABA).\n"
+            "    void on_write_done(std::vector<std::pair<Key, std::shared_ptr<BlockData const>>> const& written, tr_disk_write_result const& result);\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: cache.h copy_cached_block declaration not found")
+        text = text.replace(old, new, 1)
+        old = (
+            "private:\n"
+            "    using Key = std::pair<tr_torrent_id_t, tr_block_index_t>;\n"
+            "\n"
+            "    struct CacheBlock\n"
+            "    {\n"
+            "        Key key;\n"
+            "        std::unique_ptr<BlockData> buf;\n"
+            "    };\n"
+            "\n"
+            "    using Blocks = std::vector<CacheBlock>;\n"
+            "    using CIter = Blocks::const_iterator;\n"
+            "\n"
+            "    [[nodiscard]] static Key make_key(tr_torrent const& tor, tr_block_info::Location loc) noexcept;\n"
+            "\n"
+            "    [[nodiscard]] static std::pair<CIter, CIter> find_biggest_span(CIter const& begin, CIter const& end) noexcept;\n"
+            "\n"
+            "    [[nodiscard]] static CIter find_span_end(CIter const& span_begin, CIter const& end) noexcept;\n"
+            "\n"
+            "    // @return any error code from tr_ioWrite()\n"
+            "    [[nodiscard]] int write_contiguous(CIter const& begin, CIter const& end) const;\n"
+            "\n"
+            "    // @return any error code from writeContiguous()\n"
+            "    [[nodiscard]] int flush_span(CIter const& begin, CIter const& end);\n"
+            "\n"
+            "    // @return any error code from writeContiguous()\n"
+            "    [[nodiscard]] int flush_biggest();\n"
+            "\n"
+            "    // @return any error code from writeContiguous()\n"
+            "    [[nodiscard]] int cache_trim();\n"
+            "\n"
+            "    [[nodiscard]] static constexpr size_t get_max_blocks(Memory const max_size) noexcept\n"
+            "    {\n"
+            "        return max_size.base_quantity() / tr_block_info::BlockSize;\n"
+            "    }\n"
+            "\n"
+            "    [[nodiscard]] CIter get_block(tr_torrent const& tor, tr_block_info::Location const& loc) noexcept;\n"
+            "\n"
+            "    tr_torrents const& torrents_;\n"
+            "\n"
+            "    Blocks blocks_;\n"
+            "    size_t max_blocks_ = 0;\n"
+            "\n"
+            "    mutable size_t disk_writes_ = 0;\n"
+            "    mutable size_t disk_write_bytes_ = 0;\n"
+            "    mutable size_t cache_writes_ = 0;\n"
+            "    mutable size_t cache_write_bytes_ = 0;\n"
+        )
+        new = (
+            "private:\n"
+            "    struct CacheBlock\n"
+            "    {\n"
+            "        Key key;\n"
+            "        std::shared_ptr<BlockData const> buf;\n"
+            "        // ANDROID fork: stage 2 — mutable so the const span walkers can\n"
+            "        // mark blocks in-flight without const_cast.\n"
+            "        mutable bool in_flight = false;\n"
+            "    };\n"
+            "\n"
+            "    using Blocks = std::vector<CacheBlock>;\n"
+            "    using CIter = Blocks::const_iterator;\n"
+            "\n"
+            "    [[nodiscard]] static Key make_key(tr_torrent const& tor, tr_block_info::Location loc) noexcept;\n"
+            "\n"
+            "    [[nodiscard]] static std::pair<CIter, CIter> find_biggest_span(CIter const& begin, CIter const& end) noexcept;\n"
+            "\n"
+            "    [[nodiscard]] static CIter find_span_end(CIter const& span_begin, CIter const& end) noexcept;\n"
+            "\n"
+            "    // ANDROID fork: stage 2 — hand the span to the disk worker (no tr_ioWrite).\n"
+            "    // @return any error code from enqueueing (EINVAL if the torrent is gone)\n"
+            "    [[nodiscard]] int enqueue_write(CIter const& begin, CIter const& end);\n"
+            "\n"
+            "    // @return any error code from enqueue_write()\n"
+            "    [[nodiscard]] int flush_span(CIter const& begin, CIter const& end);\n"
+            "\n"
+            "    // @return any error code from enqueue_write()\n"
+            "    [[nodiscard]] int flush_biggest();\n"
+            "\n"
+            "    // @return any error code from enqueue_write()\n"
+            "    [[nodiscard]] int cache_trim();\n"
+            "\n"
+            "    [[nodiscard]] static constexpr size_t get_max_blocks(Memory const max_size) noexcept\n"
+            "    {\n"
+            "        return max_size.base_quantity() / tr_block_info::BlockSize;\n"
+            "    }\n"
+            "\n"
+            "    [[nodiscard]] CIter get_block(tr_torrent const& tor, tr_block_info::Location const& loc) noexcept;\n"
+            "\n"
+            "    tr_torrents const& torrents_;\n"
+            "\n"
+            "    Blocks blocks_;\n"
+            "    size_t max_blocks_ = 0;\n"
+            "    size_t in_flight_count_ = 0; // ANDROID fork: stage 2 — blocks handed to the worker\n"
+            "\n"
+            "    mutable size_t disk_writes_ = 0;\n"
+            "    mutable size_t disk_write_bytes_ = 0;\n"
+            "    mutable size_t cache_writes_ = 0;\n"
+            "    mutable size_t cache_write_bytes_ = 0;\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: cache.h private section not found")
+        text = text.replace(old, new, 1)
+        with open(cache_h2, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    cache_cc2 = os.path.join(libt, "cache.cc")
+    with open(cache_cc2, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: stage 2 async cache writes" not in text:
+        old = '#include "libtransmission/cache.h"\n#include "libtransmission/inout.h"\n'
+        new = '#include "libtransmission/cache.h"\n#include "libtransmission/disk-io.h"\n#include "libtransmission/inout.h"\n'
+        if old not in text:
+            sys.exit("ERROR: cache.cc cache.h/inout.h includes not found")
+        text = text.replace(old, new, 1)
+        old = '#include "libtransmission/log.h"\n#include "libtransmission/torrent.h"\n'
+        new = '#include "libtransmission/log.h"\n#include "libtransmission/session.h"\n#include "libtransmission/torrent.h"\n'
+        if old not in text:
+            sys.exit("ERROR: cache.cc log.h/torrent.h includes not found")
+        text = text.replace(old, new, 1)
+        # find_span_end: in-flight blocks break span adjacency
+        old = (
+            "Cache::CIter Cache::find_span_end(CIter const& span_begin, CIter const& end) noexcept\n"
+            "{\n"
+            "    static constexpr auto NotAdjacent = [](CacheBlock const& block1, CacheBlock const& block2)\n"
+            "    {\n"
+            "        return block1.key.first != block2.key.first || block1.key.second + 1 != block2.key.second;\n"
+            "    };\n"
+            "    auto const span_end = std::adjacent_find(span_begin, end, NotAdjacent);\n"
+            "    return span_end == end ? end : std::next(span_end);\n"
+            "}\n"
+        )
+        new = (
+            "Cache::CIter Cache::find_span_end(CIter const& span_begin, CIter const& end) noexcept\n"
+            "{\n"
+            "    // ANDROID fork: stage 2 — an in-flight block is already on its way\n"
+            "    // to the disk, so it cannot join a new write span.\n"
+            "    static constexpr auto NotAdjacent = [](CacheBlock const& block1, CacheBlock const& block2)\n"
+            "    {\n"
+            "        return block1.in_flight || block2.in_flight || block1.key.first != block2.key.first ||\n"
+            "            block1.key.second + 1 != block2.key.second;\n"
+            "    };\n"
+            "    auto const span_end = std::adjacent_find(span_begin, end, NotAdjacent);\n"
+            "    return span_end == end ? end : std::next(span_end);\n"
+            "}\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: cache.cc find_span_end body not found")
+        text = text.replace(old, new, 1)
+        # find_biggest_span: skip spans whose first block is in-flight
+        old = (
+            "std::pair<Cache::CIter, Cache::CIter> Cache::find_biggest_span(CIter const& begin, CIter const& end) noexcept\n"
+            "{\n"
+            "    auto biggest_begin = begin;\n"
+            "    auto biggest_end = begin;\n"
+            "    auto biggest_len = std::distance(biggest_begin, biggest_end);\n"
+            "\n"
+            "    for (auto span_begin = begin; span_begin < end;)\n"
+            "    {\n"
+            "        auto span_end = find_span_end(span_begin, end);\n"
+            "\n"
+            "        if (auto const len = std::distance(span_begin, span_end); len > biggest_len)\n"
+            "        {\n"
+            "            biggest_begin = span_begin;\n"
+            "            biggest_end = span_end;\n"
+            "            biggest_len = len;\n"
+            "        }\n"
+            "\n"
+            "        span_begin = span_end;\n"
+            "    }\n"
+            "\n"
+            "    return { biggest_begin, biggest_end };\n"
+            "}\n"
+        )
+        new = (
+            "std::pair<Cache::CIter, Cache::CIter> Cache::find_biggest_span(CIter const& begin, CIter const& end) noexcept\n"
+            "{\n"
+            "    auto biggest_begin = begin;\n"
+            "    auto biggest_end = begin;\n"
+            "    auto biggest_len = std::distance(biggest_begin, biggest_end);\n"
+            "\n"
+            "    for (auto span_begin = begin; span_begin < end;)\n"
+            "    {\n"
+            "        auto span_end = find_span_end(span_begin, end);\n"
+            "\n"
+            "        if (!span_begin->in_flight) // ANDROID fork: stage 2 — skip in-flight spans\n"
+            "        {\n"
+            "            if (auto const len = std::distance(span_begin, span_end); len > biggest_len)\n"
+            "            {\n"
+            "                biggest_begin = span_begin;\n"
+            "                biggest_end = span_end;\n"
+            "                biggest_len = len;\n"
+            "            }\n"
+            "        }\n"
+            "\n"
+            "        span_begin = span_end;\n"
+            "    }\n"
+            "\n"
+            "    return { biggest_begin, biggest_end };\n"
+            "}\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: cache.cc find_biggest_span body not found")
+        text = text.replace(old, new, 1)
+        # write_contiguous -> enqueue_write (no tr_ioWrite on the session thread)
+        old = (
+            "int Cache::write_contiguous(CIter const& begin, CIter const& end) const\n"
+            "{\n"
+            "    // The most common case without an extra data copy.\n"
+            "    auto const* out = std::data(*begin->buf);\n"
+            "    auto outlen = std::size(*begin->buf);\n"
+            "\n"
+            "    // Contiguous area to join more than one block, if any.\n"
+            "    auto buf = std::vector<uint8_t>{};\n"
+            "\n"
+            "    if (end - begin > 1)\n"
+            "    {\n"
+            "        // copy blocks into contiguous memory\n"
+            "        auto const buflen = std::accumulate(\n"
+            "            begin,\n"
+            "            end,\n"
+            "            size_t{},\n"
+            "            [](size_t sum, auto const& block) { return sum + std::size(*block.buf); });\n"
+            "        buf.resize(buflen);\n"
+            "        auto* walk = std::data(buf);\n"
+            "        for (auto iter = begin; iter != end; ++iter)\n"
+            "        {\n"
+            "            TR_ASSERT(begin->key.first == iter->key.first);\n"
+            "            TR_ASSERT(begin->key.second + std::distance(begin, iter) == iter->key.second);\n"
+            "            walk = std::copy_n(std::data(*iter->buf), std::size(*iter->buf), walk);\n"
+            "        }\n"
+            "        TR_ASSERT(std::data(buf) + std::size(buf) == walk);\n"
+            "        out = std::data(buf);\n"
+            "        outlen = std::size(buf);\n"
+            "    }\n"
+            "\n"
+            "    // save it\n"
+            "    auto const& [torrent_id, block] = begin->key;\n"
+            "    auto* const tor = torrents_.get(torrent_id);\n"
+            "    if (tor == nullptr)\n"
+            "    {\n"
+            "        return EINVAL;\n"
+            "    }\n"
+            "\n"
+            "    auto const loc = tor->block_loc(block);\n"
+            "\n"
+            "    if (auto const err = tr_ioWrite(*tor, loc, outlen, out); err != 0)\n"
+            "    {\n"
+            "        return err;\n"
+            "    }\n"
+            "\n"
+            "    ++disk_writes_;\n"
+            "    disk_write_bytes_ += outlen;\n"
+            "    return {};\n"
+            "}\n"
+        )
+        new = (
+            "// ANDROID fork: stage 2 async cache writes (TRANSMISSION_USB_SAF 2.2).\n"
+            "// Hands a span of cached blocks to the disk worker; the session\n"
+            "// thread no longer performs synchronous block writes. The blocks\n"
+            "// stay in the cache\n"
+            "// (marked in-flight, so read_block and the overlay still find them)\n"
+            "// until the write completion erases them. Must not insert/erase\n"
+            "// blocks_, so the span iterators stay valid for the walk.\n"
+            "int Cache::enqueue_write(CIter const& begin, CIter const& end)\n"
+            "{\n"
+            "    if (begin == end)\n"
+            "    {\n"
+            "        return 0;\n"
+            "    }\n"
+            "\n"
+            "    auto const* const tor = torrents_.get(begin->key.first);\n"
+            "    if (tor == nullptr)\n"
+            "    {\n"
+            "        return EINVAL;\n"
+            "    }\n"
+            "\n"
+            "    auto len = uint64_t{};\n"
+            "    auto buffers = std::vector<std::shared_ptr<BlockData const>>{};\n"
+            "    auto written = std::vector<std::pair<Key, std::shared_ptr<BlockData const>>>{};\n"
+            "    for (auto iter = begin; iter != end; ++iter)\n"
+            "    {\n"
+            "        len += std::size(*iter->buf);\n"
+            "        buffers.push_back(iter->buf);\n"
+            "        written.emplace_back(iter->key, iter->buf);\n"
+            "        iter->in_flight = true;\n"
+            "    }\n"
+            "    in_flight_count_ += static_cast<size_t>(std::distance(begin, end));\n"
+            "\n"
+            "    auto const loc = tor->block_loc(begin->key.second);\n"
+            "    tor->session->disk_io().write(\n"
+            "        tr_disk_make_segments(*tor, loc, len, true),\n"
+            "        std::move(buffers),\n"
+            "        [session = tor->session, written = std::move(written)](tr_disk_write_result const& result)\n"
+            "        {\n"
+            "            if (session->cache == nullptr)\n"
+            "            {\n"
+            "                return; // shutdown in progress\n"
+            "            }\n"
+            "            session->cache->on_write_done(written, result);\n"
+            "        });\n"
+            "    return 0;\n"
+            "}\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: cache.cc write_contiguous body not found")
+        text = text.replace(old, new, 1)
+        # write_block: drop the limit-0 bypass; replacing an in-flight entry
+        # leaves the in-flight state (the new data is not handed to the worker)
+        old = (
+            "int Cache::write_block(tr_torrent_id_t const tor_id, tr_block_index_t const block, std::unique_ptr<BlockData> writeme)\n"
+            "{\n"
+            "    if (max_blocks_ == 0U)\n"
+            "    {\n"
+            "        TR_ASSERT(std::empty(blocks_));\n"
+            "\n"
+            "        // Bypass cache. This may be helpful for those whose filesystem\n"
+            "        // already has a cache layer for the very purpose of this cache\n"
+            "        // https://github.com/transmission/transmission/pull/5668\n"
+            "        auto* const tor = torrents_.get(tor_id);\n"
+            "        return tor == nullptr ? EINVAL : tr_ioWrite(*tor, tor->block_loc(block), std::size(*writeme), std::data(*writeme));\n"
+            "    }\n"
+            "\n"
+            "    auto const key = Key{ tor_id, block };\n"
+            "    auto iter = std::lower_bound(std::begin(blocks_), std::end(blocks_), key, CompareCacheBlockByKey);\n"
+            "    if (iter == std::end(blocks_) || iter->key != key)\n"
+            "    {\n"
+            "        iter = blocks_.emplace(iter);\n"
+            "        iter->key = key;\n"
+            "    }\n"
+            "\n"
+            "    iter->buf = std::move(writeme);\n"
+            "\n"
+            "    ++cache_writes_;\n"
+            "    cache_write_bytes_ += std::size(*iter->buf);\n"
+            "\n"
+            "    return cache_trim();\n"
+            "}\n"
+        )
+        new = (
+            "int Cache::write_block(tr_torrent_id_t const tor_id, tr_block_index_t const block, std::unique_ptr<BlockData> writeme)\n"
+            "{\n"
+            "    // ANDROID fork: stage 2 — no limit-0 bypass: the block is always\n"
+            "    // inserted (it stays readable while in-flight), then trimmed.\n"
+            "    auto const key = Key{ tor_id, block };\n"
+            "    auto iter = std::lower_bound(std::begin(blocks_), std::end(blocks_), key, CompareCacheBlockByKey);\n"
+            "    if (iter == std::end(blocks_) || iter->key != key)\n"
+            "    {\n"
+            "        iter = blocks_.emplace(iter);\n"
+            "        iter->key = key;\n"
+            "    }\n"
+            "    else if (iter->in_flight)\n"
+            "    {\n"
+            "        // The old buffer is still on its way to the disk; the new data\n"
+            "        // has not been handed to the worker yet.\n"
+            "        iter->in_flight = false;\n"
+            "        --in_flight_count_;\n"
+            "    }\n"
+            "\n"
+            "    iter->buf = std::move(writeme);\n"
+            "\n"
+            "    ++cache_writes_;\n"
+            "    cache_write_bytes_ += std::size(*iter->buf);\n"
+            "\n"
+            "    return cache_trim();\n"
+            "}\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: cache.cc write_block body not found")
+        text = text.replace(old, new, 1)
+        # flush_span: enqueue only, no blocks_.erase
+        old = (
+            "int Cache::flush_span(CIter const& begin, CIter const& end)\n"
+            "{\n"
+            "    for (auto span_begin = begin; span_begin < end;)\n"
+            "    {\n"
+            "        auto const span_end = find_span_end(span_begin, end);\n"
+            "\n"
+            "        if (auto const err = write_contiguous(span_begin, span_end); err != 0)\n"
+            "        {\n"
+            "            return err;\n"
+            "        }\n"
+            "\n"
+            "        span_begin = span_end;\n"
+            "    }\n"
+            "\n"
+            "    blocks_.erase(begin, end);\n"
+            "    return {};\n"
+            "}\n"
+        )
+        new = (
+            "int Cache::flush_span(CIter const& begin, CIter const& end)\n"
+            "{\n"
+            "    // ANDROID fork: stage 2 — enqueue only; in-flight blocks stay in\n"
+            "    // the cache (readable) until the write completion erases them.\n"
+            "    auto err = 0;\n"
+            "    for (auto span_begin = begin; span_begin < end;)\n"
+            "    {\n"
+            "        auto const span_end = find_span_end(span_begin, end);\n"
+            "\n"
+            "        if (!span_begin->in_flight)\n"
+            "        {\n"
+            "            if (auto const span_err = enqueue_write(span_begin, span_end); span_err != 0 && err == 0)\n"
+            "            {\n"
+            "                err = span_err; // first error; keep walking the rest of the range\n"
+            "            }\n"
+            "        }\n"
+            "\n"
+            "        span_begin = span_end;\n"
+            "    }\n"
+            "\n"
+            "    return err;\n"
+            "}\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: cache.cc flush_span body not found")
+        text = text.replace(old, new, 1)
+        # flush_file unchanged; add flush_piece
+        old = (
+            "int Cache::flush_file(tr_torrent const& tor, tr_file_index_t const file)\n"
+            "{\n"
+            "    auto const tor_id = tor.id();\n"
+            "    auto const [block_begin, block_end] = tor.block_span_for_file(file);\n"
+            "\n"
+            "    return flush_span(\n"
+            "        std::lower_bound(std::begin(blocks_), std::end(blocks_), std::make_pair(tor_id, block_begin), CompareCacheBlockByKey),\n"
+            "        std::lower_bound(std::begin(blocks_), std::end(blocks_), std::make_pair(tor_id, block_end), CompareCacheBlockByKey));\n"
+            "}\n"
+        )
+        new = (
+            "int Cache::flush_file(tr_torrent const& tor, tr_file_index_t const file)\n"
+            "{\n"
+            "    auto const tor_id = tor.id();\n"
+            "    auto const [block_begin, block_end] = tor.block_span_for_file(file);\n"
+            "\n"
+            "    return flush_span(\n"
+            "        std::lower_bound(std::begin(blocks_), std::end(blocks_), std::make_pair(tor_id, block_begin), CompareCacheBlockByKey),\n"
+            "        std::lower_bound(std::begin(blocks_), std::end(blocks_), std::make_pair(tor_id, block_end), CompareCacheBlockByKey));\n"
+            "}\n"
+            "\n"
+            "// ANDROID fork: stage 2 — flush one piece's blocks (queued ahead of\n"
+            "// the piece's post-download check).\n"
+            "int Cache::flush_piece(tr_torrent const& tor, tr_piece_index_t const piece)\n"
+            "{\n"
+            "    auto const tor_id = tor.id();\n"
+            "    auto const [block_begin, block_end] = tor.block_span_for_piece(piece);\n"
+            "\n"
+            "    return flush_span(\n"
+            "        std::lower_bound(std::begin(blocks_), std::end(blocks_), std::make_pair(tor_id, block_begin), CompareCacheBlockByKey),\n"
+            "        std::lower_bound(std::begin(blocks_), std::end(blocks_), std::make_pair(tor_id, block_end), CompareCacheBlockByKey));\n"
+            "}\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: cache.cc flush_file body not found")
+        text = text.replace(old, new, 1)
+        # flush_biggest: enqueue only, no blocks_.erase
+        old = (
+            "int Cache::flush_biggest()\n"
+            "{\n"
+            "    auto const [begin, end] = find_biggest_span(std::begin(blocks_), std::end(blocks_));\n"
+            "\n"
+            "    if (begin == end) // nothing to flush\n"
+            "    {\n"
+            "        return 0;\n"
+            "    }\n"
+            "\n"
+            "    if (auto const err = write_contiguous(begin, end); err != 0)\n"
+            "    {\n"
+            "        return err;\n"
+            "    }\n"
+            "\n"
+            "    blocks_.erase(begin, end);\n"
+            "    return 0;\n"
+            "}\n"
+        )
+        new = (
+            "int Cache::flush_biggest()\n"
+            "{\n"
+            "    // ANDROID fork: stage 2 — enqueue only; the write completion\n"
+            "    // erases the blocks.\n"
+            "    auto const [begin, end] = find_biggest_span(std::begin(blocks_), std::end(blocks_));\n"
+            "\n"
+            "    if (begin == end) // nothing to flush\n"
+            "    {\n"
+            "        return 0;\n"
+            "    }\n"
+            "\n"
+            "    return enqueue_write(begin, end);\n"
+            "}\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: cache.cc flush_biggest body not found")
+        text = text.replace(old, new, 1)
+        # cache_trim: the limit counts non-in-flight blocks only
+        old = (
+            "int Cache::cache_trim()\n"
+            "{\n"
+            "    while (std::size(blocks_) > max_blocks_)\n"
+            "    {\n"
+            "        if (auto const err = flush_biggest(); err != 0)\n"
+            "        {\n"
+            "            return err;\n"
+            "        }\n"
+            "    }\n"
+            "\n"
+            "    return 0;\n"
+            "}\n"
+        )
+        new = (
+            "int Cache::cache_trim()\n"
+            "{\n"
+            "    // ANDROID fork: stage 2 — the limit counts non-in-flight blocks\n"
+            "    // only; in-flight bytes are bounded by write backpressure.\n"
+            "    while (std::size(blocks_) - in_flight_count_ > max_blocks_)\n"
+            "    {\n"
+            "        if (auto const err = flush_biggest(); err != 0)\n"
+            "        {\n"
+            "            return err;\n"
+            "        }\n"
+            "    }\n"
+            "\n"
+            "    return 0;\n"
+            "}\n"
+            "\n"
+            "// ANDROID fork: stage 2 async cache writes — the disk write completion,\n"
+            "// delivered on the session thread. Erases the written blocks (only if\n"
+            "// their buffer was not replaced meanwhile) and, on failure, flags and\n"
+            "// stops the torrent like a synchronous write failure used to.\n"
+            "void Cache::on_write_done(std::vector<std::pair<Key, std::shared_ptr<BlockData const>>> const& written, tr_disk_write_result const& result)\n"
+            "{\n"
+            "    auto written_bytes = size_t{};\n"
+            "    for (auto const& [key, buf_ptr] : written)\n"
+            "    {\n"
+            "        // Re-search per entry: erasing invalidates the other iterators.\n"
+            "        if (auto const [begin, end] = std::equal_range(\n"
+            "                std::begin(blocks_),\n"
+            "                std::end(blocks_),\n"
+            "                key,\n"
+            "                CompareCacheBlockByKey);\n"
+            "            begin < end)\n"
+            "        {\n"
+            "            if (begin->buf == buf_ptr && begin->in_flight)\n"
+            "            {\n"
+            "                written_bytes += std::size(*begin->buf);\n"
+            "                blocks_.erase(begin);\n"
+            "                --in_flight_count_;\n"
+            "            }\n"
+            "        }\n"
+            "    }\n"
+            "\n"
+            "    if (result.err == 0)\n"
+            "    {\n"
+            "        ++disk_writes_;\n"
+            "        disk_write_bytes_ += written_bytes;\n"
+            "    }\n"
+            "\n"
+            "    if (result.err != 0 && !std::empty(written))\n"
+            "    {\n"
+            "        // Same handling as a synchronous write failure: flag and stop the torrent.\n"
+            "        if (auto* const tor = torrents_.get(written.front().first.first); tor != nullptr &&\n"
+            "            tor->error().error_type() != TR_STAT_LOCAL_ERROR)\n"
+            "        {\n"
+            "            tor->error().set_local_error(result.message);\n"
+            "            tr_torrentStop(tor);\n"
+            "        }\n"
+            "    }\n"
+            "}\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: cache.cc cache_trim body not found")
+        text = text.replace(old, new, 1)
+        with open(cache_cc2, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    # 21. Patch torrent.cc: ANDROID fork: stage 2 torrent
+    #     (TRANSMISSION_USB_SAF 2.4, 2.6). Flush the piece's cached blocks
+    #     ahead of its post-download check (the check then runs with an
+    #     empty overlay, so it reads exactly what was written), and rename
+    #     completed files in a disk barrier so the rename never races
+    #     queued writes.
+    tor_cc2 = os.path.join(libt, "torrent.cc")
+    with open(tor_cc2, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: stage 2 torrent" not in text:
+        old = (
+            "    pending_checks_.insert(piece);\n"
+            "    session->disk_io().test_piece(\n"
+        )
+        new = (
+            "    pending_checks_.insert(piece);\n"
+            "    // ANDROID fork: stage 2 torrent\n"
+            "    session->cache->flush_piece(*this, piece); // ANDROID fork: stage 2: writes queued ahead of the check\n"
+            "    session->disk_io().test_piece(\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: torrent.cc enqueue_piece_check test_piece call not found")
+        text = text.replace(old, new, 1)
+        old = "        tr_disk_make_piece_overlay(*this, piece),\n"
+        new = "        {}, // ANDROID fork: stage 2: empty overlay, the check reads what was written\n"
+        if old not in text:
+            sys.exit("ERROR: torrent.cc enqueue_piece_check piece overlay arg not found")
+        text = text.replace(old, new, 1)
+        old = (
+            "    file_mtimes_[file] = tr_time();\n"
+            "\n"
+            "    /* if the torrent's current filename isn't the same as the one in the\n"
+            "     * metadata -- for example, if it had the \".part\" suffix appended to\n"
+            "     * it until now -- then rename it to match the one in the metadata */\n"
+            "    update_file_path(file, true);\n"
+        )
+        new = (
+            "    file_mtimes_[file] = tr_time();\n"
+            "    // ANDROID fork: rename after queued writes for this file are on disk.\n"
+            "    session->disk_io().barrier(\n"
+            "        [session = session, tor_id = id(), file]()\n"
+            "        {\n"
+            "            if (auto* const tor = session->torrents().get(tor_id); tor != nullptr)\n"
+            "            {\n"
+            "                tor->update_file_path(file, true);\n"
+            "            }\n"
+            "        });\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: torrent.cc on_file_completed update_file_path not found")
+        text = text.replace(old, new, 1)
+        with open(tor_cc2, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    # 22. Patch peer-msgs.cc + webseed.cc: ANDROID fork: TRANSMISSION_USB_SAF
+    #     stage 2 write backpressure (TRANSMISSION_USB_SAF 2.5). While too
+    #     many bytes are queued for the disk worker, peers and webseeds
+    #     request no new blocks.
+    pm2 = os.path.join(libt, "peer-msgs.cc")
+    with open(pm2, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: TRANSMISSION_USB_SAF stage 2 write backpressure" not in text:
+        old = (
+            "void tr_peerMsgsImpl::maybe_send_block_requests()\n"
+            "{\n"
+            "    if (!tor_.client_can_download())\n"
+            "    {\n"
+            "        return;\n"
+            "    }\n"
+        )
+        new = (
+            "void tr_peerMsgsImpl::maybe_send_block_requests()\n"
+            "{\n"
+            "    if (!tor_.client_can_download())\n"
+            "    {\n"
+            "        return;\n"
+            "    }\n"
+            "\n"
+            "    // ANDROID fork: TRANSMISSION_USB_SAF stage 2 write backpressure.\n"
+            "    if (session->disk_io().writes_backlogged())\n"
+            "    {\n"
+            "        return;\n"
+            "    }\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: peer-msgs.cc maybe_send_block_requests client_can_download block not found")
+        text = text.replace(old, new, 1)
+        with open(pm2, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    ws = os.path.join(libt, "webseed.cc")
+    with open(ws, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: TRANSMISSION_USB_SAF stage 2 write backpressure" not in text:
+        old = (
+            "    void on_idle()\n"
+            "    {\n"
+            "        if (is_banned_)\n"
+            "        {\n"
+            "            return;\n"
+            "        }\n"
+        )
+        new = (
+            "    void on_idle()\n"
+            "    {\n"
+            "        if (is_banned_)\n"
+            "        {\n"
+            "            return;\n"
+            "        }\n"
+            "\n"
+            "        // ANDROID fork: TRANSMISSION_USB_SAF stage 2 write backpressure.\n"
+            "        if (tor.session->disk_io().writes_backlogged()) // no session_ member in tr_webseed_impl\n"
+            "        {\n"
+            "            return;\n"
+            "        }\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: webseed.cc on_idle is_banned_ block not found")
+        text = text.replace(old, new, 1)
+        with open(ws, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    # 23. Patch session.cc: ANDROID fork: stage 2 session
+    #     (TRANSMISSION_USB_SAF 2.7, 2.8). close_torrent_files/close_torrent_file
+    #     flush through the cache (enqueue only), close the worker fds, and
+    #     temporarily wait for the queued writes; closeImplPart1 drains the
+    #     worker after the torrents are freed and before the cache goes away.
+    ses_cc2 = os.path.join(libt, "session.cc")
+    with open(ses_cc2, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: stage 2 session" not in text:
+        old = (
+            "    // ANDROID fork: stage 0 timing.\n"
+            "    tr_disk_timer const disk_timer{ \"flush\", \"\", static_cast<uint64_t>(tor_id) };\n"
+            "    this->cache->flush_torrent(tor_id);\n"
+        )
+        new = (
+            "    // ANDROID fork: stage 0 timing.\n"
+            "    tr_disk_timer const disk_timer{ \"flush\", \"\", static_cast<uint64_t>(tor_id) };\n"
+            "    this->cache->flush_torrent(tor_id); // enqueue only\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: session.cc flush_torrent_files body not found")
+        text = text.replace(old, new, 1)
+        old = (
+            "    // ANDROID fork: stage 0 timing.\n"
+            "    tr_disk_timer const disk_timer{ \"close\", \"\", static_cast<uint64_t>(tor_id) };\n"
+            "    this->cache->flush_torrent(tor_id);\n"
+            "    openFiles().close_torrent(tor_id);\n"
+            "    if (disk_io_) disk_io_->close_torrent(tor_id); // ANDROID fork: stage 1.5 session wiring\n"
+        )
+        new = (
+            "    // ANDROID fork: stage 0 timing.\n"
+            "    tr_disk_timer const disk_timer{ \"close\", \"\", static_cast<uint64_t>(tor_id) };\n"
+            "    this->cache->flush_torrent(tor_id);\n"
+            "    if (disk_io_)\n"
+            "    {\n"
+            "        disk_io_->close_torrent(tor_id);\n"
+            "        // ANDROID fork: TEMPORARY synchronous wait so remove/relocate never race queued\n"
+            "        // writes. Removed in TRANSMISSION_USB_SAF stage 4.\n"
+            "        auto const timeout = isClosing() ? std::chrono::milliseconds{ 20000 } : std::chrono::milliseconds{ 3600000 };\n"
+            "        if (!disk_io_->wait_idle(timeout))\n"
+            "        {\n"
+            "            tr_logAddWarn(\"Timed out waiting for queued disk writes\");\n"
+            "        }\n"
+            "    }\n"
+            "    openFiles().close_torrent(tor_id);\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: session.cc close_torrent_files body not found")
+        text = text.replace(old, new, 1)
+        old = (
+            "    // ANDROID fork: stage 0 timing.\n"
+            "    tr_disk_timer const disk_timer{ \"closefile\", \"\", file_num };\n"
+            "    this->cache->flush_file(tor, file_num);\n"
+            "    openFiles().close_file(tor.id(), file_num);\n"
+            "    if (disk_io_) disk_io_->close_file(tor.id(), file_num); // ANDROID fork: stage 1.5 session wiring\n"
+        )
+        new = (
+            "    // ANDROID fork: stage 0 timing.\n"
+            "    tr_disk_timer const disk_timer{ \"closefile\", \"\", file_num };\n"
+            "    this->cache->flush_file(tor, file_num);\n"
+            "    if (disk_io_)\n"
+            "    {\n"
+            "        disk_io_->close_file(tor.id(), file_num);\n"
+            "    }\n"
+            "    openFiles().close_file(tor.id(), file_num);\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: session.cc close_torrent_file body not found")
+        text = text.replace(old, new, 1)
+        old = (
+            "    verifier_.reset();\n"
+            "    disk_io_->shutdown(); disk_io_.reset(); // ANDROID fork: stage 1.5 session wiring\n"
+            "    save_timer_.reset();\n"
+        )
+        new = (
+            "    verifier_.reset();\n"
+            "    save_timer_.reset();\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: session.cc closeImplPart1 stage 1 disk_io shutdown line not found")
+        text = text.replace(old, new, 1)
+        old = (
+            "    torrents.clear();\n"
+            "    // ...now that all the torrents have been closed, any remaining\n"
+        )
+        new = (
+            "    torrents.clear();\n"
+            "    // ANDROID fork: stage 2 session\n"
+            "    // ANDROID fork: flush queued writes before the cache goes away.\n"
+            "    if (disk_io_)\n"
+            "    {\n"
+            "        disk_io_->shutdown_drain(std::min(deadline, std::chrono::steady_clock::now() + std::chrono::seconds{ 20 }));\n"
+            "        disk_io_.reset();\n"
+            "    }\n"
+            "    // ...now that all the torrents have been closed, any remaining\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: session.cc closeImplPart1 torrents.clear() not found")
+        text = text.replace(old, new, 1)
+        with open(ses_cc2, "w", encoding="utf-8") as f:
+            f.write(text)
     print("apply_fork: OK")
 
 if __name__ == "__main__":

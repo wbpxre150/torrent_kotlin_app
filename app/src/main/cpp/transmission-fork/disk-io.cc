@@ -4,16 +4,23 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <cstddef>
+#include <future>
+#include <utility>
+
+#include <fmt/format.h>
 
 #include "libtransmission/disk-io.h"
 
 #include "libtransmission/cache.h"
 #include "libtransmission/error.h"
 #include "libtransmission/file.h"
+#include "libtransmission/log.h"
 #include "libtransmission/session.h"
 #include "libtransmission/torrent.h"
 #include "libtransmission/torrent-files.h"
 #include "libtransmission/tr-strbuf.h" // tr_pathbuf
+#include "libtransmission/utils.h" // _()
 #include "libtransmission/disk-timing.h"
 
 using namespace std::literals;
@@ -41,9 +48,36 @@ bool read_entire_buf(tr_sys_file_t const fd, uint64_t file_offset, uint8_t* buf,
     return true;
 }
 
+// Copied from write_entire_buf() in inout.cc (worker thread only).
+bool write_entire_buf(tr_sys_file_t const fd, uint64_t file_offset, uint8_t const* buf, uint64_t buflen, tr_error& error)
+{
+    while (buflen > 0U)
+    {
+        auto n_written = uint64_t{};
+
+        if (!tr_sys_file_write_at(fd, buf, buflen, file_offset, &n_written, &error))
+        {
+            return false;
+        }
+
+        buf += n_written;
+        buflen -= n_written;
+        file_offset += n_written;
+    }
+
+    return true;
+}
+
 // Worker thread only. The same logic as get_fd() in inout.cc, but using the
 // self-contained tr_disk_file_ref built on the session thread.
-std::optional<tr_sys_file_t> worker_get_fd(tr_open_files& files, tr_disk_file_ref const& file_ref, bool const writable, tr_error& error)
+// If `created` is non-null, it is set to true only when the final "create it"
+// branch returns an fd (i.e. the file did not exist before).
+std::optional<tr_sys_file_t> worker_get_fd(
+    tr_open_files& files,
+    tr_disk_file_ref const& file_ref,
+    bool const writable,
+    tr_error& error,
+    bool* created = nullptr)
 {
     // is the file already open in the fd pool?
     if (auto const fd = files.get(file_ref.tor_id, file_ref.file_index, writable); fd)
@@ -54,7 +88,7 @@ std::optional<tr_sys_file_t> worker_get_fd(tr_open_files& files, tr_disk_file_re
     // does the file exist in one of the search dirs?
     for (auto const& dir : file_ref.search_dirs)
     {
-        for (auto const path : { tr_pathbuf{ dir, '/', file_ref.subpath }, tr_pathbuf{ dir, '/', file_ref.subpath,
+        for (auto const& path : { tr_pathbuf{ dir, '/', file_ref.subpath }, tr_pathbuf{ dir, '/', file_ref.subpath,
                                                                                   tr_torrent_files::PartialFileSuffix } })
         {
             if (tr_sys_path_get_info(path))
@@ -71,6 +105,10 @@ std::optional<tr_sys_file_t> worker_get_fd(tr_open_files& files, tr_disk_file_re
                 file_ref.tor_id, file_ref.file_index, writable, file_ref.create_path, file_ref.prealloc, file_ref.file_size);
             fd)
         {
+            if (created != nullptr)
+            {
+                *created = true;
+            }
             return fd;
         }
     }
@@ -122,6 +160,76 @@ bool read_range(
 
         out += n;
         remaining -= n;
+    }
+
+    return true;
+}
+
+// Worker thread only. Writes the concatenated `buffers` (whose combined size equals the sum of
+// the segments' lengths) into the byte range the segments cover exactly, in chunks of at most
+// the scratch buffer size. Stops at the first error, leaving it in `error` and `*failed_seg`
+// pointing at the segment that failed (nullptr on success).
+bool write_range(
+    tr_open_files& files,
+    std::vector<tr_disk_segment> const& segments,
+    std::vector<std::shared_ptr<Cache::BlockData const>> const& buffers,
+    size_t& files_created,
+    tr_disk_segment const*& failed_seg,
+    tr_error& error)
+{
+    auto scratch = std::vector<uint8_t>(1024U * 1024U); // reused across the job
+    auto buffer_index = size_t{};
+    auto buffer_offset = size_t{};
+    auto pos = uint64_t{};
+
+    for (auto const& seg : segments)
+    {
+        auto const seg_begin = pos;
+        auto const seg_end = pos + seg.length;
+        while (pos < seg_end)
+        {
+            auto const n = std::min<uint64_t>(seg_end - pos, std::size(scratch));
+
+            // Fill scratch from the concatenated buffers.
+            for (auto i = uint64_t{}; i < n; )
+            {
+                auto const& buf = *buffers[buffer_index];
+                auto const buf_size = size_t{ std::size(buf) };
+                auto const chunk = std::min<uint64_t>(n - i, buf_size - buffer_offset);
+                std::copy(std::begin(buf) + buffer_offset, std::begin(buf) + buffer_offset + chunk, std::data(scratch) + i);
+                buffer_offset += size_t{ chunk };
+                i += chunk;
+                if (buffer_offset == buf_size)
+                {
+                    ++buffer_index;
+                    buffer_offset = 0U;
+                }
+            }
+
+            auto file_created = bool{};
+            auto const fd = worker_get_fd(files, seg.file, true, error, &file_created);
+            if (!fd)
+            {
+                failed_seg = &seg;
+                return false;
+            }
+            if (file_created)
+            {
+                ++files_created;
+            }
+
+            auto const off = seg.file_offset + (pos - seg_begin);
+            {
+                tr_disk_timer const t{ "pwrite", seg.file.subpath, off, n };
+                if (!write_entire_buf(*fd, off, std::data(scratch), n, error))
+                {
+                    failed_seg = &seg;
+                    return false;
+                }
+            }
+
+            pos += n;
+        }
     }
 
     return true;
@@ -211,6 +319,101 @@ void tr_disk_io::test_piece(
         });
 }
 
+void tr_disk_io::write(
+    std::vector<tr_disk_segment> segments,
+    std::vector<std::shared_ptr<Cache::BlockData const>> buffers,
+    std::function<void(tr_disk_write_result)> done)
+{
+    // Session thread: account for the bytes before the worker starts.
+    auto total = uint64_t{};
+    for (auto const& seg : segments)
+    {
+        total += seg.length;
+    }
+    queued_write_bytes_ += total;
+
+    queue_.push(
+        tr_disk_queue::Prio::Low,
+        [this,
+         session = &session_,
+         segments = std::move(segments),
+         buffers = std::move(buffers),
+         done = std::move(done),
+         total]()
+        {
+            // Worker part.
+            auto result = tr_disk_write_result{};
+            auto files_created = size_t{};
+            auto const* failed_seg = static_cast<tr_disk_segment const*>(nullptr);
+            auto error = tr_error{};
+
+            write_range(files_, segments, buffers, files_created, failed_seg, error);
+            if (error)
+            {
+                result.err = error.code();
+                result.message = fmt::format(
+                    fmt::runtime(_("Couldn't save '{path}': {error} ({error_code})")),
+                    fmt::arg("path", failed_seg != nullptr ? failed_seg->file.subpath : ""s),
+                    fmt::arg("error", error.message()),
+                    fmt::arg("error_code", error.code()));
+            }
+
+            // Always subtract, whether the job succeeded or failed.
+            queued_write_bytes_ -= total;
+
+            // Session part. Must not capture `this`.
+            session->run_in_session_thread([session, files_created, done = std::move(done), result = std::move(result)]()
+                                           {
+                                               for (auto i = size_t{}; i < files_created; ++i)
+                                               {
+                                                   session->add_file_created();
+                                               }
+                                               done(result);
+                                           });
+        });
+}
+
+void tr_disk_io::barrier(std::function<void()> done)
+{
+    queue_.push(
+        tr_disk_queue::Prio::Low,
+        [session = &session_, done = std::move(done)]()
+        {
+            // Session part. Must not capture `this`.
+            session->run_in_session_thread([done = std::move(done)]()
+                                           {
+                                               done();
+                                           });
+        });
+}
+
+bool tr_disk_io::wait_idle(std::chrono::milliseconds const timeout)
+{
+    auto p = std::make_shared<std::promise<void>>();
+    auto f = p->get_future();
+    queue_.push(tr_disk_queue::Prio::Low, [p]
+                {
+                    p->set_value();
+                });
+    return f.wait_for(timeout) == std::future_status::ready;
+}
+
+bool tr_disk_io::writes_backlogged()
+{
+    auto const q = queued_write_bytes_.load();
+    if (!backlogged_ && q >= HighWater)
+    {
+        backlogged_ = true;
+        tr_logAddInfo("Disk write backlog: pausing block requests");
+    }
+    else if (backlogged_ && q <= LowWater)
+    {
+        backlogged_ = false;
+        tr_logAddInfo("Disk write backlog: resuming block requests");
+    }
+    return backlogged_;
+}
+
 void tr_disk_io::close_torrent(tr_torrent_id_t const tor_id)
 {
     queue_.push(tr_disk_queue::Prio::Low, [this, tor_id]
@@ -230,6 +433,11 @@ void tr_disk_io::close_file(tr_torrent_id_t const tor_id, tr_file_index_t const 
 void tr_disk_io::shutdown()
 {
     queue_.stop_and_discard();
+}
+
+void tr_disk_io::shutdown_drain(std::chrono::steady_clock::time_point const deadline)
+{
+    queue_.stop_and_drain(deadline);
 }
 
 std::vector<tr_disk_segment> tr_disk_make_segments(
