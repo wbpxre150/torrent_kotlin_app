@@ -1152,6 +1152,7 @@ def main():
             "    [[nodiscard]] bool is_piece_check_pending(tr_piece_index_t piece) const { return pending_checks_.count(piece) != 0U; }\n"
             "    [[nodiscard]] bool has_pending_checks() const noexcept { return !std::empty(pending_checks_); }\n"
             "    void clear_pending_checks() noexcept { pending_checks_.clear(); }\n"
+            "    [[nodiscard]] constexpr bool is_unhaving_for_read_error() const noexcept { return unhaving_for_read_error_; }\n"
             "\n"
             "private:\n"
             "    // ANDROID fork: stage 1.6/1.7 async piece checks (TRANSMISSION_USB_SAF)\n"
@@ -1159,6 +1160,7 @@ def main():
             "    void on_piece_check_done(tr_piece_index_t piece, int result);\n"
             "    void on_piece_read_error(tr_piece_index_t piece);\n"
             "    std::set<tr_piece_index_t> pending_checks_; // ANDROID fork\n"
+            "    bool unhaving_for_read_error_ = false; // ANDROID fork\n"
             "\n"
             "    friend bool tr_torrentSetMetainfoFromFile(tr_torrent* tor, tr_torrent_metainfo const* metainfo, char const* filename);\n"
         )
@@ -1317,6 +1319,12 @@ def main():
             '    tr_logAddWarnTor(this, fmt::format("Piece {} could not be read back for verification; re-downloading", piece));\n'
             "    bytes_downloaded_.reduce(piece_size(piece));\n"
             "    set_has_piece(piece, false);\n"
+            "    // ANDROID fork: re-add the piece to the peer-mgr wishlist so its blocks are\n"
+            "    // requested again. Observers run synchronously, so the flag is visible to\n"
+            "    // tr_swarm::on_got_bad_piece, which skips blame for read errors.\n"
+            "    unhaving_for_read_error_ = true;\n"
+            "    got_bad_piece_.emit(this, piece); // ANDROID fork: re-add to the wishlist; peer-mgr skips blame\n"
+            "    unhaving_for_read_error_ = false;\n"
             "}\n"
             "\n"
             "void tr_torrent::on_block_received(tr_block_index_t const block)\n"
@@ -1351,6 +1359,32 @@ def main():
         text = text.replace(old, new, 1)
         with open(pm, "w", encoding="utf-8") as f:
             f.write(text)
+
+    # 19. Patch peer-mgr.cc: ANDROID fork: read-error no blame
+    #     (TRANSMISSION_USB_SAF stage 1). tr_swarm::on_got_bad_piece normally
+    #     strikes peers and counts TR_ANN_CORRUPT bytes; that is forbidden for
+    #     a local read error, where only the wishlist re-add is wanted.
+    #     tr_torrent::on_piece_read_error sets unhaving_for_read_error_ around
+    #     the got_bad_piece_ emit, and observers run synchronously.
+    pmgr = os.path.join(libt, "peer-mgr.cc")
+    with open(pmgr, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: read-error no blame" not in text:
+        old = "    void on_got_bad_piece(tr_piece_index_t piece)\n    {\n"
+        new = (
+            "    void on_got_bad_piece(tr_piece_index_t piece)\n"
+            "    {\n"
+            "        if (tor->is_unhaving_for_read_error())\n"
+            "        {\n"
+            "            return; // ANDROID fork: read-error no blame (TRANSMISSION_USB_SAF stage 1)\n"
+            "        }\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: peer-mgr.cc on_got_bad_piece body not found")
+        text = text.replace(old, new, 1)
+        with open(pmgr, "w", encoding="utf-8") as f:
+            f.write(text)
+
     print("apply_fork: OK")
 
 if __name__ == "__main__":

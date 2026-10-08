@@ -89,12 +89,25 @@ class SafIpcServer(
                 val req = SafIpcCodec.Request(op, payload)
                 val handled = handler.handle(req)
                 // Attach the fd (SCM_RIGHTS) to the next write for OPEN success.
-                if (handled.fd != null) {
+                val hasFd = handled.fd != null
+                if (hasFd) {
                     socket.setFileDescriptorsForSend(arrayOf(handled.fd.fileDescriptor))
                 }
-                val frame = SafIpcCodec.encodeResponse(handled.status, handled.payload)
-                output.write(frame)
-                output.flush()
+                try {
+                    val frame = SafIpcCodec.encodeResponse(handled.status, handled.payload)
+                    output.write(frame)
+                    output.flush()
+                } finally {
+                    // Android's LocalSocket does NOT clear its send-fd list after a
+                    // write: the attached fd would be re-sent with every later write
+                    // on this connection. The pfd is closed below, making the fd
+                    // -1, so the next response would throw IOException EBADF
+                    // ("Bad file descriptor") and drop the connection. Clear the
+                    // list before closing the pfd so later writes send no fd.
+                    if (hasFd) {
+                        socket.setFileDescriptorsForSend(null)
+                    }
+                }
                 handled.fd?.let { pfd -> try { pfd.close() } catch (_: Exception) {} }
             }
         } catch (e: Exception) {
