@@ -261,6 +261,11 @@ fun WizardScreen(
     var txPass by remember { mutableStateOf("") }
     var peerPort by remember { mutableStateOf((cfg?.transmission?.peerPort ?: 51413).toString()) }
     var dlSubpath by remember { mutableStateOf(cfg?.transmission?.downloadSubpath ?: "") }
+    var ftpUser by remember { mutableStateOf(cfg?.ftp?.username ?: "kodi") }
+    var ftpPass by remember { mutableStateOf("") }
+    var ftpPort by remember { mutableStateOf((cfg?.ftp?.port ?: 2121).toString()) }
+    var ftpWifiOnly by remember { mutableStateOf(cfg?.ftp?.wifiOnly ?: true) }
+    var ftpRoot by remember { mutableStateOf(cfg?.ftp?.exposedRoot ?: "") }
     var errors by remember { mutableStateOf<List<String>>(emptyList()) }
 
     Column(
@@ -280,6 +285,15 @@ fun WizardScreen(
         OutlinedTextField(peerPort, { peerPort = it }, label = { Text("Peer port") })
         OutlinedTextField(dlSubpath, { dlSubpath = it }, label = { Text("Download subpath (blank = USB root)") })
 
+        Text("3. FTP (Kodi)", style = MaterialTheme.typography.titleMedium)
+        OutlinedTextField(ftpUser, { ftpUser = it }, label = { Text("FTP username") })
+        OutlinedTextField(ftpPass, { ftpPass = it }, label = { Text("FTP password (min 6)") })
+        OutlinedTextField(ftpPort, { ftpPort = it }, label = { Text("FTP port") })
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Switch(checked = ftpWifiOnly, onCheckedChange = { ftpWifiOnly = it })
+            Spacer(Modifier.width(8.dp)); Text("WiFi only")
+        }
+        OutlinedTextField(ftpRoot, { ftpRoot = it }, label = { Text("Exposed root (blank = USB root)") })
         if (errors.isNotEmpty()) {
             Column { errors.forEach { Text(it, color = MaterialTheme.colorScheme.error) } }
         }
@@ -289,12 +303,14 @@ fun WizardScreen(
                 val svc = boundService ?: return@Button
                 val form = WizardSubmit.Form(
                     txUser, txPass, peerPort.toIntOrNull() ?: 0, dlSubpath,
+                    ftpUser, ftpPass, ftpPort.toIntOrNull() ?: 0, ftpWifiOnly, ftpRoot,
                 )
                 val outcome = WizardSubmit.submit(form)
                 if (!outcome.ok) { errors = outcome.errors; return@Button }
+                val ftpR = svc.applyFtpSettings(outcome.ftp!!)
                 val txR = svc.applyTransmissionSettings(outcome.transmission!!, liveOnly = false)
-                if (txR.ok) { svc.completeWizard(); onFinished() }
-                else { errors = listOf(txR.message).filter { it.isNotEmpty() } }
+                if (ftpR.ok && txR.ok) { svc.completeWizard(); onFinished() }
+                else { errors = listOf(ftpR.message, txR.message).filter { it.isNotEmpty() } }
             },
             enabled = boundService != null && safStatus?.granted == true,
         ) { Text("Finish setup") }

@@ -27,6 +27,9 @@ class SafStorageGateway(
     private val resolver = context.contentResolver
     private val cache = ConcurrentHashMap<String, Uri>()
     private val pathLocks = ConcurrentHashMap<String, ReentrantLock>()
+    // FTP-only read cache (plan 07 §2.1). Never written by the transmission path
+    // and never read as authoritative: a miss here just re-walks the tree.
+    private val roCache = ConcurrentHashMap<String, Uri>()
     @Volatile private var cachedFreeSpace: Pair<Long, Long>? = null
     @Volatile private var freeSpaceRefreshInFlight = false
     private val freeSpaceExecutor =
@@ -142,6 +145,7 @@ class SafStorageGateway(
                 // record the new location.
                 cache.keys.filter { it == n || it.startsWith("$n/") }
                     .forEach { cache.remove(it) }
+                evictReadOnly(n)   // private FTP state; keep FTP's view consistent with renames
                 cache[d] = finalUri
                 result = true
             } finally {
@@ -159,6 +163,7 @@ class SafStorageGateway(
         val uri = resolveUri(n) ?: return false
         // invalidate this node and any cached descendants
         cache.keys.filter { it == n || it.startsWith("$n/") }.forEach { cache.remove(it) }
+        evictReadOnly(n)   // private FTP state; keep FTP's view consistent with deletes
         return try {
             DocumentsContract.deleteDocument(resolver, uri)
         } catch (e: Exception) { Log.e(TAG, "removeDoc: ${e.message}"); false }
@@ -270,6 +275,172 @@ class SafStorageGateway(
             null
         }
     }
+
+    // ── FTP-only read-only API (plan 07 §2.1) ─────────────────────────────────
+    //
+    // These methods never take a pathLock and never put/remove entries in the
+    // shared [cache], so FTP can neither block transmission's resolveUri walks
+    // nor poison the cache transmission trusts. Metadata/open calls resolve via
+    // [resolveUriReadOnly], which falls back to a walk that only populates the
+    // private [roCache]. Stale roCache entries are evicted on FileNotFound / empty
+    // cursor and the lookup retried once with a fresh walk.
+
+    /** Read-only stat for FTP. Null when the document does not exist. */
+    fun readOnlyStat(relPath: String): UsbFdBridge.PathInfo? {
+        val n = SafPaths.normalize(relPath)
+        val uri = resolveUriReadOnly(n) ?: return null
+        queryStatQuietly(uri)?.let { return it }
+        // Stale entry (or a doc that vanished): drop FTP's view of it and retry once.
+        evictReadOnly(n)
+        val fresh = resolveUriReadOnlyFresh(n) ?: return null
+        return queryStatQuietly(fresh)
+    }
+
+    /** Read-only single-query detailed listing for FTP; populates only [roCache]. */
+    fun readOnlyListDetailed(relPath: String): List<ChildEntry> {
+        val n = SafPaths.normalize(relPath)
+        val parentUri = resolveUriReadOnly(n) ?: return emptyList()
+        val out = queryChildrenDetailed(n, parentUri)
+        if (out == null) {
+            // Children query failed (e.g. parent URI gone): retry once with a fresh walk.
+            evictReadOnly(n)
+            val fresh = resolveUriReadOnlyFresh(n) ?: return emptyList()
+            return queryChildrenDetailed(n, fresh) ?: emptyList()
+        }
+        return out
+    }
+
+    /**
+     * Read-only open for FTP streaming. Returns a pfd the caller owns (and
+     * typically detaches). Streaming reads on the returned fd are NOT part of
+     * this call. Null on miss.
+     */
+    fun readOnlyOpenRead(relPath: String): ParcelFileDescriptor? {
+        val n = SafPaths.normalize(relPath)
+        val uri = resolveUriReadOnly(n) ?: return null
+        var pfd = try { resolver.openFileDescriptor(uri, "r") }
+        catch (e: Exception) { Log.e(TAG, "readOnlyOpenRead: ${e.message}"); null }
+        if (pfd == null) {
+            evictReadOnly(n)
+            val fresh = resolveUriReadOnlyFresh(n) ?: return null
+            pfd = try { resolver.openFileDescriptor(fresh, "r") }
+            catch (e: Exception) { Log.e(TAG, "readOnlyOpenRead retry: ${e.message}"); null }
+        }
+        return pfd
+    }
+
+    /** Drop [relPath] and any cached descendants from the private FTP [roCache]. */
+    fun evictReadOnly(relPath: String) {
+        val n = SafPaths.normalize(relPath)
+        roCache.keys.filter { it == n || it.startsWith("$n/") }.forEach { roCache.remove(it) }
+    }
+
+    private fun queryStatQuietly(uri: Uri): UsbFdBridge.PathInfo? = try {
+        resolver.query(
+            uri,
+            arrayOf(
+                DocumentsContract.Document.COLUMN_MIME_TYPE,
+                DocumentsContract.Document.COLUMN_SIZE,
+                DocumentsContract.Document.COLUMN_LAST_MODIFIED),
+            null, null, null)?.use { c ->
+            if (!c.moveToFirst()) return null
+            val mime = c.getString(0)
+            val isDir = mime == DocumentsContract.Document.MIME_TYPE_DIR
+            val size = if (c.isNull(1)) 0L else c.getLong(1)
+            val mtime = if (c.isNull(2)) 0L else c.getLong(2)
+            UsbFdBridge.PathInfo(isDir, size, mtime)
+        } ?: null
+    } catch (e: Exception) {
+        Log.e(TAG, "readOnlyStat: ${e.message}")
+        null
+    }
+
+    /** Returns null when the children query itself failed (distinct from an empty dir). */
+    private fun queryChildrenDetailed(relPath: String, parentUri: Uri): List<ChildEntry>? {
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
+            treeUri, DocumentsContract.getDocumentId(parentUri))
+        return try {
+            resolver.query(childrenUri,
+                arrayOf(
+                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                    DocumentsContract.Document.COLUMN_MIME_TYPE,
+                    DocumentsContract.Document.COLUMN_SIZE,
+                    DocumentsContract.Document.COLUMN_LAST_MODIFIED),
+                null, null, null)?.use { c ->
+                val idxId = c.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                val idxName = c.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                val idxMime = c.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                val idxSize = c.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE)
+                val idxMtime = c.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+                val out = mutableListOf<ChildEntry>()
+                while (c.moveToNext()) {
+                    val docId = if (idxId >= 0) c.getString(idxId) else null
+                    val name = if (idxName >= 0) c.getString(idxName) ?: continue else continue
+                    val mime = if (idxMime >= 0) c.getString(idxMime) else null
+                    val isDir = mime == DocumentsContract.Document.MIME_TYPE_DIR
+                    val size = if (idxSize >= 0 && !c.isNull(idxSize)) c.getLong(idxSize) else 0L
+                    val mtime = if (idxMtime >= 0 && !c.isNull(idxMtime)) c.getLong(idxMtime) else 0L
+                    if (docId != null) {
+                        val childPath = if (relPath.isEmpty()) name else "$relPath/$name"
+                        roCache[childPath] =
+                            DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
+                    }
+                    out.add(ChildEntry(name, isDir, size, mtime))
+                }
+                out
+            }
+        } catch (e: Exception) { Log.e(TAG, "readOnlyListDetailed: ${e.message}"); null }
+    }
+
+    /**
+     * Resolve [relPath] (normalized) to a document URI for the FTP read path.
+     * Reads the shared [cache] without writing it; on miss walks the tree using
+     * only the private [roCache]. No pathLock acquisition at all — duplicate
+     * concurrent walks are acceptable for FTP.
+     */
+    private fun resolveUriReadOnly(relPath: String): Uri? =
+        resolveUriReadOnlyWalk(relPath, fresh = false)
+
+    /** Like [resolveUriReadOnly] but bypasses [roCache] (stale-entry retry). */
+    private fun resolveUriReadOnlyFresh(relPath: String): Uri? =
+        resolveUriReadOnlyWalk(relPath, fresh = true)
+
+    private fun resolveUriReadOnlyWalk(n: String, fresh: Boolean): Uri? {
+        if (!fresh) {
+            cache[n]?.let { return it }          // read-only peek at shared cache
+            roCache[n]?.let { return it }
+        }
+        if (n.isEmpty()) return cache[""]
+        if (roCache.size > RO_CACHE_MAX_ENTRIES) roCache.clear()  // bound FTP memory
+        val parent = SafPaths.splitParent(n) ?: return null
+        val parentUri = resolveUriReadOnlyWalk(parent.first, fresh) ?: return null
+        if (!fresh) roCache[n]?.let { return it }
+        val leaf = parent.second
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
+            treeUri, DocumentsContract.getDocumentId(parentUri))
+        return try {
+            resolver.query(childrenUri,
+                arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME),
+                null, null, null)?.use { c ->
+                while (c.moveToNext()) {
+                    val docId = c.getString(0)
+                    val name = c.getString(1) ?: continue
+                    val childPath = if (parent.first.isEmpty()) name else "${parent.first}/$name"
+                    roCache[childPath] = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
+                    if (name == leaf) return DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
+                }
+                null
+            }
+        } catch (e: Exception) { Log.e(TAG, "resolveUriReadOnly walk: ${e.message}"); null }
+    }
+
+    // ── internal test hooks (plan 07 §3) ──────────────────────────────────────
+    internal fun sharedCacheKeys(): Set<String> = cache.keys.toSet()
+    internal fun sharedCacheSize(): Int = cache.size
+    internal fun pathLockCount(): Int = pathLocks.size
+    internal fun roCacheSize(): Int = roCache.size
 
     override fun list(relPath: String): List<String> {
         val parentUri = resolveUri(relPath) ?: return emptyList()
@@ -467,5 +638,6 @@ class SafStorageGateway(
         private const val TAG = "SafStorageGateway"
         private const val FREE_SPACE_TTL_MS = 5_000L
         private const val FREE_SPACE_PROBE_NAME = ".tr-freespace-probe"
+        private const val RO_CACHE_MAX_ENTRIES = 4096
     }
 }

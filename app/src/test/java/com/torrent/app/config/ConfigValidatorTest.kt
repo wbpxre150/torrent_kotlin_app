@@ -13,6 +13,10 @@ class ConfigValidatorTest {
         altSpeedDown = 50, altSpeedUp = 10,
         downloadSubpath = "Downloads",
     )
+    private fun validFtp() = FtpSettings(
+        username = "kodi", password = "kodiallday",
+        port = 2121, wifiOnly = true, exposedRoot = "Media",
+    )
     @Test fun validTransmission_passes() {
         assertTrue(ConfigValidator.validateTransmission(validTx()).ok)
     }
@@ -41,5 +45,26 @@ class ConfigValidatorTest {
     }
     @Test fun emptySubpath_passes() {
         assertTrue(ConfigValidator.validateTransmission(validTx().copy(downloadSubpath = "")).ok)
+    }
+    @Test fun validFtp_passes() {
+        assertTrue(ConfigValidator.validateFtp(validFtp()).ok)
+    }
+    @Test fun ftpShortPassword_fails() {
+        assertFalse(ConfigValidator.validateFtp(validFtp().copy(password = "x")).ok)
+    }
+    @Test fun ftpBadPort_fails() {
+        assertFalse(ConfigValidator.validateFtp(validFtp().copy(port = 0)).ok)
+    }
+    @Test fun ftpExposedRootDotDot_fails() {
+        assertFalse(ConfigValidator.validateFtp(validFtp().copy(exposedRoot = "../x")).ok)
+    }
+    @Test fun ftpEmptyExposedRoot_passes() {
+        assertTrue(ConfigValidator.validateFtp(validFtp().copy(exposedRoot = "")).ok)
+    }
+    @Test fun ftpNegativeMaxDownload_fails() {
+        assertFalse(ConfigValidator.validateFtp(validFtp().copy(maxDownloadKiBps = -1)).ok)
+    }
+    @Test fun ftpZeroMaxDownload_passes() {
+        assertTrue(ConfigValidator.validateFtp(validFtp().copy(maxDownloadKiBps = 0)).ok)
     }
 }
