@@ -102,11 +102,15 @@ These threads are owned by FTP only, so this never affects transmission/IPC.
 
 ### 2.4 Efficient streaming (fewer FUSE round-trips)
 
-- `streamProvider`: keep the `detachFd()` exactly-once ownership (fix `05d5bb6`)
-  and `channel.position(offset)` for REST. Wrap the `FileInputStream` in a
-  `BufferedInputStream(fis, 512 * 1024)` so FtpServer's small per-read buffer
-  becomes large sequential reads. Closing the buffered stream closes the fis
-  exactly once (keep/extend `FtpStreamProviderFdCloseTest`).
+- `streamProvider`: open the SAF pfd and wrap it in `ParcelFileDescriptor.
+  AutoCloseInputStream(pfd)` — every close (explicit, finalize) routes through the
+  idempotent `pfd.close()`, so the fd is closed exactly once and no raw fd int is
+  handled. Device finding (OPPO CPH2305 / ColorOS Android 15): the pre-removal
+  `detachFd()` + `FileInputStream(fd)` ownership pattern made the fd EBADF right
+  after `detachFd()` (pre-detach reads succeeded), so every RETR failed with 551;
+  do NOT reintroduce it here. Seek via `channel.position(offset)` for REST, and wrap
+  in `BufferedInputStream(fis, 512 KiB)` so FtpServer's small per-read buffer becomes
+  large sequential FUSE reads (keep/extend `FtpStreamProviderFdCloseTest`).
 - Optional download rate cap: add `FtpSettings.maxDownloadKiBps: Int = 0`
   (0 = unlimited) persisted in ConfigStore, validated (>= 0) and exposed in the
   /settings/ftp form; apply via Apache's `TransferRatePermission(maxDownloadRate

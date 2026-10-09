@@ -40,34 +40,43 @@ class FtpServerController(
     // underlying SAF pfd when the stream is closed.
     private val streamProvider: (String, Long) -> InputStream = { relPath, offset ->
         FtpThreads.lowerPriority()
-        val pfd = fileSource.openReadPfd(relPath)
-            ?: throw IOException("file not found: $relPath")
-        // Detach the raw fd from the pfd so the FileInputStream owns it and closes it
-        // exactly once. The previous code called both fis.close() (via
-        // FilterInputStream) and pfd.close(); the second close hit an already-closed
-        // fd, and if the kernel had recycled that fd number into a concurrent SAF
-        // operation (transmission IPC openFd), it corrupted the other operation.
-        val fd = pfd.fileDescriptor
-        pfd.detachFd()
-        val fis = java.io.FileInputStream(fd)
-        if (offset > 0) {
-            try { fis.channel.position(offset) }
-            catch (e: IOException) { fis.close(); throw e }
+        try {
+            val pfd = fileSource.openReadPfd(relPath)
+                ?: throw IOException("file not found: $relPath")
+            // Ownership: AutoCloseInputStream(pfd) routes every close (explicit close,
+            // finalize) through pfd.close(), which is idempotent — the underlying fd is
+            // closed exactly once and no raw fd int is ever handled.
+            // NB: do NOT use pfd.detachFd() + FileInputStream(fd) here. On this device
+            // (OPPO/ColorOS Android 15) the fd became EBADF right after detachFd()
+            // even though the same pfd read fine before the call, so every RETR failed
+            // with 551. AutoCloseInputStream avoids detach entirely.
+            val fis = android.os.ParcelFileDescriptor.AutoCloseInputStream(pfd)
+            if (offset > 0) {
+                try { fis.channel.position(offset) }
+                catch (e: IOException) { fis.close(); throw e }
+            }
+            // Plan 07 §2.4: FtpServer's small per-read buffer becomes large sequential
+            // FUSE reads. Closing the buffered stream closes the fis (and the pfd)
+            // exactly once. The wrapper also lowers thread priority on first read.
+            PriorityOnFirstRead(java.io.BufferedInputStream(fis, 512 * 1024))
+        } catch (e: Throwable) {
+            Log.e(TAG, "streamProvider failed for '$relPath' @$offset", e)
+            if (e is IOException) throw e else throw IOException(e)
         }
-        // Plan 07 §2.4: FtpServer's small per-read buffer becomes large sequential
-        // FUSE reads. Closing the buffered stream closes the fis (and the detached
-        // fd) exactly once. The wrapper also lowers thread priority on first read.
-        PriorityOnFirstRead(java.io.BufferedInputStream(fis, 512 * 1024))
     }
 
-    /** InputStream that calls [FtpThreads.lowerPriority] on its first read/close. */
+    /** InputStream that lowers thread priority on first use and logs read failures. */
     private class PriorityOnFirstRead(private val delegate: InputStream) : InputStream() {
         private var primed = false
         private fun prime() {
             if (!primed) { primed = true; FtpThreads.lowerPriority() }
         }
-        override fun read(): Int { prime(); return delegate.read() }
-        override fun read(b: ByteArray, off: Int, len: Int): Int { prime(); return delegate.read(b, off, len) }
+        private fun <T> logged(block: () -> T): T = try { block() } catch (e: Throwable) {
+            Log.e(TAG, "stream read failed", e)
+            throw e
+        }
+        override fun read(): Int { prime(); return logged { delegate.read() } }
+        override fun read(b: ByteArray, off: Int, len: Int): Int { prime(); return logged { delegate.read(b, off, len) } }
         override fun available(): Int = delegate.available()
         override fun close() { prime(); delegate.close() }
     }
