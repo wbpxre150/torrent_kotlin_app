@@ -22,7 +22,7 @@ component, shows status, and starts/stops/restarts each service — plus the fir
    - **FTP:** port, auth/anonymous, wifi-only toggle, exposed root.
    - **Storage:** show USB status/free space, re-grant drive, download-root selection.
    - **dht_crawler:** *(stub — placeholder panel, disabled/hidden until Stage 10).*
-   - **rclone:** *(stub — placeholder panel, disabled/hidden until Stage 11).*
+   - **rclone:** *(stub — dropped; crawler backups are turned off. Removed in Stage 10.)*
 3. **Config ownership & apply flow** (the cross-cutting rule): the control server is the
    **single writer** of each config file. Apply = stop affected daemon → atomic write (temp
    + rename) → restart (or push via RPC). Show success/failure.
@@ -48,7 +48,7 @@ component, shows status, and starts/stops/restarts each service — plus the fir
 - Boot-start, battery/Doze, OEM survival (Stage 08) — though their toggles/guidance links
   live in this UI.
 - dht_crawler config panel and `:8080` link (Stage 10).
-- rclone remote setup and backup schedule panel (Stage 11).
+- ~~rclone remote setup and backup schedule panel~~ (dropped — no crawler backups).
 
 ## Acceptance test
 

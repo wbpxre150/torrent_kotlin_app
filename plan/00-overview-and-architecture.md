@@ -21,10 +21,12 @@ non-rooted** phone, replacing a Termux-based setup. It must:
   one built-in **web settings page**.
 
 **Deferred to post-PoC:**
-- Crawl the BitTorrent DHT for torrent metadata (**dht_crawler**, C) and expose its search
-  web UI.
-- Back up the crawler database off-device with **rclone** (Go).
-- Import an existing dht_crawler `data/` directory from USB so the DB doesn't start empty.
+- Crawl the BitTorrent DHT for torrent metadata (**dht_crawler**, C — today runs in Termux on
+  the phone with 16 thread trees) and expose its search web UI. **Crawler backups are turned
+  off** (no rclone/ssh/sqlite3/zstd); the DB lives only on internal storage.
+- Migrate the existing Termux crawler `data/` (`/data/data/com.termux/files/home/dht_crawler/data`)
+  into the app's internal storage via Termux's SAF `DocumentsProvider` (`com.termux.documents`),
+  so the DB doesn't start empty. Phone storage → phone storage; the crawler never uses USB.
 
 ---
 
@@ -67,9 +69,8 @@ to USB. This is the same class of technique that SAF-aware Android torrent apps
 | **transmission-daemon (fork)**| C      | **Yes (read+write)**| File backend obtains **SAF fds via JNI**; downloads straight to USB. | **Yes** |
 | Kotlin SAF gateway            | Kotlin | **Yes**             | Single choke point: opens fds, creates/renames/deletes docs, lists. | **Yes** |
 | Kotlin FTP server             | Kotlin | **Yes (read)**      | Streams library from USB via SAF gateway to Kodi over wifi.          | Post-PoC |
-| Kotlin control server         | Kotlin | Read (import)       | Settings UI; copies imported `data/` USB → internal via SAF.        | Post-PoC |
-| dht_crawler                   | C      | No                  | SQLite DB on **internal** storage (wanted, for speed; ≤100 GB).      | **Deferred** |
-| rclone / sqlite3 / zstd       | native | No                  | Backup helpers the **crawler shells out to** (`system()`); upload DB to a network remote. | **Deferred** |
+| Kotlin control server         | Kotlin | No                  | Settings UI; migrates Termux crawler `data/` → internal via Termux's SAF provider (not USB). | Post-PoC |
+| dht_crawler                   | C      | No                  | SQLite DB on **internal** storage (wanted, for speed). Backups disabled. | **Deferred** |
 
 ### What the SAF-fd fork does and doesn't remove
 
@@ -111,8 +112,7 @@ Everything runs inside **one Android app process**, kept alive by a single
 │                                            ▼                              │
 │   native children (ProcessBuilder, exec'd from nativeLibraryDir):         │
 │     • libtransmissiond.so → RPC :9091; payload I/O via SAF-fd JNI → USB   │
-│     • libdhtcrawler.so    → HTTP UI :8080, SQLite on internal  [deferred] │
-│         └─ shells out (system()) to librclone.so/sqlite3/zstd  [deferred] │
+│     • libdhtcrawler.so    → HTTP UI 127.0.0.1, SQLite internal (St 09)    │
 │                                            ▲                              │
 │  SAF fd bridge (JNI)  ◀────fd requests─────┘                              │
 │       │ opens content:// fds, mkdir/rename/delete/stat/free-space         │
@@ -121,7 +121,8 @@ Everything runs inside **one Android app process**, kept alive by a single
 │       ▲                                                                   │
 │  Kotlin services (in-JVM):                                                │
 │     • Control/settings web server (Ktor)      :8090                       │
-│     • FTP server (wifi-only)                  :2121  [post-PoC]            │
+│     • FTP server (wifi-only)                  :2121                       │
+│     • Crawler search proxy (auth)             :8080  (Stage 10)           │
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -131,10 +132,11 @@ Everything runs inside **one Android app process**, kept alive by a single
 |------|---------------------------------|-------------------------------------------|------|
 | 9091 | transmission-daemon RPC         | LAN (existing Android remote)             | **Yes** |
 | 8090 | Kotlin control/settings web UI  | LAN (single config surface)               | Stub in PoC |
-| 8080 | dht_crawler HTTP search UI      | LAN (user searches & copies magnets)      | Deferred |
+| 8080 | dht_crawler search UI (Ktor auth proxy → crawler on 127.0.0.1:8081) | LAN (user searches & copies magnets) | Deferred |
 | 2121 | Kotlin FTP server               | **wifi only**, gated on TRANSPORT_WIFI    | Post-PoC |
 
-The control server can reverse-proxy 8080/9091 so the user has one LAN entry point.
+The crawler itself binds loopback only (Stage 10); its UI is reached through the
+authenticated proxy on `:8080`.
 
 ---
 
@@ -148,8 +150,7 @@ The control server can reverse-proxy 8080/9091 so the user has one LAN entry poi
 
 **Additional steps unlocked post-PoC:**
 4. *(Stage 06)* **Kodi** connects to the **FTP server** (`:2121`) over wifi and streams from USB.
-5. *(Stage 09)* User opens dht_crawler UI (`:8080`), searches, copies a **magnet link** instead of sourcing it manually.
-6. *(Stage 11)* On schedule, **rclone** uploads the SQLite DB to the configured remote.
+5. *(Stages 09–10)* User opens the crawler search UI (`:8080`), searches, copies a **magnet link** instead of sourcing it manually.
 
 ---
 
@@ -160,19 +161,15 @@ The control server can reverse-proxy 8080/9091 so the user has one LAN entry poi
   is mandatory or they won't be extracted to disk and exec fails. (`chmod +x` in `filesDir`
   never works on Android 10+.) See Stage 02.
 - **Statically link** the C binaries (or co-ship and `LD_LIBRARY_PATH` their `.so` deps).
-- **PT_TLS p_align ELF patch (required for every static NDK C binary on arm64):** ARM64
-  Bionic requires `PT_TLS p_align >= 64`. NDK static builds via `emutls` produce a stub TLS
-  segment with alignment 8; the dynamic linker rejects the binary at startup. After each NDK
-  compilation step, the Gradle task must patch the binary's ELF program header: scan the
-  `PT_PHDR` table, find the `PT_TLS` entry (type `7`), and write `p_align = 64` if the
-  current value is less than 64. The `buildProbe` `doLast` block in `app/build.gradle.kts`
-  is the canonical reference implementation — copy it into every Gradle task that produces a
-  static NDK binary (`libtransmissiond.so`, `libdhtcrawler.so`, `libsqlite3.so`,
-  `libzstd.so`, etc.).
+- **Prefer dynamic PIE against Bionic with static third-party deps** (how
+  `libtransmissiond.so` is built). Fully static NDK binaries need the **PT_TLS p_align ELF
+  patch** (ARM64 Bionic requires `PT_TLS p_align >= 64`; patch the `PT_TLS` program header
+  after linking) — the old `buildProbe` reference task was removed, so avoid fully static
+  builds unless unavoidable.
 - **Always drain** child `stdout`/`stderr`, or the child blocks. Logs → rotating files +
   control UI.
 - **Auth on every localhost port.** Loopback is not UID-isolated on Android. Set
-  Transmission RPC user/pass, rclone `--rc-user/--rc-pass`, FTP creds, control-server token.
+  Transmission RPC user/pass, FTP creds, control-server token (also guards the crawler proxy).
 - **All USB access goes through the single SAF storage gateway** (Stage 03) — including the
   transmission fork's fd requests (via the JNI bridge). No component calls SAF elsewhere.
   This keeps the root-vs-non-root seam in one place.
@@ -200,16 +197,15 @@ The control server can reverse-proxy 8080/9091 so the user has one LAN entry poi
 | 06    | `06-ftp-server.md`                            | Wifi-only FTP serving USB to Kodi                         |
 | 07    | `07-unified-settings-and-control.md`          | Settings/control web UI + first-run wizard (crawler panel stubbed) |
 | 08    | `08-resilience-and-startup.md`                | Boot start, 24/7 survival, crash recovery, OEM/Doze       |
-| 09    | `09-dht-crawler.md`                           | Cross-compile dht_crawler + rclone; supervise crawler; USB data import |
-| 10    | `10-crawler-ui-panel.md`                      | Wire up crawler & rclone UI panels (stubs from Stage 07)  |
-| 11    | `11-rclone-backups.md`                        | Scheduled DB backup to a network remote (depends on Stage 09) |
+| 09    | `09-dht-crawler-native.md`                    | Cross-compile dht_crawler (C), seed config (backups off), supervise it |
+| 10    | `10-dht-crawler-control-panel.md`             | Crawler web control panel: settings, stats, auth proxy, maintenance, Termux data migration |
 
 Build the PoC stages in order first. Stage 05 is the highest-risk, highest-value stage —
 Stages 03 and 04 exist to de-risk it (prove the SAF fd works; prove the daemon builds).
 The UI (Stage 07) and resilience hardening (Stage 08) are built before the DHT crawler
 so the transmission daemon controller app is complete and testable end-to-end first.
-Stage 09 (dht_crawler) bolts onto the finished app; Stage 10 wires its UI panel;
-Stage 11 adds scheduled backups.
+Stage 09 (dht_crawler native) bolts onto the finished app; Stage 10 builds its web control
+panel. The former backup stages (rclone/SSH/USB backups) are dropped.
 
 ---
 
@@ -233,5 +229,7 @@ Stage 11 adds scheduled backups.
 - **Android 15 `dataSync` FGS ~6h/24h cap** — breaks always-on. Mitigation in Stage 07
   (likely `specialUse` FGS for sideload). Decide before Stage 07.
 - **OEM background killers** — no API fix; user whitelists (Stage 07).
-- **Cross-compiling dht_crawler + deps** (libuv/sqlite/openssl) for arm64 — Stage 09.
+- **Cross-compiling dht_crawler + deps** (libuv, sqlite3+FTS5; SHA1 via mbedTLS shim) — Stage 09.
+- **Crawler vs transmission contention** (CPU/network, ~2,200 threads in the same UID) and the
+  Android 12+ phantom process killer — Stage 09 soak test.
 - **Distribution is sideload-only** assumed (Play policy would fight the FGS/battery needs).
