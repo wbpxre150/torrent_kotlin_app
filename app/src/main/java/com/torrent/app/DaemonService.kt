@@ -61,6 +61,17 @@ class DaemonService : Service() {
     private lateinit var tokenManager: TokenManager
     // Mutated from the main thread, the crawler-control thread and ControlServer threads.
     private val supervisors = java.util.concurrent.CopyOnWriteArrayList<ProcessSupervisor>()
+    // The single dht_crawler supervisor (plan 10 §4): registered in onCreate
+    // for the whole service lifetime so dht_crawler is ALWAYS listed in the
+    // daemons table — and therefore startable/restartable from the dashboard —
+    // even while stopped, disabled, or wifi-paused. It is replaced only when a
+    // settings apply changes its CLI args; see [registerCrawlerSupervisor].
+    @Volatile private var crawlerSupervisor: ProcessSupervisor? = null
+    // The CLI args [crawlerSupervisor] was built with.
+    @Volatile private var crawlerSupervisorArgs: List<String>? = null
+    // Serializes [registerCrawlerSupervisor] between the main thread (onCreate)
+    // and the crawler-control executor (apply/rollback/dashboard starts).
+    private val crawlerRegistrationLock = Any()
     private lateinit var usbPermissionManager: UsbPermissionManager
     @Volatile private var gateway: SafStorageGateway? = null
     @Volatile private var ftpController: FtpServerController? = null
@@ -149,6 +160,11 @@ class DaemonService : Service() {
         // A tree granted before the last service start is still persisted
         // (persistable permission): hand it back to the coordinator.
         crawlerTreeGrant.treeUri()?.let { crawlerMigration.setTree(it) }
+        // Plan 10 §4: register the crawler supervisor up-front so dht_crawler
+        // is always listed in the daemons table (STOPPED until something starts
+        // it), even when it is disabled or wifi-paused. Registration is pure —
+        // no layout work happens until a start is requested.
+        registerCrawlerSupervisor(CrawlerGate.crawlerArgs(configStore.load().crawler))
         controlServer = ControlServer(
             tokenManager = tokenManager,
             serviceState = _state,
@@ -525,9 +541,11 @@ class DaemonService : Service() {
         }
 
         setCrawlerApplyStatus(CrawlerApplyPhase.STARTING, "starting crawler")
-        val crawler = buildCrawlerSupervisor(CrawlerGate.crawlerArgs(s), crawlerConfig)
+        // The supervisor is (re)registered with the settings-derived args —
+        // see registerCrawlerSupervisor — and stays listed in the daemons
+        // table even when the apply leaves it stopped.
+        val crawler = registerCrawlerSupervisor(CrawlerGate.crawlerArgs(s))
         crawler.start()
-        supervisors.add(crawler)
 
         // Watch the restarted crawler for the whole window (plan 10 §1): the
         // supervisor reports RUNNING as soon as the process is launched, so an
@@ -571,9 +589,10 @@ class DaemonService : Service() {
         stopCrawlerSupervisors()
         configStore.saveCrawler(previous)
         crawlerConfig.restoreLastKnownGood()
-        val restored = buildCrawlerSupervisor(CrawlerGate.crawlerArgs(previous), crawlerConfig)
+        // (Re)register with the previous args — see registerCrawlerSupervisor —
+        // so the crawler stays listed in the daemons table.
+        val restored = registerCrawlerSupervisor(CrawlerGate.crawlerArgs(previous))
         restored.start()
-        supervisors.add(restored)
         setCrawlerApplyStatus(
             CrawlerApplyPhase.ROLLED_BACK,
             "crawler crash-looped after apply; rolled back to last known good settings",
@@ -609,34 +628,85 @@ class DaemonService : Service() {
         }
     }
 
-    private fun runOnCrawlerControl(block: () -> Unit) {
-        try { crawlerControlExecutor.execute { block() } }
-        catch (e: RejectedExecutionException) { /* service shutting down */ }
-    }
+    private fun runOnCrawlerControl(block: () -> Unit): Boolean =
+        try {
+            crawlerControlExecutor.execute { block() }
+            true
+        } catch (e: RejectedExecutionException) {
+            false // service shutting down
+        }
 
+    /**
+     * Dashboard start/stop/restart actions. A stop blocks for the daemon's
+     * SIGTERM grace (60 s for the crawler), so these never run on the caller's
+     * thread (a Ktor request handler or the main thread): they are queued on a
+     * per-label single-thread executor, which keeps one daemon's actions in
+     * click order without a slow crawler stop delaying a transmission action.
+     * The dashboard observes the outcome via the STOPPING/STOPPED status.
+     */
     fun restartDaemon(label: String): Boolean {
+        if (label == CRAWLER_LABEL) {
+            // The crawler is always registered (see registerCrawlerSupervisor),
+            // but a restart is gated like a manual start — restarting while
+            // paused (wifi-only, no wifi) is refused (plan 10 §5) — and the
+            // stop+start is serialized on the crawler-control executor with
+            // every other crawler lifecycle op (apply/migration/gate), not
+            // on the per-label daemon-action executor.
+            val c = configStore.load().crawler
+            if (!CrawlerGate.shouldRun(c.enabled, c.wifiOnly, wifiGateMonitor.state.value.wifi)) {
+                return false
+            }
+            return runOnCrawlerControl {
+                val crawler = registerCrawlerSupervisor(CrawlerGate.crawlerArgs(c))
+                try {
+                    crawler.restart()
+                } catch (e: Exception) {
+                    android.util.Log.e("DaemonService", "restart $label failed", e)
+                }
+            }
+        }
         val sup = supervisors.firstOrNull { it.status.value.label == label } ?: return false
-        sup.restart(); return true
+        return runDaemonAction(label, "restart") { sup.restart() }
     }
     fun stopDaemon(label: String): Boolean {
         val sup = supervisors.firstOrNull { it.status.value.label == label } ?: return false
-        sup.stop(); return true
+        return runDaemonAction(label, "stop") { sup.stop() }
     }
     fun startDaemon(label: String): Boolean {
-        val sup = supervisors.firstOrNull { it.status.value.label == label }
-        if (sup != null) { sup.start(); return true }
-        // Manual start from the dashboard: lazily register+start the crawler
-        // (auto-start happens only when enabled), but the wifi gate always
-        // applies — a manual start while paused is refused (plan 10 §5).
+        // The crawler is always registered (see registerCrawlerSupervisor),
+        // but the wifi gate always applies — a manual start while paused is
+        // refused (plan 10 §5) — and the start is serialized on the
+        // crawler-control executor with every other crawler lifecycle op.
         if (label == CRAWLER_LABEL) {
             val c = configStore.load().crawler
-            if (CrawlerGate.shouldRun(c.enabled, c.wifiOnly, wifiGateMonitor.state.value.wifi)) {
-                startCrawlerSupervisor()
-                return true
+            if (!CrawlerGate.shouldRun(c.enabled, c.wifiOnly, wifiGateMonitor.state.value.wifi)) {
+                return false
             }
-            return false
+            startCrawlerSupervisor()
+            return true
         }
-        return false
+        val sup = supervisors.firstOrNull { it.status.value.label == label } ?: return false
+        return runDaemonAction(label, "start") { sup.start() }
+    }
+
+    private fun runDaemonAction(label: String, action: String, block: () -> Unit): Boolean {
+        val executor = daemonActionExecutors.computeIfAbsent(label) {
+            Executors.newSingleThreadExecutor(ThreadFactory { r ->
+                Thread(r, "daemon-action-$label").apply { isDaemon = true }
+            })
+        }
+        return try {
+            executor.execute {
+                try {
+                    block()
+                } catch (e: Exception) {
+                    android.util.Log.e("DaemonService", "$action $label failed", e)
+                }
+            }
+            true
+        } catch (e: RejectedExecutionException) {
+            false
+        }
     }
 
     fun transmissionRpcSummary(): com.torrent.app.transmission.TransmissionSummary? {
@@ -673,7 +743,10 @@ class DaemonService : Service() {
                     lastApplyRolledBack = true
                     configStore.saveTransmission(previous)
                     transmissionConfig.ensureSettingsJson()
-                    sup.stop(); delay(200); sup.start()
+                    // stop() blocks for the SIGTERM grace: keep it off the main thread.
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        sup.stop(); delay(200); sup.start()
+                    }
                     return@launch
                 }
             }
@@ -760,13 +833,16 @@ class DaemonService : Service() {
     }
 
     private fun startSupervisors() {
-        if (supervisors.isNotEmpty()) return
+        // No blanket supervisor guard here: the crawler supervisor is
+        // registered in onCreate (so it is always listed), and each start
+        // below is idempotent on its own label — repeated onStartCommand
+        // deliveries are harmless.
         transmissionConfig = TransmissionConfig(this, configStore)
         if (configStore.load().wizardCompleted) startTransmissionSupervisor()
-        // The crawler does not need the wizard/SAF: start it whenever it is
-        // enabled in config (plan 09 §5), independent of transmission. The
-        // initial start also respects the wifi gate (plan 10 §5); the gate
-        // collector starts it as soon as wifi is up.
+        // The crawler does not need the wizard/SAF (plan 09 §5): its supervisor
+        // was registered in onCreate, so dht_crawler is always listed in the
+        // daemons table — start it here only when the wifi gate allows
+        // (plan 10 §5); the gate collector starts it as soon as wifi is up.
         val crawler = configStore.load().crawler
         if (CrawlerGate.shouldRun(crawler.enabled, crawler.wifiOnly, wifiGateMonitor.state.value.wifi)) {
             startCrawlerSupervisor()
@@ -794,23 +870,45 @@ class DaemonService : Service() {
     }
 
     /**
-     * Registers and starts the dht_crawler supervisor. The work runs on the
-     * crawler-control executor, which also hosts the crawler's stop(): a pending
-     * stop from a previous service instance is serialized ahead of this block, so
-     * a new child is never launched while the old one is still shutting down.
-     * Failures are logged, never thrown — a broken crawler must not crash the service.
+     * Registers (without starting) the single dht_crawler supervisor and
+     * returns it. The crawler supervisor stays registered for the whole
+     * service lifetime — listed in the daemons table (STOPPED) even while the
+     * crawler is disabled or paused, so the dashboard can always start it
+     * again — and is replaced only when a settings apply changes its CLI args
+     * ([crawlerSupervisorArgs]). Registration is pure (no layout work happens
+     * until a start is requested), so it cannot fail.
+     */
+    private fun registerCrawlerSupervisor(args: List<String>): ProcessSupervisor {
+        synchronized(crawlerRegistrationLock) {
+            val previous = crawlerSupervisor
+            if (previous != null && crawlerSupervisorArgs == args) return previous
+            val crawler = buildCrawlerSupervisor(args, CrawlerConfig(this))
+            crawlerSupervisor = crawler
+            crawlerSupervisorArgs = args
+            if (previous != null) supervisors.remove(previous)
+            supervisors.add(crawler)
+            return crawler
+        }
+    }
+
+    /**
+     * Starts the (already registered, see [registerCrawlerSupervisor])
+     * dht_crawler supervisor. The work runs on the crawler-control executor,
+     * which also hosts the crawler's stop(): a pending stop from a previous
+     * service instance is serialized ahead of this block, so a new child is
+     * never launched while the old one is still shutting down. start() itself
+     * is idempotent (a RUNNING/STARTING crawler ignores it), so repeated
+     * gate/dashboard triggers are harmless. Failures are logged, never thrown
+     * — a broken crawler must not crash the service.
      */
     private fun startCrawlerSupervisor() {
-        if (supervisors.any { it.status.value.label == CRAWLER_LABEL }) return
         crawlerControlExecutor.execute {
-            if (supervisors.any { it.status.value.label == CRAWLER_LABEL }) return@execute
             try {
                 val crawlerConfig = CrawlerConfig(this)
                 crawlerConfig.ensureLayout()
                 val crawler =
-                    buildCrawlerSupervisor(CrawlerGate.crawlerArgs(configStore.load().crawler), crawlerConfig)
+                    registerCrawlerSupervisor(CrawlerGate.crawlerArgs(configStore.load().crawler))
                 crawler.start()
-                supervisors.add(crawler)
             } catch (e: Exception) {
                 android.util.Log.e("DaemonService", "failed to start crawler supervisor", e)
             }
@@ -910,19 +1008,18 @@ class DaemonService : Service() {
     }
 
     /**
-     * Stops and unregisters every crawler supervisor. Must run on the
-     * crawler-control executor: a pending stop from a previous service
-     * instance is then serialized ahead of any new launch.
+     * Stops the crawler supervisor but never unregisters it: dht_crawler
+     * stays listed in the daemons table (state STOPPED), so it can always be
+     * started/restarted from the dashboard. Must run on the crawler-control
+     * executor: a pending stop from a previous service instance is then
+     * serialized ahead of any new launch.
      */
     private fun stopCrawlerSupervisors() {
-        val crawlers = supervisors.filter { it.status.value.label == CRAWLER_LABEL }
-        supervisors.removeAll(crawlers.toSet())
-        for (c in crawlers) {
-            try {
-                c.stop()
-            } catch (e: Exception) {
-                android.util.Log.w("DaemonService", "crawler stop failed: ${e.message}")
-            }
+        val crawler = crawlerSupervisor ?: return
+        try {
+            crawler.stop()
+        } catch (e: Exception) {
+            android.util.Log.w("DaemonService", "crawler stop failed: ${e.message}")
         }
     }
 
@@ -945,5 +1042,11 @@ class DaemonService : Service() {
         private val crawlerControlExecutor = Executors.newSingleThreadExecutor(ThreadFactory {
             Thread(it, "crawler-control").apply { isDaemon = true }
         })
+
+        // Per-label executors for dashboard start/stop/restart (see
+        // runDaemonAction). Process-wide and never shut down, like
+        // crawlerControlExecutor; one daemon thread per supervised label.
+        private val daemonActionExecutors =
+            java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.ExecutorService>()
     }
 }

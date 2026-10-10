@@ -16,7 +16,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import android.net.Uri
 import com.torrent.app.storage.SafStatus
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import com.torrent.app.config.WizardSubmit
@@ -27,6 +27,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.core.content.ContextCompat
@@ -227,12 +228,16 @@ fun MainScreen(
     crawlerNote: String = "",
     onChooseCrawlerTree: () -> Unit = {},
 ) {
+    val context = LocalContext.current
+    val showConnection = wifiIp.isNotEmpty() && authToken.isNotEmpty()
+    val url = "http://$wifiIp:8090/?token=$authToken"
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
+        verticalArrangement = Arrangement.Top
     ) {
         Text(
             text = "Torrent App",
@@ -242,22 +247,23 @@ fun MainScreen(
         Spacer(modifier = Modifier.height(24.dp))
 
         // Connection info (shown when network is available)
-        if (wifiIp.isNotEmpty() && authToken.isNotEmpty()) {
-            val url = "http://$wifiIp:8090/?token=$authToken"
+        if (showConnection) {
             Text(
-                text = "Open this URL on another device:",
+                text = "Open this URL in your browser:",
                 style = MaterialTheme.typography.bodyMedium
             )
             Spacer(modifier = Modifier.height(8.dp))
-            SelectionContainer {
-                Text(
-                    text = url,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.primary
-                )
-            }
-            Spacer(modifier = Modifier.height(16.dp))
-            QrCode(url = url)
+            Text(
+                text = url,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.clickable {
+                    context.startActivity(
+                        Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
+                }
+            )
         } else {
             Spacer(modifier = Modifier.height(12.dp))
             Text(
@@ -297,6 +303,12 @@ fun MainScreen(
         if (crawlerNote.isNotEmpty()) {
             Spacer(modifier = Modifier.height(8.dp))
             Text(text = crawlerNote, style = MaterialTheme.typography.bodySmall)
+        }
+
+        // QR code pinned to the bottom of the screen
+        Spacer(modifier = Modifier.weight(1f))
+        if (showConnection) {
+            QrCode(url = url)
         }
     }
 }

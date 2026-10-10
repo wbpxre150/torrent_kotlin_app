@@ -24,8 +24,9 @@ enum class ProcessState { STOPPED, STARTING, RUNNING, STOPPING }
  * Supervises one native child process: launch, drain stdio, restart with backoff,
  * clean shutdown.
  *
- * Instances are NOT thread-safe for start/stop from arbitrary threads — call from a
- * single dispatcher (e.g. the service's coroutine scope). Status reads via [status]
+ * start/stop are serialized internally and may be called from any thread, but
+ * stop()/restart() block for up to the SIGTERM grace period — never call them
+ * from the main thread or an HTTP request handler. Status reads via [status]
  * are safe from any thread.
  */
 class ProcessSupervisor(
@@ -74,35 +75,50 @@ class ProcessSupervisor(
     // Ring buffer for in-memory log tail
     private val ringBuffer = ArrayDeque<String>(pipelineMaxLines)
 
+    // Guarded by [lifecycleLock]; serializes start()/stop() callers from
+    // arbitrary threads (HTTP handlers, executors) against the run loop.
+    private val lifecycleLock = Any()
+    @Volatile
     private var child: Process? = null
     // Offset used by tailLogFileIntoRingBuffer and drained by drainLogTailOnce
     private var tailLastPos = 0L
 
     /** Launch the child process. Idempotent: if already running, does nothing. */
-    fun start() {
+    fun start() = synchronized(lifecycleLock) {
         val current = _status.value
         if (current.state == ProcessState.RUNNING || current.state == ProcessState.STARTING) {
             Log.d(TAG, "[$label] already ${current.state}, ignoring start()")
-            return
+            return@synchronized
         }
         stopping = false
         scope?.cancel()
-        scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineName("supervisor-$label"))
-        scope!!.launch { runLoop() }
+        val newScope = CoroutineScope(
+            Dispatchers.IO + SupervisorJob() + CoroutineName("supervisor-$label") +
+                CoroutineExceptionHandler { _, e ->
+                    // Never let a supervisor failure take down the app process.
+                    Log.e(TAG, "[$label] supervisor loop failed", e)
+                })
+        scope = newScope
+        _status.value = _status.value.copy(state = ProcessState.STARTING, pid = null)
+        newScope.launch { runLoop() }
     }
 
-    /** Graceful stop: SIGTERM → wait [graceMs] → SIGKILL. Idempotent. */
-    fun stop() {
+    /**
+     * Graceful stop: SIGTERM → wait [graceMs] → SIGKILL. Idempotent. Blocks for
+     * up to [graceMs] + 2 s, so never call it from the main thread or an HTTP
+     * request handler.
+     */
+    fun stop() = synchronized(lifecycleLock) {
         Log.d(TAG, "[$label] stop() requested")
         stopping = true
         _status.value = _status.value.copy(state = ProcessState.STOPPING)
         scope?.cancel()
-        killChild()
         scope = null
+        killChild()
         _status.value = _status.value.copy(state = ProcessState.STOPPED, pid = null, startTimeMs = null)
     }
 
-    /** kill + delayed restart. Callable from any thread. */
+    /** kill + delayed restart. Blocking (see [stop]); callable from any non-main thread. */
     fun restart() {
         Log.d(TAG, "[$label] restart() requested")
         stop()
@@ -116,7 +132,10 @@ class ProcessSupervisor(
         var backoffIndex = 0
         var restarts = _status.value.restartCount
 
-        while (!stopping) {
+        // Loop on this coroutine's own cancellation, not only the shared
+        // [stopping] flag: after stop() + start() the flag is false again, and
+        // a stale loop must not resurrect and launch a second child.
+        while (currentCoroutineContext().isActive && !stopping) {
             _status.value = _status.value.copy(state = ProcessState.STARTING, pid = null)
 
             val proc = launchChild()
@@ -124,12 +143,22 @@ class ProcessSupervisor(
                 // launchChild logs the error; back off and retry
                 val delayMs = backoffMs(backoffIndex)
                 Log.w(TAG, "[$label] launch failed, retrying in ${delayMs}ms")
-                delayFor(delayMs)
+                delay(delayMs)
                 backoffIndex = if (backoffIndex < BACKOFF_MS.size) backoffIndex + 1 else backoffIndex
                 continue
             }
 
-            child = proc
+            // Re-check under the lock: a stop() that raced the launch must still
+            // see (and kill) this child.
+            val active = currentCoroutineContext().isActive
+            val publish = synchronized(lifecycleLock) {
+                if (!active || stopping) false
+                else { child = proc; true }
+            }
+            if (!publish) {
+                proc.destroyForcibly()
+                break
+            }
             val now = System.currentTimeMillis()
             restarts++
             _status.value = _status.value.copy(
@@ -141,11 +170,13 @@ class ProcessSupervisor(
             Log.i(TAG, "[$label] started (restart #$restarts)")
 
             // Drain stdout/stderr concurrently with waitFor
-            val exited = drainAndWait(proc)
+            val exited = try {
+                drainAndWait(proc)
+            } finally {
+                synchronized(lifecycleLock) { if (child === proc) child = null }
+            }
 
-            child = null
-
-            if (stopping) break
+            if (stopping || !currentCoroutineContext().isActive) break
 
             // Process exited. Reset backoff only on a clean exit (exitCode == 0);
             // a crash keeps the index climbing so a crash loop escalates toward
@@ -161,7 +192,7 @@ class ProcessSupervisor(
 
             val delayMs = backoffMs(backoffIndex)
             Log.i(TAG, "[$label] restarting in ${delayMs}ms")
-            delayFor(delayMs)
+            delay(delayMs)
             backoffIndex = if (backoffIndex < BACKOFF_MS.size) backoffIndex + 1 else backoffIndex
         }
     }
@@ -235,6 +266,9 @@ class ProcessSupervisor(
                     pushToRingBuffer(line)
                     line = reader.readLine()
                 }
+            } catch (_: java.io.IOException) {
+                // Expected on stop(): Process.destroy() closes the child's stdout
+                // under us ("read interrupted by close() on another thread").
             } finally {
                 try { writer.close() } catch (_: Exception) {}
                 try { reader.close() } catch (_: Exception) {}
@@ -302,14 +336,6 @@ class ProcessSupervisor(
 
     private fun backoffMs(index: Int): Long {
         return if (index < BACKOFF_MS.size) BACKOFF_MS[index] else BACKOFF_CAP_MS
-    }
-
-    private suspend fun delayFor(ms: Long) {
-        try {
-            delay(ms)
-        } catch (_: CancellationException) {
-            // Expected during stop()
-        }
     }
     private fun pidOf(proc: Process): Int? = NativeProcess.pidOf(proc)
     /**
