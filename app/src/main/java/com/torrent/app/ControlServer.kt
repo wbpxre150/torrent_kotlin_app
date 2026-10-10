@@ -30,6 +30,12 @@ class ControlServer(
     private val startDaemon: (String) -> Boolean,
     private val applyTransmission: (com.torrent.app.config.TransmissionSettings, Boolean) -> com.torrent.app.config.ApplyResult,
     private val applyFtp: (com.torrent.app.config.FtpSettings) -> com.torrent.app.config.ApplyResult,
+    // Crawler (plan 10 step 2): wired by DaemonService; the UI arrives in step 3.
+    private val applyCrawler: (com.torrent.app.config.CrawlerSettings) -> com.torrent.app.config.ApplyResult =
+        { com.torrent.app.config.ApplyResult(false, "crawler apply is not wired", false) },
+    private val crawlerApplyStatus: () -> CrawlerApplyStatus = { CrawlerApplyStatus() },
+    private val crawlerPausedNoWifi: () -> Boolean = { false },
+    private val crawlerHttpPort: () -> Int = { 8081 },
     private val port: Int = 8090,
 ) {
     @Volatile private var server: EmbeddedServer<*, *>? = null

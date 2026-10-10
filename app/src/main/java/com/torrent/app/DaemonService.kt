@@ -35,6 +35,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadFactory
 import org.json.JSONObject
+import com.torrent.app.config.CrawlerGate
 
 sealed class ServiceState {
     data object Starting : ServiceState()
@@ -72,6 +73,12 @@ class DaemonService : Service() {
     @Volatile var lastApplyRolledBack: Boolean = false
     private var rollbackJob: Job? = null
 
+    // Crawler apply job (plan 10 step 2): the job runs on the crawler-control
+    // executor; these are its observable status + the wifi-pause flag.
+    @Volatile var crawlerApplyStatus = CrawlerApplyStatus()
+    @Volatile var crawlerPausedNoWifi = false
+    private var crawlerObservingJob: Job? = null
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
@@ -101,6 +108,10 @@ class DaemonService : Service() {
             startDaemon = ::startDaemon,
             applyTransmission = ::applyTransmissionSettings,
             applyFtp = ::applyFtpSettings,
+            applyCrawler = ::applyCrawlerSettings,
+            crawlerApplyStatus = { crawlerApplyStatus },
+            crawlerPausedNoWifi = { crawlerPausedNoWifi },
+            crawlerHttpPort = ::crawlerHttpPort,
 )
         wifiGateMonitor = WifiGateMonitor(this)
     }
@@ -153,6 +164,7 @@ class DaemonService : Service() {
         safIpcServer.start()
         wifiGateMonitor.start()
         observeWifiForFtp()
+        observeWifiForCrawler()
         startSupervisors()
         return START_STICKY
     }
@@ -161,6 +173,7 @@ class DaemonService : Service() {
         rollbackJob?.cancel()
         controlServer.stop()
         ftpObservingJob?.cancel()
+        crawlerObservingJob?.cancel()
         ftpControlExecutor.shutdownNow()
         // Stop FTP before the transmission supervisors and the gateway shutdown
         // (plan 07 §2.6); no IPC locks are held here.
@@ -326,6 +339,159 @@ class DaemonService : Service() {
             false)
     }
 
+    // ── Crawler (plan 10 step 2) ───────────────────────────────────────────
+
+    /**
+     * Validates and queues the crawler settings-apply job, returning
+     * immediately as "started". The job (save → LKG snapshots → stop with the
+     * 60 s grace → write config.ini → start if the wifi gate allows → watch
+     * for a crash loop) runs on the crawler-control executor, serialized with
+     * every other crawler stop/start.
+     */
+    fun applyCrawlerSettings(s: com.torrent.app.config.CrawlerSettings): com.torrent.app.config.ApplyResult {
+        val errors = com.torrent.app.config.ConfigValidator.validateCrawler(s)
+        if (errors.isNotEmpty()) {
+            return com.torrent.app.config.ApplyResult(false, errors.joinToString("; "), false)
+        }
+        try {
+            crawlerControlExecutor.execute {
+                try {
+                    runCrawlerApply(s)
+                } catch (e: Exception) {
+                    android.util.Log.e("DaemonService", "crawler apply failed", e)
+                    setCrawlerApplyStatus(CrawlerApplyPhase.FAILED, "apply failed: ${e.message}")
+                }
+            }
+        } catch (e: RejectedExecutionException) {
+            return com.torrent.app.config.ApplyResult(false, "service is shutting down", false)
+        }
+        setCrawlerApplyStatus(CrawlerApplyPhase.STOPPING, "apply started")
+        return com.torrent.app.config.ApplyResult(true, "apply started", false)
+    }
+
+    /** The port the crawler's HTTP UI listens on (the proxy port when lanDirect). */
+    fun crawlerHttpPort(): Int {
+        val c = configStore.load().crawler
+        return if (c.lanDirect) c.proxyPort else c.crawlerHttpPort
+    }
+
+    /**
+     * The apply job body; runs on the crawler-control executor (see
+     * [applyCrawlerSettings]). The supervisor is recreated with the
+     * settings-derived args, so an arg change (e.g. `--dont-check-database`)
+     * is always picked up.
+     */
+    private fun runCrawlerApply(s: com.torrent.app.config.CrawlerSettings) {
+        val previous = configStore.load().crawler
+        val crawlerConfig = CrawlerConfig(this)
+        crawlerConfig.ensureLayout()
+
+        // Save the new settings, snapshotting the previous ones (settings and
+        // config.ini) for the rollback below.
+        configStore.snapshotCrawlerLastKnownGood(previous)
+        configStore.saveCrawler(s)
+        crawlerConfig.snapshotLastKnownGood()
+
+        setCrawlerApplyStatus(CrawlerApplyPhase.STOPPING, "stopping crawler (60 s grace)")
+        stopCrawlerSupervisors()
+
+        setCrawlerApplyStatus(CrawlerApplyPhase.WRITING, "writing config.ini")
+        crawlerConfig.applySettings(s)
+
+        val wifiUp = wifiGateMonitor.state.value.wifi
+        if (!CrawlerGate.shouldRun(s.enabled, s.wifiOnly, wifiUp)) {
+            crawlerPausedNoWifi = s.enabled && s.wifiOnly && !wifiUp
+            setCrawlerApplyStatus(
+                CrawlerApplyPhase.OK,
+                if (!s.enabled) "applied; crawler disabled" else "applied; paused (no wifi)")
+            return
+        }
+
+        setCrawlerApplyStatus(CrawlerApplyPhase.STARTING, "starting crawler")
+        val crawler = buildCrawlerSupervisor(CrawlerGate.crawlerArgs(s), crawlerConfig)
+        crawler.start()
+        supervisors.add(crawler)
+
+        // Watch for a crash loop (RollbackPolicy) for ~30 s after the restart.
+        setCrawlerApplyStatus(CrawlerApplyPhase.WATCHING, "watching for crash-loop (30 s)")
+        val statusAtApply = crawler.status.value
+        val deadline = System.currentTimeMillis() + CRAWLER_APPLY_WATCH_MS
+        while (System.currentTimeMillis() < deadline) {
+            Thread.sleep(CRAWLER_APPLY_POLL_MS)
+            val cur = crawler.status.value
+            if (cur.state == ProcessState.RUNNING) {
+                setCrawlerApplyStatus(CrawlerApplyPhase.OK, "applied; crawler running")
+                return
+            }
+            if (RollbackPolicy.shouldRollback(statusAtApply, cur, 3)) {
+                rollBackCrawlerApply(crawlerConfig, previous)
+                return
+            }
+        }
+        val finalState = crawler.status.value.state
+        setCrawlerApplyStatus(
+            CrawlerApplyPhase.OK,
+            if (finalState == ProcessState.RUNNING) "applied; crawler running" else "applied; crawler starting")
+    }
+
+    /**
+     * Restores the last-known-good state after a post-apply crash loop: the
+     * previous settings, the LKG config.ini, and a supervisor recreated with
+     * the previous args. Runs on the crawler-control executor.
+     */
+    private fun rollBackCrawlerApply(
+        crawlerConfig: CrawlerConfig,
+        previous: com.torrent.app.config.CrawlerSettings,
+    ) {
+        val tail = supervisors.firstOrNull { it.status.value.label == CRAWLER_LABEL }
+            ?.status?.value?.lastLogLines ?: emptyList()
+        android.util.Log.w("DaemonService", "crawler crash-loop after apply; rolling back")
+        stopCrawlerSupervisors()
+        configStore.saveCrawler(previous)
+        crawlerConfig.restoreLastKnownGood()
+        val restored = buildCrawlerSupervisor(CrawlerGate.crawlerArgs(previous), crawlerConfig)
+        restored.start()
+        supervisors.add(restored)
+        setCrawlerApplyStatus(
+            CrawlerApplyPhase.ROLLED_BACK,
+            "crawler crash-looped after apply; rolled back to last known good settings",
+            tail)
+    }
+
+    private fun setCrawlerApplyStatus(
+        phase: CrawlerApplyPhase,
+        message: String,
+        logTail: List<String> = emptyList(),
+    ) {
+        crawlerApplyStatus = CrawlerApplyStatus(phase, message, logTail)
+    }
+
+    /**
+     * Drives crawler start/stop from the wifi gate (plan 10 §5), the same way
+     * FTP is gated: wifi down + wifiOnly → stop and mark paused; wifi back +
+     * enabled → start. Both run on the crawler-control executor.
+     */
+    private fun observeWifiForCrawler() {
+        crawlerObservingJob?.cancel()
+        crawlerObservingJob = MainScope().launch {
+            wifiGateMonitor.state.collect { ws ->
+                val crawler = configStore.load().crawler
+                if (CrawlerGate.shouldRun(crawler.enabled, crawler.wifiOnly, ws.wifi)) {
+                    crawlerPausedNoWifi = false
+                    runOnCrawlerControl { startCrawlerSupervisor() }
+                } else {
+                    crawlerPausedNoWifi = crawler.enabled && crawler.wifiOnly && !ws.wifi
+                    runOnCrawlerControl { stopCrawlerSupervisors() }
+                }
+            }
+        }
+    }
+
+    private fun runOnCrawlerControl(block: () -> Unit) {
+        try { crawlerControlExecutor.execute { block() } }
+        catch (e: RejectedExecutionException) { /* service shutting down */ }
+    }
+
     fun restartDaemon(label: String): Boolean {
         val sup = supervisors.firstOrNull { it.status.value.label == label } ?: return false
         sup.restart(); return true
@@ -337,9 +503,17 @@ class DaemonService : Service() {
     fun startDaemon(label: String): Boolean {
         val sup = supervisors.firstOrNull { it.status.value.label == label }
         if (sup != null) { sup.start(); return true }
-        // Manual start from the dashboard: lazily register+start the crawler even
-        // when it is disabled in config (auto-start happens only when enabled).
-        if (label == CRAWLER_LABEL) { startCrawlerSupervisor(); return true }
+        // Manual start from the dashboard: lazily register+start the crawler
+        // (auto-start happens only when enabled), but the wifi gate always
+        // applies — a manual start while paused is refused (plan 10 §5).
+        if (label == CRAWLER_LABEL) {
+            val c = configStore.load().crawler
+            if (CrawlerGate.shouldRun(c.enabled, c.wifiOnly, wifiGateMonitor.state.value.wifi)) {
+                startCrawlerSupervisor()
+                return true
+            }
+            return false
+        }
         return false
     }
 
@@ -468,8 +642,13 @@ class DaemonService : Service() {
         transmissionConfig = TransmissionConfig(this, configStore)
         if (configStore.load().wizardCompleted) startTransmissionSupervisor()
         // The crawler does not need the wizard/SAF: start it whenever it is
-        // enabled in config (plan 09 §5), independent of transmission.
-        if (configStore.load().crawler.enabled) startCrawlerSupervisor()
+        // enabled in config (plan 09 §5), independent of transmission. The
+        // initial start also respects the wifi gate (plan 10 §5); the gate
+        // collector starts it as soon as wifi is up.
+        val crawler = configStore.load().crawler
+        if (CrawlerGate.shouldRun(crawler.enabled, crawler.wifiOnly, wifiGateMonitor.state.value.wifi)) {
+            startCrawlerSupervisor()
+        }
     }
 
     private fun startTransmissionSupervisor() {
@@ -506,21 +685,27 @@ class DaemonService : Service() {
             try {
                 val crawlerConfig = CrawlerConfig(this)
                 crawlerConfig.ensureLayout()
-                val logDir = File(filesDir, "logs")
-                val crawler = ProcessSupervisor(
-                    label = CRAWLER_LABEL, binaryName = "libdhtcrawler.so",
-                    args = emptyList(),
-                    nativeLibraryDir = applicationInfo.nativeLibraryDir,
-                    workDir = crawlerConfig.workDir, logDir = logDir,
-                    selfLogging = false,
-                    graceMs = CRAWLER_GRACE_MS,
-                    extraEnv = mapOf("TMPDIR" to File(filesDir, "tmp").apply { mkdirs() }.absolutePath))
+                val crawler =
+                    buildCrawlerSupervisor(CrawlerGate.crawlerArgs(configStore.load().crawler), crawlerConfig)
                 crawler.start()
                 supervisors.add(crawler)
             } catch (e: Exception) {
                 android.util.Log.e("DaemonService", "failed to start crawler supervisor", e)
             }
         }
+    }
+
+    /** Builds (does not start) the dht_crawler supervisor for [args]. */
+    private fun buildCrawlerSupervisor(args: List<String>, crawlerConfig: CrawlerConfig): ProcessSupervisor {
+        val logDir = File(filesDir, "logs")
+        return ProcessSupervisor(
+            label = CRAWLER_LABEL, binaryName = "libdhtcrawler.so",
+            args = args,
+            nativeLibraryDir = applicationInfo.nativeLibraryDir,
+            workDir = crawlerConfig.workDir, logDir = logDir,
+            selfLogging = false,
+            graceMs = CRAWLER_GRACE_MS,
+            extraEnv = mapOf("TMPDIR" to File(filesDir, "tmp").apply { mkdirs() }.absolutePath))
     }
 
     private fun stopSupervisors() {
@@ -531,20 +716,27 @@ class DaemonService : Service() {
         // The crawler stop is queued first so it runs in parallel with transmission's.
         // It looks the crawler up when it runs (not now), so a start that is still
         // queued on the executor is registered first and then stopped here too.
-        crawlerControlExecutor.execute {
-            val crawlers = supervisors.filter { it.status.value.label == CRAWLER_LABEL }
-            supervisors.removeAll(crawlers.toSet())
-            for (c in crawlers) {
-                try {
-                    c.stop()
-                } catch (e: Exception) {
-                    android.util.Log.w("DaemonService", "crawler stop failed: ${e.message}")
-                }
-            }
-        }
+        crawlerControlExecutor.execute { stopCrawlerSupervisors() }
         val others = supervisors.filter { it.status.value.label != CRAWLER_LABEL }
         for (s in others) s.stop()
         supervisors.removeAll(others.toSet())
+    }
+
+    /**
+     * Stops and unregisters every crawler supervisor. Must run on the
+     * crawler-control executor: a pending stop from a previous service
+     * instance is then serialized ahead of any new launch.
+     */
+    private fun stopCrawlerSupervisors() {
+        val crawlers = supervisors.filter { it.status.value.label == CRAWLER_LABEL }
+        supervisors.removeAll(crawlers.toSet())
+        for (c in crawlers) {
+            try {
+                c.stop()
+            } catch (e: Exception) {
+                android.util.Log.w("DaemonService", "crawler stop failed: ${e.message}")
+            }
+        }
     }
 
     companion object {
@@ -552,6 +744,11 @@ class DaemonService : Service() {
         const val NOTIFICATION_ID = 1
         const val CRAWLER_LABEL = "dht_crawler"
         const val CRAWLER_GRACE_MS = 60_000L
+
+        // The apply job watches the restarted crawler for a crash loop for
+        // this long (plan 10 §1), polling at this interval.
+        private const val CRAWLER_APPLY_WATCH_MS = 30_000L
+        private const val CRAWLER_APPLY_POLL_MS = 2_000L
 
         // The dht_crawler supervisor gets a long (60 s) SIGTERM grace (plan 09 §5),
         // so its stop/start are serialized on one process-wide single-thread executor
