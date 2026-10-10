@@ -38,6 +38,14 @@ class WizardSubmitTest {
         assertTrue(WizardSubmit.submit(validForm().copy(downloadSubpath = "")).ok)
     }
 
+    @Test fun crawlerEnabledDefaultsToOff() {
+        assertFalse(WizardSubmit.submit(validForm()).crawlerEnabled)
+    }
+
+    @Test fun crawlerEnabledTruePassedThrough() {
+        assertTrue(WizardSubmit.submit(validForm().copy(crawlerEnabled = true)).crawlerEnabled)
+    }
+
     @Test fun zeroPortFailsValidation() {
         val o = WizardSubmit.submit(validForm().copy(ftpPort = 0))
         assertFalse(o.ok)

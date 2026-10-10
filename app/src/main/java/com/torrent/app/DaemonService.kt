@@ -174,6 +174,8 @@ class DaemonService : Service() {
             internalFreeSpace = ::internalFreeSpace,
             crawlerMaintenanceStart = ::startCrawlerMaintenance,
             crawlerMaintenanceStatus = { crawlerMaintenance.status },
+            crawlerMigrationStart = { crawlerMigration.action(it) },
+            crawlerMigrationStatus = { crawlerMigration.status },
 )
         wifiGateMonitor = WifiGateMonitor(this)
     }
@@ -211,6 +213,7 @@ class DaemonService : Service() {
         fun completeWizard() = this@DaemonService.completeWizard()
         fun lastApplyRolledBack(): Boolean = this@DaemonService.lastApplyRolledBack
         fun setCrawlerImportTree(uri: Uri): String = this@DaemonService.setCrawlerImportTree(uri)
+        fun setCrawlerEnabled(enabled: Boolean) = this@DaemonService.setCrawlerEnabled(enabled)
     }
 
     override fun onBind(intent: Intent?): IBinder = LocalBinder()
@@ -845,6 +848,16 @@ class DaemonService : Service() {
         }
         crawlerTreeGrant.grant(uri)
         return crawlerMigration.setTree(uri)
+    }
+
+    /**
+     * Persists the first-run wizard's crawler toggle (plan 10 step 7): flips
+     * `crawler.enabled` without a full apply job and starts the crawler when
+     * the wifi gate allows.
+     */
+    fun setCrawlerEnabled(enabled: Boolean) {
+        configStore.saveCrawler(configStore.load().crawler.copy(enabled = enabled))
+        if (enabled) startCrawlerIfEnabled()
     }
 
     /** True when the crawler's /stats answers on loopback (~2 s timeout). */

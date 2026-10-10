@@ -11,6 +11,7 @@ object WizardSubmit {
         val ftpPort: Int,
         val ftpWifiOnly: Boolean,
         val ftpExposedRoot: String,
+        val crawlerEnabled: Boolean = false,
     )
 
     data class Outcome(
@@ -18,6 +19,7 @@ object WizardSubmit {
         val errors: List<String>,
         val transmission: TransmissionSettings?,
         val ftp: FtpSettings?,
+        val crawlerEnabled: Boolean,
     )
 
     fun submit(f: Form): Outcome {
@@ -29,7 +31,7 @@ object WizardSubmit {
         val ftp = FtpSettings(f.ftpUsername, f.ftpPassword, f.ftpPort, f.ftpWifiOnly, f.ftpExposedRoot)
         val errors = ConfigValidator.validateTransmission(tx).errors +
                      ConfigValidator.validateFtp(ftp).errors
-        return if (errors.isEmpty()) Outcome(true, emptyList(), tx, ftp)
-               else Outcome(false, errors, null, null)
+        return if (errors.isEmpty()) Outcome(true, emptyList(), tx, ftp, f.crawlerEnabled)
+               else Outcome(false, errors, null, null, false)
     }
 }

@@ -318,6 +318,7 @@ fun WizardScreen(
     var ftpPort by remember { mutableStateOf((cfg?.ftp?.port ?: 2121).toString()) }
     var ftpWifiOnly by remember { mutableStateOf(cfg?.ftp?.wifiOnly ?: true) }
     var ftpRoot by remember { mutableStateOf(cfg?.ftp?.exposedRoot ?: "") }
+    var crawlerEnabled by remember { mutableStateOf(false) }
     var errors by remember { mutableStateOf<List<String>>(emptyList()) }
 
     Column(
@@ -346,6 +347,12 @@ fun WizardScreen(
             Spacer(Modifier.width(8.dp)); Text("WiFi only")
         }
         OutlinedTextField(ftpRoot, { ftpRoot = it }, label = { Text("Exposed root (blank = USB root)") })
+
+        Text("4. DHT crawler (optional)", style = MaterialTheme.typography.titleMedium)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Switch(checked = crawlerEnabled, onCheckedChange = { crawlerEnabled = it })
+            Spacer(Modifier.width(8.dp)); Text("Enable DHT crawler (default off)")
+        }
         if (errors.isNotEmpty()) {
             Column { errors.forEach { Text(it, color = MaterialTheme.colorScheme.error) } }
         }
@@ -356,12 +363,16 @@ fun WizardScreen(
                 val form = WizardSubmit.Form(
                     txUser, txPass, peerPort.toIntOrNull() ?: 0, dlSubpath,
                     ftpUser, ftpPass, ftpPort.toIntOrNull() ?: 0, ftpWifiOnly, ftpRoot,
+                    crawlerEnabled,
                 )
                 val outcome = WizardSubmit.submit(form)
                 if (!outcome.ok) { errors = outcome.errors; return@Button }
                 val ftpR = svc.applyFtpSettings(outcome.ftp!!)
                 val txR = svc.applyTransmissionSettings(outcome.transmission!!, liveOnly = false)
-                if (ftpR.ok && txR.ok) { svc.completeWizard(); onFinished() }
+                if (ftpR.ok && txR.ok) {
+                    if (outcome.crawlerEnabled) svc.setCrawlerEnabled(true)
+                    svc.completeWizard(); onFinished()
+                }
                 else { errors = listOf(ftpR.message, txR.message).filter { it.isNotEmpty() } }
             },
             enabled = boundService != null && safStatus?.granted == true,

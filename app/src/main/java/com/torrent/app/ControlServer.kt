@@ -15,6 +15,8 @@ import java.util.concurrent.TimeUnit
 import com.torrent.app.config.TransmissionApplyMode
 import com.torrent.app.config.CrawlerKeys
 import com.torrent.app.config.CrawlerSettings
+import com.torrent.app.migration.MigrationPhase
+import com.torrent.app.migration.MigrationStatus
 
 class ControlServer(
     private val tokenManager: TokenManager,
@@ -45,6 +47,10 @@ class ControlServer(
     // the GET route polls its status (incl. output lines since an offset).
     private val crawlerMaintenanceStart: (String) -> String = { "maintenance is not wired" },
     private val crawlerMaintenanceStatus: () -> MaintenanceStatus = { MaintenanceStatus() },
+    // Migration (plan 10 step 7): the POST route queues an action by name and
+    // the GET route polls the coordinator's status (progress, verify log, diff).
+    private val crawlerMigrationStart: (String) -> String = { "migration is not wired" },
+    private val crawlerMigrationStatus: () -> MigrationStatus = { MigrationStatus() },
     private val port: Int = 8090,
 ) {
     @Volatile private var server: EmbeddedServer<*, *>? = null
@@ -258,6 +264,22 @@ class ControlServer(
                             .append("}")
                         }
                         call.respondText(json, ContentType.Application.Json)
+                    }
+
+                    // Migration (plan 10 step 7): queue a migration action by
+                    // name; the long work runs on the crawler-control executor
+                    // and the page polls /api/crawler/migration for progress.
+                    post("crawler/migration/{action}") {
+                        val action = call.parameters["action"] ?: ""
+                        val msg = crawlerMigrationStart(action)
+                        val ok = !msg.startsWith("refused") && !msg.startsWith("unknown")
+                        val token = parseCookieToken(call.request.headers["Cookie"])
+                            ?: call.request.queryParameters["token"] ?: ""
+                        call.respondRedirect("/settings/crawler?msg=${urlEnc(msg)}&ok=$ok&token=$token")
+                    }
+
+                    get("api/crawler/migration") {
+                        call.respondText(migrationStatusJson(crawlerMigrationStatus()), ContentType.Application.Json)
                     }
                 }
             }
@@ -551,6 +573,8 @@ class ControlServer(
             #maint-btns button{margin:0;padding:.4em .8em}
             #maint-status{font-size:.9em}
             #maint-status.busy{background:#fff3cd;padding:.4em;border-radius:4px}
+            #mig-btns form{display:inline-block;margin:0 .5em .5em 0}
+            #mig-btns button{margin:0;padding:.4em .8em}
             </style></head><body>
             <h1>DHT crawler</h1>$banner
             <form method="post" action="/settings/crawler">
@@ -596,6 +620,7 @@ class ControlServer(
             <div id="apply-status">Apply status: IDLE</div>
             <pre id="apply-log" class="apply-log" style="display:none"></pre>
             $maintenanceSection
+            ${buildMigrationSection()}
             <p><a href="/">Back to dashboard</a></p>
             <script>
             (function () {
@@ -646,6 +671,42 @@ class ControlServer(
                 }).catch(function () {});
               }
               setInterval(pollMaint, 1500); pollMaint();
+              var migPhase = null;
+              var migLinesSeen = 0;
+              var MIG_ACTIVE = ['SCANNING','COPYING','VERIFYING','SWAPPING'];
+              function pollMig() {
+                fetch('/api/crawler/migration').then(function (r) { return r.json(); }).then(function (st) {
+                  var status = document.getElementById('mig-status');
+                  if (status) status.textContent = 'Phase: ' + st.phase + (st.message ? ' \u2014 ' + st.message : '');
+                  var active = MIG_ACTIVE.indexOf(st.phase) >= 0;
+                  var prog = document.getElementById('mig-prog');
+                  if (st.totalBytes > 0 && (active || st.copiedBytes > 0)) {
+                    prog.style.display = '';
+                    document.getElementById('mig-prog-bar').style.width =
+                        Math.min(100, Math.round(st.copiedBytes * 100 / st.totalBytes)) + '%';
+                    var rate = st.copyBytesPerSec > 0 ? ' (' + (st.copyBytesPerSec / 1048576).toFixed(1) + ' MB/s)' : '';
+                    document.getElementById('mig-prog-text').textContent =
+                        (st.currentFile ? st.currentFile + ' \u2014 ' : '') +
+                        Math.round(st.copiedBytes / 1048576) + ' / ' + Math.round(st.totalBytes / 1048576) + ' MB' + rate;
+                  }
+                  var log = document.getElementById('mig-log');
+                  var lines = st.verifyLines || [];
+                  if (lines.length > migLinesSeen) {
+                    log.textContent += (log.textContent ? '\n' : '') + lines.slice(migLinesSeen).join('\n');
+                    log.scrollTop = log.scrollHeight;
+                  } else if (lines.length < migLinesSeen) {
+                    migLinesSeen = 0;
+                    log.textContent = '';
+                  }
+                  migLinesSeen = lines.length;
+                  log.style.display = log.textContent ? '' : 'none';
+                  if (migPhase !== null && MIG_ACTIVE.indexOf(migPhase) >= 0 && !active) {
+                    location.reload();  // re-render the buttons for the finished phase
+                  }
+                  migPhase = st.phase;
+                }).catch(function () {});
+              }
+              setInterval(pollMig, 2000); pollMig();
             })();
             </script>
             </body></html>
@@ -670,6 +731,138 @@ class ControlServer(
               <div id="maint-btns">$buttons</div>
               <div id="maint-status" class="meta">Maintenance: idle</div>
               <pre id="maint-log" class="apply-log" style="display:none"></pre>
+            </fieldset>
+        """.trimIndent()
+    }
+
+    /** One migration action button (plan 10 step 7); [confirm] gates the submit. */
+    private fun migAction(action: String, label: String, confirm: String): String =
+        """
+            <form method="post" action="/crawler/migration/$action"
+                  onsubmit="return confirm('${confirm}')">
+            <button type="submit">$label</button></form>
+        """.trimIndent()
+
+    /** The migration fieldset on the crawler panel (plan 10 step 7). */
+    private fun buildMigrationSection(): String {
+        val st = crawlerMigrationStatus()
+        val phase = st.phase
+        val treeLine = if (st.treeUri == null) {
+            "<span class=\"meta\">No folder granted — open the <strong>Torrent App</strong> and tap " +
+                "<strong>Choose Termux dht_crawler folder</strong> (the web page cannot open a picker).</span>"
+        } else {
+            buildString {
+                append("<span class=\"meta\">Tree: <code>").append(esc(st.treeUri))
+                append("</code> (authority: ").append(esc(st.treeAuthority ?: "?")).append(")</span>")
+                if (st.nonTermuxWarning) {
+                    append("<br><span class=\"warn\">Not the Termux provider — make sure the picked folder " +
+                        "is the dht_crawler directory containing data/.</span>")
+                }
+            }
+        }
+        val fileTable = if (st.files.isEmpty()) "" else buildString {
+            append("<table><tr><th>File</th><th>Size</th><th>Modified</th><th>Classification</th></tr>")
+            for (f in st.files) {
+                append("<tr><td>").append(esc(f.name)).append("</td><td>").append(formatBytes(f.size))
+                    .append("</td><td>").append(formatMtime(f.mtime)).append("</td><td>")
+                    .append(f.role.name).append("</td></tr>")
+            }
+            append("</table>")
+        }
+        val totals = if (st.files.isEmpty()) "" else buildString {
+            append("<p class=\"meta\">Total to import: <strong>").append(formatBytes(st.totalBytes))
+                .append("</strong> &nbsp; Free internal: <strong>").append(formatBytes(st.freeSpaceBytes))
+                .append("</strong>")
+            if (!st.spaceOk) append(" <span class=\"warn\">not enough free space (need total + 10%)</span>")
+            append("</p>")
+        }
+        val verifyBox = if (st.verifyExitCode == null) "" else buildString {
+            append("<p class=\"meta\">--check-database exit: <strong>").append(st.verifyExitCode).append("</strong>")
+            st.torrentCount?.let { append(" &nbsp; Torrents: <strong>").append(it).append("</strong>") }
+            append("</p>")
+            if (st.torrentCount != null) {
+                append("<p class=\"meta\">Compare in Termux: <code>sqlite3 data/torrents.db " +
+                    "'SELECT COUNT(*) FROM torrents'</code></p>")
+            }
+        }
+        val diffBox = if (st.configDiff.isEmpty()) "" else buildString {
+            append("<p class=\"meta\">Tuning keys in Termux's config.ini that differ from the app's:</p>")
+            append("<table><tr><th>Key</th><th>Termux</th><th>App</th></tr>")
+            for (d in st.configDiff) {
+                append("<tr><td><code>").append(esc(d.key)).append("</code></td><td>")
+                    .append(esc(d.termuxValue)).append("</td><td>").append(esc(d.currentValue))
+                    .append("</td></tr>")
+            }
+            append("</table>")
+        }
+        val buttons = buildList {
+            if (st.treeUri != null && !phase.isActive && phase != MigrationPhase.CONFIRMED)
+                add(migAction("scan", "Scan", "Scan the Termux dht_crawler folder?"))
+            if (phase == MigrationPhase.SCANNED && st.spaceOk)
+                add(migAction("copy", "Copy", "Copy the files? The app crawler is stopped while it runs."))
+            if (phase == MigrationPhase.COPYING)
+                add(migAction("cancel", "Cancel copy", "Cancel the copy? data.import/ is deleted."))
+            if (phase == MigrationPhase.COPIED)
+                add(migAction("verify", "Verify", "Run --check-database on the imported data?"))
+            if (phase == MigrationPhase.COPIED || phase == MigrationPhase.VERIFIED)
+                add(migAction("swap", "Swap", "Swap in the imported data? The app crawler is stopped and the " +
+                    "old data/ is kept as data.old/ until you confirm."))
+            if (phase == MigrationPhase.SWAPPED && st.configDiff.isNotEmpty())
+                add(migAction("adopt-config", "Adopt tuning keys",
+                    "Adopt ${st.configDiff.size} tuning keys from Termux? The normal apply flow runs " +
+                        "(the crawler is stopped and restarted)."))
+            if (phase == MigrationPhase.SWAPPED)
+                add(migAction("start", "Start crawler", "Start the crawler on the imported data?"))
+            if (phase == MigrationPhase.SWAPPED || phase == MigrationPhase.STARTED)
+                add(migAction("confirm", "Confirm migration",
+                    "Confirm the migration? data.old/ is deleted and the folder grant is released. The " +
+                        "Termux copy stays in place."))
+            if (phase in setOf(MigrationPhase.COPIED, MigrationPhase.VERIFIED, MigrationPhase.SWAPPED,
+                MigrationPhase.STARTED, MigrationPhase.FAILED, MigrationPhase.CANCELLED))
+                add(migAction("revert", "Revert migration",
+                    "Revert the migration? The app crawler is stopped, the imported data is moved to " +
+                        "data.failed/ and the previous data and config.ini are restored."))
+            if (phase == MigrationPhase.CONFIRMED && st.treeUri != null)
+                add("""
+                    <form method="post" action="/crawler/migration/delete-source"
+                          onsubmit="return confirm('Delete the source files in the Termux tree via SAF? They are gone for good.') &&
+                                     confirm('Second check: really delete the Termux source files now?')">
+                    <button type="submit">Delete source files via SAF</button></form>
+                """.trimIndent())
+        }.joinToString("")
+        val cleanup = if (phase == MigrationPhase.CONFIRMED) {
+            "<p class=\"meta\">Termux side: <code>rm -rf ~/dht_crawler/data</code> (or the whole " +
+                "<code>~/dht_crawler</code>) — the app never deletes Termux files on its own.</p>"
+        } else ""
+        val remind = if (phase in setOf(MigrationPhase.SWAPPED, MigrationPhase.STARTED, MigrationPhase.CONFIRMED)) {
+            "<p class=\"warn\">Do not start the Termux crawler again — ports 8080/6881 clash and the " +
+                "two databases would diverge.</p>"
+        } else ""
+        return """
+            <fieldset><legend>Termux migration (import the existing dht_crawler database)</legend>
+              <p class="meta">1. In Termux: stop the crawler (Ctrl-C, then wait for the final flush). Optionally
+              fold the WAL into the database: <code>sqlite3 data/torrents.db 'PRAGMA wal_checkpoint(TRUNCATE);'</code></p>
+              <p class="meta">2. On the phone: open the Torrent App and tap <strong>Choose Termux dht_crawler
+              folder</strong> — pick the <code>dht_crawler</code> folder (the parent of <code>data/</code>).</p>
+              $treeLine
+              <div id="mig-status" class="meta">Phase: ${phase.name} — ${esc(st.message)}</div>
+              <div id="mig-prog" style="display:none;margin:.5em 0">
+                <div style="background:#eee;border-radius:4px;overflow:hidden">
+                  <div id="mig-prog-bar" style="background:#4a90d9;height:10px;width:0%"></div>
+                </div>
+                <span id="mig-prog-text" class="meta"></span>
+              </div>
+              $fileTable
+              $totals
+              $verifyBox
+              <pre id="mig-log" class="apply-log" style="display:none"></pre>
+              $diffBox
+              <div id="mig-btns">$buttons</div>
+              <div id="mig-live" class="meta">Torrents: ${st.torrentCount ?: "—"}
+                 &nbsp; Crawler: ${if (st.crawlerRunning) "running" else "stopped"}
+                 &nbsp; /stats: ${if (st.statsReachable) "reachable" else "unreachable"}</div>
+              $cleanup
+              $remind
             </fieldset>
         """.trimIndent()
     }
@@ -763,10 +956,55 @@ class ControlServer(
         if (bps <= 0) "—" else "%.1f KB/s".format(bps.toDouble() / 1024)
     private fun esc(s: String): String =
         s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    private fun jsonStr(s: String?): String =
-        if (s == null) "null" else "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+    private fun formatMtime(ms: Long): String =
+        if (ms <= 0) "—" else java.time.Instant.ofEpochMilli(ms)
+            .atZone(java.time.ZoneId.systemDefault()).toLocalDateTime()
+            .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
 
     companion object {
+        private fun jsonStr(s: String?): String =
+            if (s == null) "null" else "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+        /**
+         * The /api/crawler/migration response body (plan 10 step 7): the polled
+         * [MigrationStatus] as JSON for the panel's phase text, progress bar,
+         * scan table, verify log, config diff and action buttons.
+         */
+        internal fun migrationStatusJson(st: MigrationStatus): String = buildString {
+            append("{\"phase\":\"").append(st.phase.name).append("\"")
+            append(",\"message\":").append(jsonStr(st.message))
+            append(",\"treeUri\":").append(jsonStr(st.treeUri))
+            append(",\"treeAuthority\":").append(jsonStr(st.treeAuthority))
+            append(",\"nonTermuxWarning\":").append(st.nonTermuxWarning)
+            append(",\"files\":[")
+            append(st.files.joinToString(",") { f ->
+                "{\"name\":" + jsonStr(f.name) + ",\"size\":" + f.size +
+                    ",\"mtime\":" + f.mtime + ",\"role\":\"" + f.role.name + "\"}"
+            })
+            append("]")
+            append(",\"totalBytes\":").append(st.totalBytes)
+            append(",\"freeSpaceBytes\":").append(st.freeSpaceBytes)
+            append(",\"spaceOk\":").append(st.spaceOk)
+            append(",\"currentFile\":").append(jsonStr(st.currentFile))
+            append(",\"copiedBytes\":").append(st.copiedBytes)
+            append(",\"copyBytesPerSec\":").append(st.copyBytesPerSec)
+            append(",\"verifyExitCode\":").append(st.verifyExitCode?.toString() ?: "null")
+            append(",\"verifyLines\":[").append(st.verifyLines.joinToString(",") { jsonStr(it) }).append("]")
+            append(",\"torrentCount\":").append(st.torrentCount?.toString() ?: "null")
+            append(",\"configDiff\":[")
+            append(st.configDiff.joinToString(",") { d ->
+                "{\"key\":" + jsonStr(d.key) + ",\"termuxValue\":" + jsonStr(d.termuxValue) +
+                    ",\"currentValue\":" + jsonStr(d.currentValue) + "}"
+            })
+            append("]")
+            append(",\"bloomRebuilt\":").append(st.bloomRebuilt)
+            append(",\"crawlerRunning\":").append(st.crawlerRunning)
+            append(",\"statsReachable\":").append(st.statsReachable)
+            append(",\"startedAt\":").append(st.startedAt?.toString() ?: "null")
+            append(",\"finishedAt\":").append(st.finishedAt?.toString() ?: "null")
+            append("}")
+        }
+
         internal fun parseForm(body: String): Map<String, String> {
             if (body.isEmpty()) return emptyMap()
             return body.split("&").mapNotNull { pair ->
