@@ -52,6 +52,10 @@ class DaemonService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private lateinit var controlServer: ControlServer
+    // Authenticated reverse proxy for the crawler search UI (plan 10 §3);
+    // null when lanDirect is set. Mutated from the main thread and the
+    // crawler-control executor only (see syncCrawlerProxy).
+    @Volatile private var crawlerProxy: CrawlerProxyServer? = null
     private lateinit var tokenManager: TokenManager
     // Mutated from the main thread, the crawler-control thread and ControlServer threads.
     private val supervisors = java.util.concurrent.CopyOnWriteArrayList<ProcessSupervisor>()
@@ -163,6 +167,7 @@ class DaemonService : Service() {
 
         _state.value = ServiceState.Running
         controlServer.start()
+        syncCrawlerProxy(configStore.load().crawler)
         safIpcServer.start()
         wifiGateMonitor.start()
         observeWifiForFtp()
@@ -174,6 +179,8 @@ class DaemonService : Service() {
     override fun onDestroy() {
         rollbackJob?.cancel()
         controlServer.stop()
+        crawlerProxy?.stop()
+        crawlerProxy = null
         ftpObservingJob?.cancel()
         crawlerObservingJob?.cancel()
         ftpControlExecutor.shutdownNow()
@@ -377,6 +384,34 @@ class DaemonService : Service() {
         return if (c.lanDirect) c.proxyPort else c.crawlerHttpPort
     }
 
+    /**
+     * Keeps the authenticated reverse proxy in sync with the crawler's access
+     * settings (plan 10 §3): it listens on [com.torrent.app.config.CrawlerSettings.proxyPort]
+     * whenever the crawler is not lanDirect, and is stopped when it is. The
+     * proxy's target port is read live per request, so only the listen port
+     * (or lanDirect) needs a stop/start here. Called from the main thread at
+     * service start and from the crawler-control executor after an apply —
+     * both only bind/close a socket, never long work.
+     */
+    @Synchronized
+    private fun syncCrawlerProxy(s: com.torrent.app.config.CrawlerSettings) {
+        if (s.lanDirect) {
+            crawlerProxy?.stop()
+            crawlerProxy = null
+            return
+        }
+        val existing = crawlerProxy
+        if (existing != null && existing.port == s.proxyPort) return
+        existing?.stop()
+        val proxy = CrawlerProxyServer(
+            tokenManager = tokenManager,
+            crawlerHttpPort = ::crawlerHttpPort,
+            port = s.proxyPort,
+        )
+        crawlerProxy = proxy
+        proxy.start()
+    }
+
     /** Combined size of the crawler's `torrents.db` + WAL, null when no DB exists. */
     fun crawlerDbSize(): Long? {
         val data = File(filesDir, "crawler/data")
@@ -411,6 +446,8 @@ class DaemonService : Service() {
 
         setCrawlerApplyStatus(CrawlerApplyPhase.WRITING, "writing config.ini")
         crawlerConfig.applySettings(s)
+        // Keep the authenticated proxy in sync (lanDirect / proxyPort change).
+        syncCrawlerProxy(s)
 
         val wifiUp = wifiGateMonitor.state.value.wifi
         if (!CrawlerGate.shouldRun(s.enabled, s.wifiOnly, wifiUp)) {

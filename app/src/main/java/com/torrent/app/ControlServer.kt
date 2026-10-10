@@ -10,6 +10,7 @@ import io.ktor.server.routing.*
 import kotlinx.coroutines.flow.StateFlow
 import java.net.URLDecoder
 import java.net.URLEncoder
+import java.util.Base64
 import java.util.concurrent.TimeUnit
 import com.torrent.app.config.TransmissionApplyMode
 import com.torrent.app.config.CrawlerKeys
@@ -716,7 +717,19 @@ class ControlServer(
             val query = queryToken
             if (query != null && isValid(query)) return query to true
             val bearer = authHeader?.removePrefix("Bearer ")
-            if (bearer != null && isValid(bearer)) return bearer to false
+            if (bearer != null && bearer != authHeader && isValid(bearer)) return bearer to false
+            val basic = authHeader?.removePrefix("Basic ")
+            if (basic != null && basic != authHeader) {
+                // `Basic base64(user:token)` — the control token is the password part.
+                val password = try {
+                    val decoded = String(Base64.getDecoder().decode(basic), Charsets.UTF_8)
+                    val colon = decoded.indexOf(':')
+                    if (colon < 0) null else decoded.substring(colon + 1)
+                } catch (e: IllegalArgumentException) {
+                    null
+                }
+                if (password != null && isValid(password)) return password to false
+            }
             return null to false
         }
 
