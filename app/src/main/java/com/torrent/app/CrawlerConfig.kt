@@ -1,6 +1,8 @@
 package com.torrent.app
 
 import android.content.Context
+import com.torrent.app.config.CrawlerKeys
+import com.torrent.app.config.CrawlerSettings
 import android.content.pm.PackageManager
 import android.os.Build
 import java.io.File
@@ -25,6 +27,8 @@ class CrawlerConfig(
     val workDir: File = File(context.filesDir, "crawler")
     val configFile: File = File(workDir, "config.ini")
     val dataDir: File = File(workDir, "data")
+    /** Last-known-good copy of `config.ini` for apply/rollback. */
+    val lkgConfigFile: File = File(workDir, "config.ini.lkg")
 
     /** Creates the crawler layout and seeds the keyword assets + config.ini. */
     fun ensureLayout() {
@@ -71,6 +75,66 @@ class CrawlerConfig(
         writeAtomically(configFile, pinned)
     }
 
+    /** The `config.ini` keys owned by the settings form, in stable render order. */
+    fun managedKeys(s: CrawlerSettings): Map<String, String> = linkedMapOf(
+        "dht_port" to s.dhtPort.toString(),
+        "log_level" to s.logLevel,
+        "nice_level" to s.niceLevel.toString(),
+        "num_trees" to s.numTrees.toString(),
+        "tree_find_node_workers" to s.treeFindNodeWorkers.toString(),
+        "tree_bep51_workers" to s.treeBep51Workers.toString(),
+        "tree_get_peers_workers" to s.treeGetPeersWorkers.toString(),
+        "tree_metadata_workers" to s.treeMetadataWorkers.toString(),
+        "tree_infohash_queue_capacity" to s.treeInfohashQueueCapacity.toString(),
+        "tree_peers_queue_capacity" to s.treePeersQueueCapacity.toString(),
+        "porn_filter_enabled" to (if (s.pornFilterEnabled) "1" else "0"),
+        "language_filter_non_latin_threshold" to s.languageFilterNonLatinThreshold.toString(),
+        "bloom_capacity" to s.bloomCapacity.toString(),
+        "failure_bloom_capacity" to s.failureBloomCapacity.toString(),
+        "bloom_error_rate" to s.bloomErrorRate.toString(),
+        "http_port" to (if (s.lanDirect) s.proxyPort.toString() else s.crawlerHttpPort.toString()),
+        "http_bind" to (if (s.lanDirect) "0.0.0.0" else "127.0.0.1"),
+    )
+
+    /**
+     * Renders the full `config.ini` text for [s]: the current file (or the seed
+     * asset when missing) with the managed keys set in place (preserving
+     * comments/order, appending missing keys), then the advanced overrides,
+     * then the pinned backup keys forced to 0. Unparseable advanced text is
+     * ignored here — validation is the caller's job.
+     */
+    fun renderManaged(s: CrawlerSettings): String {
+        val base = if (configFile.exists()) configFile.readText(Charsets.UTF_8) else seedText()
+        var text = setKeys(base, managedKeys(s))
+        val advanced = CrawlerKeys.parseAdvanced(s.advancedOverrides)
+        if (advanced.ok) text = setKeys(text, advanced.entries)
+        return applyPinnedKeys(text)
+    }
+
+    /** [renderManaged] followed by an atomic write through [writeConfig]. */
+    fun applySettings(s: CrawlerSettings) {
+        writeConfig(renderManaged(s))
+    }
+
+    /** Current `config.ini` as a key→value map; empty when the file is missing. */
+    fun readIni(): Map<String, String> =
+        if (configFile.exists()) parseIni(configFile.readText(Charsets.UTF_8)) else emptyMap()
+
+    /** Copies the current `config.ini` to `config.ini.lkg` (atomic). */
+    fun snapshotLastKnownGood() {
+        if (configFile.exists()) writeAtomically(lkgConfigFile, configFile.readText(Charsets.UTF_8))
+    }
+
+    /** Restores `config.ini` from the LKG snapshot. @return true when a snapshot existed. */
+    fun restoreLastKnownGood(): Boolean {
+        if (!lkgConfigFile.exists()) return false
+        writeAtomically(configFile, lkgConfigFile.readText(Charsets.UTF_8))
+        return true
+    }
+
+    private fun seedText(): String =
+        openAsset("$ASSET_DIR/$CONFIG_INI_DEFAULT").use { it.readBytes().toString(Charsets.UTF_8) }
+
     private fun currentVersionCode(): Long =
         try {
             val info = context.packageManager.getPackageInfo(context.packageName, 0)
@@ -101,7 +165,15 @@ class CrawlerConfig(
          * leading whitespace) are replaced; keys absent from the input are appended
          * at the end. Same-prefix keys (e.g. `backup_path`) are left untouched.
          */
-        fun applyPinnedKeys(ini: String): String {
+        fun applyPinnedKeys(ini: String): String = setKeys(ini, PINNED_KEYS)
+
+        /**
+         * Sets [keys] line by line, preserving comments and ordering. Existing
+         * assignments (with or without spaces, with leading whitespace) are
+         * replaced; keys absent from the input are appended at the end. Unlisted
+         * keys are left untouched.
+         */
+        fun setKeys(ini: String, keys: Map<String, String>): String {
             val out = ArrayList<String>()
             val seen = HashSet<String>()
             for (line in ini.split("\n")) {
@@ -111,16 +183,16 @@ class CrawlerConfig(
                 val eq = if (isKeyLine) line.indexOf('=') else -1
                 if (eq > 0) {
                     val key = line.substring(0, eq).trim()
-                    val pinned = PINNED_KEYS[key]
-                    if (pinned != null) {
+                    val value = keys[key]
+                    if (value != null) {
                         seen.add(key)
-                        out.add("$key = $pinned")
+                        out.add("$key = $value")
                         continue
                     }
                 }
                 out.add(line)
             }
-            for ((key, value) in PINNED_KEYS) {
+            for ((key, value) in keys) {
                 if (key !in seen) out.add("$key = $value")
             }
             return out.joinToString("\n")

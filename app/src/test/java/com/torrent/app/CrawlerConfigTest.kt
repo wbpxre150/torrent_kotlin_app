@@ -1,5 +1,6 @@
 package com.torrent.app
 
+import com.torrent.app.config.CrawlerSettings
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -127,8 +128,8 @@ class CrawlerConfigTest {
         assertEquals("16", ini["num_trees"])
         assertEquals("30", ini["tree_get_peers_workers"])
         assertEquals("50", ini["tree_metadata_workers"])
-        assertEquals("8080", ini["http_port"])
-        assertEquals("0.0.0.0", ini["http_bind"])
+        assertEquals("8081", ini["http_port"])
+        assertEquals("127.0.0.1", ini["http_bind"])
         assertNull(ini["backup_path"])
         assertNull(ini["ssh_host"])
         assertNull(ini["ssh_user"])
@@ -181,6 +182,101 @@ class CrawlerConfigTest {
             // Second run is a no-op: files unchanged, no failure.
             cfg.ensureLayout()
             assertTrue(cfg.configFile.exists())
+        }
+
+        private fun configWithRealDefaultAsset(): CrawlerConfig {
+            val context = RuntimeEnvironment.getApplication()
+            val fixture = File(tmp.root, "assets/dht_crawler").apply { mkdirs() }
+            File(fixture, "porn_filter_keywords.txt").writeText("keyword-a\n")
+            File(fixture, "torrent_search_keywords.txt").writeText("strip-a\n")
+            val defaultAsset = File("src/main/assets/dht_crawler/config.ini.default")
+            assertTrue("checked-in default asset must exist", defaultAsset.exists())
+            File(fixture, "config.ini.default").writeText(defaultAsset.readText())
+            return CrawlerConfig(context) { path -> File(tmp.root, "assets/$path").inputStream() }
+        }
+
+        @Test fun renderManaged_setsFormKeysInPlaceAndKeepsComments() {
+            val cfg = configWithRealDefaultAsset()
+            cfg.ensureLayout()
+
+            cfg.applySettings(CrawlerSettings(numTrees = 8, dhtPort = 6882, advancedOverrides = "batch_size=750"))
+            val text = cfg.configFile.readText()
+            val ini = CrawlerConfig.parseIni(text)
+            assertEquals("8", ini["num_trees"])
+            assertEquals("6882", ini["dht_port"])
+            assertEquals("750", ini["batch_size"])
+            // HTTP access is managed: loopback + 8081 unless lanDirect
+            assertEquals("8081", ini["http_port"])
+            assertEquals("127.0.0.1", ini["http_bind"])
+            // Comments and unrelated keys are preserved
+            assertTrue(text.contains("# DHT Crawler Configuration File"))
+            assertEquals("data/torrents.db", ini["db_path"])
+        }
+
+        @Test fun renderManaged_lanDirectBindsAllInterfacesOnProxyPort() {
+            val cfg = configWithRealDefaultAsset()
+            cfg.ensureLayout()
+
+            cfg.applySettings(CrawlerSettings(lanDirect = true, proxyPort = 9090))
+            val ini = CrawlerConfig.parseIni(cfg.configFile.readText())
+            assertEquals("9090", ini["http_port"])
+            assertEquals("0.0.0.0", ini["http_bind"])
+        }
+
+        @Test fun renderManaged_backupsStayZeroEvenWhenOverridesTry() {
+            val cfg = configWithRealDefaultAsset()
+            cfg.ensureLayout()
+            cfg.configFile.writeText(
+                "backup_enabled = 1\nssh_backup_enabled = 1\nrclone_backup_enabled = 1\n"
+            )
+
+            // The override text tries to re-enable rclone backups; the parser
+            // rejects it and the pins force 0 either way.
+            cfg.applySettings(CrawlerSettings(advancedOverrides = "rclone_backup_enabled=1"))
+            val ini = CrawlerConfig.parseIni(cfg.configFile.readText())
+            assertEquals("0", ini["backup_enabled"])
+            assertEquals("0", ini["ssh_backup_enabled"])
+            assertEquals("0", ini["rclone_backup_enabled"])
+        }
+
+        @Test fun renderManaged_seedsFromAssetWhenFileMissing() {
+            val cfg = configWithRealDefaultAsset()
+            cfg.workDir.mkdirs()
+            assertTrue(!cfg.configFile.exists())
+
+            cfg.applySettings(CrawlerSettings(numTrees = 4))
+            val ini = CrawlerConfig.parseIni(cfg.configFile.readText())
+            assertEquals("4", ini["num_trees"])
+            assertEquals("0", ini["backup_enabled"])
+        }
+
+        @Test fun readIni_returnsCurrentKeysAndEmptyWhenMissing() {
+            val cfg = configWithRealDefaultAsset()
+            assertTrue(cfg.readIni().isEmpty())
+            cfg.ensureLayout()
+            val ini = cfg.readIni()
+            assertEquals("16", ini["num_trees"])
+            assertEquals("127.0.0.1", ini["http_bind"])
+        }
+
+        @Test fun lkgSnapshotAndRestore_roundTrips() {
+            val cfg = configWithRealDefaultAsset()
+            cfg.ensureLayout()
+            cfg.applySettings(CrawlerSettings(numTrees = 4))
+            cfg.snapshotLastKnownGood()
+            assertTrue(cfg.lkgConfigFile.exists())
+
+            cfg.applySettings(CrawlerSettings(numTrees = 2))
+            assertEquals("2", CrawlerConfig.parseIni(cfg.configFile.readText())["num_trees"])
+
+            assertTrue(cfg.restoreLastKnownGood())
+            assertEquals("4", CrawlerConfig.parseIni(cfg.configFile.readText())["num_trees"])
+        }
+
+        @Test fun lkgRestoreFalseWhenNoSnapshot() {
+            val cfg = configWithRealDefaultAsset()
+            cfg.ensureLayout()
+            assertFalse(cfg.restoreLastKnownGood())
         }
     }
 }

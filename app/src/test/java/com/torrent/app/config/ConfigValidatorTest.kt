@@ -67,4 +67,70 @@ class ConfigValidatorTest {
     @Test fun ftpZeroMaxDownload_passes() {
         assertTrue(ConfigValidator.validateFtp(validFtp().copy(maxDownloadKiBps = 0)).ok)
     }
+
+    private fun validCrawler() = CrawlerSettings()
+
+    @Test fun validCrawler_passes() {
+        assertTrue(ConfigValidator.validateCrawler(validCrawler()).isEmpty())
+    }
+
+    @Test fun crawlerBadDhtPort_fails() {
+        assertFalse(ConfigValidator.validateCrawler(validCrawler().copy(dhtPort = 70000)).isEmpty())
+        assertFalse(ConfigValidator.validateCrawler(validCrawler().copy(dhtPort = 0)).isEmpty())
+    }
+
+    @Test fun crawlerPortClash_fails() {
+        val errors = ConfigValidator.validateCrawler(validCrawler().copy(crawlerHttpPort = 8080))
+        assertTrue(errors.any { it.contains("differ") })
+    }
+
+    @Test fun crawlerBadProxyPort_fails() {
+        assertFalse(ConfigValidator.validateCrawler(validCrawler().copy(proxyPort = 0)).isEmpty())
+    }
+
+    @Test fun crawlerNumTreesOutOfRange_fails() {
+        assertFalse(ConfigValidator.validateCrawler(validCrawler().copy(numTrees = 0)).isEmpty())
+        assertFalse(ConfigValidator.validateCrawler(validCrawler().copy(numTrees = 65)).isEmpty())
+    }
+
+    @Test fun crawlerWorkersOutOfRange_fails() {
+        assertFalse(ConfigValidator.validateCrawler(validCrawler().copy(treeMetadataWorkers = 0)).isEmpty())
+        assertFalse(ConfigValidator.validateCrawler(validCrawler().copy(treeFindNodeWorkers = 101)).isEmpty())
+        assertFalse(ConfigValidator.validateCrawler(validCrawler().copy(treeGetPeersWorkers = 1001)).isEmpty())
+    }
+
+    @Test fun crawlerNiceLevelOutOfRange_fails() {
+        assertFalse(ConfigValidator.validateCrawler(validCrawler().copy(niceLevel = 20)).isEmpty())
+        assertFalse(ConfigValidator.validateCrawler(validCrawler().copy(niceLevel = -21)).isEmpty())
+    }
+
+    @Test fun crawlerBadLogLevel_fails() {
+        assertFalse(ConfigValidator.validateCrawler(validCrawler().copy(logLevel = "TRACE")).isEmpty())
+    }
+
+    @Test fun crawlerThresholdOutOfRange_fails() {
+        assertFalse(ConfigValidator.validateCrawler(validCrawler().copy(languageFilterNonLatinThreshold = 101)).isEmpty())
+        assertFalse(ConfigValidator.validateCrawler(validCrawler().copy(languageFilterNonLatinThreshold = -1)).isEmpty())
+    }
+
+    @Test fun crawlerBloomErrorRateOutOfRange_fails() {
+        assertFalse(ConfigValidator.validateCrawler(validCrawler().copy(bloomErrorRate = 0.0)).isEmpty())
+        assertFalse(ConfigValidator.validateCrawler(validCrawler().copy(bloomErrorRate = 1.0)).isEmpty())
+    }
+
+    @Test fun crawlerZeroCapacity_fails() {
+        assertFalse(ConfigValidator.validateCrawler(validCrawler().copy(bloomCapacity = 0)).isEmpty())
+        assertFalse(ConfigValidator.validateCrawler(validCrawler().copy(failureBloomCapacity = 0)).isEmpty())
+        assertFalse(ConfigValidator.validateCrawler(validCrawler().copy(treeInfohashQueueCapacity = 0)).isEmpty())
+        assertFalse(ConfigValidator.validateCrawler(validCrawler().copy(treePeersQueueCapacity = 0)).isEmpty())
+    }
+
+    @Test fun crawlerAdvancedWithBackupKey_fails() {
+        val errors = ConfigValidator.validateCrawler(validCrawler().copy(advancedOverrides = "rclone_backup_enabled=1"))
+        assertTrue(errors.any { it.contains("backup") })
+    }
+
+    @Test fun crawlerAdvancedValid_passes() {
+        assertTrue(ConfigValidator.validateCrawler(validCrawler().copy(advancedOverrides = "batch_size=750")).isEmpty())
+    }
 }

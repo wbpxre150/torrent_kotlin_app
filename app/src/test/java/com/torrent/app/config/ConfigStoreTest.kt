@@ -88,4 +88,101 @@ class ConfigStoreTest {
         s.clearLastKnownGood()
         assertNull(s.restoreLastKnownGoodTransmission())
     }
+
+    @Test fun saveCrawler_persistsAllFieldsAndReloads() {
+        val s = store()
+        s.saveCrawler(
+            CrawlerSettings(
+                enabled = true,
+                wifiOnly = false,
+                logLevel = "DEBUG",
+                dhtPort = 6882,
+                niceLevel = 5,
+                skipIntegrityCheck = true,
+                numTrees = 8,
+                treeFindNodeWorkers = 4,
+                treeBep51Workers = 12,
+                treeGetPeersWorkers = 25,
+                treeMetadataWorkers = 40,
+                treeInfohashQueueCapacity = 2500,
+                treePeersQueueCapacity = 2500,
+                pornFilterEnabled = false,
+                languageFilterNonLatinThreshold = 50,
+                bloomCapacity = 12_000_000,
+                failureBloomCapacity = 12_000_000,
+                bloomErrorRate = 0.002,
+                advancedOverrides = "batch_size=750",
+                proxyPort = 8090,
+                crawlerHttpPort = 8091,
+                lanDirect = true,
+            )
+        )
+        val c = s.load().crawler
+        assertTrue(c.enabled)
+        assertFalse(c.wifiOnly)
+        assertEquals("DEBUG", c.logLevel)
+        assertEquals(6882, c.dhtPort)
+        assertEquals(5, c.niceLevel)
+        assertTrue(c.skipIntegrityCheck)
+        assertEquals(8, c.numTrees)
+        assertEquals(4, c.treeFindNodeWorkers)
+        assertEquals(12, c.treeBep51Workers)
+        assertEquals(25, c.treeGetPeersWorkers)
+        assertEquals(40, c.treeMetadataWorkers)
+        assertEquals(2500, c.treeInfohashQueueCapacity)
+        assertEquals(2500, c.treePeersQueueCapacity)
+        assertFalse(c.pornFilterEnabled)
+        assertEquals(50, c.languageFilterNonLatinThreshold)
+        assertEquals(12_000_000, c.bloomCapacity)
+        assertEquals(12_000_000, c.failureBloomCapacity)
+        assertEquals(0.002, c.bloomErrorRate, 1e-6)
+        assertEquals("batch_size=750", c.advancedOverrides)
+        assertEquals(8090, c.proxyPort)
+        assertEquals(8091, c.crawlerHttpPort)
+        assertTrue(c.lanDirect)
+    }
+
+    @Test fun crawlerDefaults_matchConfigIniDefault() {
+        val c = store().load().crawler
+        assertFalse(c.enabled)
+        assertTrue(c.wifiOnly)
+        assertEquals("INFO", c.logLevel)
+        assertEquals(6881, c.dhtPort)
+        assertEquals(10, c.niceLevel)
+        assertFalse(c.skipIntegrityCheck)
+        assertEquals(16, c.numTrees)
+        assertEquals(3, c.treeFindNodeWorkers)
+        assertEquals(10, c.treeBep51Workers)
+        assertEquals(30, c.treeGetPeersWorkers)
+        assertEquals(50, c.treeMetadataWorkers)
+        assertEquals(3000, c.treeInfohashQueueCapacity)
+        assertEquals(3000, c.treePeersQueueCapacity)
+        assertTrue(c.pornFilterEnabled)
+        assertEquals(33, c.languageFilterNonLatinThreshold)
+        assertEquals(30_000_000, c.bloomCapacity)
+        assertEquals(30_000_000, c.failureBloomCapacity)
+        assertEquals(0.001, c.bloomErrorRate, 1e-6)
+        assertEquals("", c.advancedOverrides)
+        assertEquals(8080, c.proxyPort)
+        assertEquals(8081, c.crawlerHttpPort)
+        assertFalse(c.lanDirect)
+    }
+
+    @Test fun snapshotAndRestoreCrawlerLastKnownGood() {
+        val s = store()
+        assertNull(s.restoreCrawlerLastKnownGood())
+        s.snapshotCrawlerLastKnownGood(CrawlerSettings(enabled = true, numTrees = 32, logLevel = "WARN"))
+        val restored = s.restoreCrawlerLastKnownGood()
+        assertNotNull(restored)
+        assertTrue(restored!!.enabled)
+        assertEquals(32, restored.numTrees)
+        assertEquals("WARN", restored.logLevel)
+    }
+
+    @Test fun clearCrawlerLastKnownGood_removesSnapshot() {
+        val s = store()
+        s.snapshotCrawlerLastKnownGood(CrawlerSettings(enabled = true))
+        s.clearCrawlerLastKnownGood()
+        assertNull(s.restoreCrawlerLastKnownGood())
+    }
 }

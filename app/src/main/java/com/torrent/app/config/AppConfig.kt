@@ -22,6 +22,33 @@ data class FtpSettings(
 
 data class CrawlerSettings(
     val enabled: Boolean = false,
+    /** Start/stop only on wifi (default on: the crawler is bandwidth heavy). */
+    val wifiOnly: Boolean = true,
+    val logLevel: String = "INFO",
+    val dhtPort: Int = 6881,
+    val niceLevel: Int = 10,
+    /** Adds `--dont-check-database` to the crawler's args. */
+    val skipIntegrityCheck: Boolean = false,
+    val numTrees: Int = 16,
+    val treeFindNodeWorkers: Int = 3,
+    val treeBep51Workers: Int = 10,
+    val treeGetPeersWorkers: Int = 30,
+    val treeMetadataWorkers: Int = 50,
+    val treeInfohashQueueCapacity: Int = 3000,
+    val treePeersQueueCapacity: Int = 3000,
+    val pornFilterEnabled: Boolean = true,
+    val languageFilterNonLatinThreshold: Int = 33,
+    val bloomCapacity: Int = 30_000_000,
+    val failureBloomCapacity: Int = 30_000_000,
+    val bloomErrorRate: Double = 0.001,
+    /** Raw `key=value` advanced overrides, checked against the CrawlerKeys allow-list. */
+    val advancedOverrides: String = "",
+    /** LAN port of the authenticated reverse proxy in front of the crawler UI. */
+    val proxyPort: Int = 8080,
+    /** Loopback HTTP port of the crawler itself. */
+    val crawlerHttpPort: Int = 8081,
+    /** Bind the crawler to 0.0.0.0 and skip the proxy (no auth, off by default). */
+    val lanDirect: Boolean = false,
 )
 
 data class AppConfig(
