@@ -32,4 +32,9 @@ class CrawlerGateTest {
             listOf("--dont-check-database"),
             CrawlerGate.crawlerArgs(CrawlerSettings(skipIntegrityCheck = true)))
     }
+
+    @Test fun exitedDuringWatch_onlyWhenRestartCountGrew() {
+        assertFalse(CrawlerGate.exitedDuringWatch(2, 2))
+        assertTrue(CrawlerGate.exitedDuringWatch(2, 3))
+    }
 }

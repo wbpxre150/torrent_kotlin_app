@@ -529,26 +529,31 @@ class DaemonService : Service() {
         crawler.start()
         supervisors.add(crawler)
 
-        // Watch for a crash loop (RollbackPolicy) for ~30 s after the restart.
-        setCrawlerApplyStatus(CrawlerApplyPhase.WATCHING, "watching for crash-loop (30 s)")
+        // Watch the restarted crawler for the whole window (plan 10 §1): the
+        // supervisor reports RUNNING as soon as the process is launched, so an
+        // early RUNNING proves nothing. Any exit within the window (restart
+        // count grew) or a crawler not running at the end triggers rollback.
+        setCrawlerApplyStatus(CrawlerApplyPhase.WATCHING, "watching for early exit (30 s)")
         val statusAtApply = crawler.status.value
         val deadline = System.currentTimeMillis() + CRAWLER_APPLY_WATCH_MS
         while (System.currentTimeMillis() < deadline) {
             Thread.sleep(CRAWLER_APPLY_POLL_MS)
             val cur = crawler.status.value
-            if (cur.state == ProcessState.RUNNING) {
-                setCrawlerApplyStatus(CrawlerApplyPhase.OK, "applied; crawler running")
+            if (cur.state == ProcessState.STOPPED || cur.state == ProcessState.STOPPING) {
+                // Stopped externally (user / wifi gate) — nothing to judge.
+                setCrawlerApplyStatus(CrawlerApplyPhase.OK, "applied; crawler stopped during watch")
                 return
             }
-            if (RollbackPolicy.shouldRollback(statusAtApply, cur, 3)) {
+            if (CrawlerGate.exitedDuringWatch(statusAtApply.restartCount, cur.restartCount)) {
                 rollBackCrawlerApply(crawlerConfig, previous)
                 return
             }
         }
-        val finalState = crawler.status.value.state
-        setCrawlerApplyStatus(
-            CrawlerApplyPhase.OK,
-            if (finalState == ProcessState.RUNNING) "applied; crawler running" else "applied; crawler starting")
+        if (crawler.status.value.state != ProcessState.RUNNING) {
+            rollBackCrawlerApply(crawlerConfig, previous)
+            return
+        }
+        setCrawlerApplyStatus(CrawlerApplyPhase.OK, "applied; crawler running")
     }
 
     /**

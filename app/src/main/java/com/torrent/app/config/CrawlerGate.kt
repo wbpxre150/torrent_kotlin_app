@@ -23,4 +23,12 @@ object CrawlerGate {
      */
     fun crawlerArgs(s: CrawlerSettings): List<String> =
         if (s.skipIntegrityCheck) listOf("--dont-check-database") else emptyList()
+
+    /**
+     * Post-apply rollback trigger (plan 10 §1): the crawler exited at least once
+     * within the watch window after the restart. `ProcessSupervisor` bumps
+     * `restartCount` on every relaunch, and a healthy crawler never exits.
+     */
+    fun exitedDuringWatch(restartsAtApply: Int, restartsNow: Int): Boolean =
+        restartsNow > restartsAtApply
 }
