@@ -36,6 +36,17 @@ android {
         jvmTarget = "17"
     }
 
+    // Stage 09: keyword files copied from the dht_crawler sources by the
+    // copyDhtCrawlerAssets task; config.ini.default is checked in under src/main/assets.
+    sourceSets["main"].assets.srcDir("build/generated/assets/dht_crawler")
+
+    // Robolectric unit tests load app resources
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
+    }
+
     buildFeatures {
         compose = true
     }
@@ -281,10 +292,219 @@ tasks.register("buildTransmission") {
     }
 }
 
+tasks.register("buildLibuv") {
+    description = "Cross-compile libuv 1.48.0 static lib for arm64 (Stage 09 dep)"
+
+    val ndk = providers.environmentVariable("ANDROID_NDK_HOME")
+        .orElse(providers.provider {
+            val sdk = android.sdkDirectory
+            val ndks = file("$sdk/ndk").listFiles()?.sortedByDescending { it.name }
+            ndks?.firstOrNull()?.absolutePath ?: error("NDK not found")
+        })
+    val ndkDir = file(ndk.get())
+    val toolchainFile = file("$ndkDir/build/cmake/android.toolchain.cmake")
+
+    val nativeDir = file("build/native")
+    val srcDir = file("$nativeDir/src/libuv-v1.48.0")
+    val buildDir = file("$nativeDir/build-libuv")
+    val installDir = file("$nativeDir/libuv-install")
+    val tarball = file("$nativeDir/src/libuv-v1.48.0.tar.gz")
+    val url = "https://dist.libuv.org/dist/v1.48.0/libuv-v1.48.0.tar.gz"
+
+    outputs.dir(installDir)
+
+    doLast {
+        // 1. Fetch tarball if missing
+        if (!tarball.exists()) {
+            tarball.parentFile.mkdirs()
+            project.exec {
+                commandLine("curl", "-L", "--fail", "-o", tarball.absolutePath, url)
+            }
+        }
+        // 2. Extract if missing
+        if (!srcDir.exists()) {
+            project.exec {
+                commandLine("tar", "-xzf", tarball.absolutePath, "-C", srcDir.parentFile.absolutePath)
+            }
+        }
+        // 3. Configure (Ninja generator + NDK toolchain, static only)
+        project.exec {
+            commandLine(
+                "cmake", "-G", "Ninja",
+                "-S", srcDir.absolutePath, "-B", buildDir.absolutePath,
+                "-DCMAKE_TOOLCHAIN_FILE=${toolchainFile.absolutePath}",
+                "-DANDROID_ABI=arm64-v8a",
+                "-DANDROID_PLATFORM=android-24",
+                "-DCMAKE_BUILD_TYPE=Release",
+                "-DCMAKE_INSTALL_PREFIX=${installDir.absolutePath}",
+                "-DLIBUV_BUILD_SHARED=OFF",
+                "-DLIBUV_BUILD_TESTS=OFF",
+                "-DLIBUV_BUILD_BENCH=OFF"
+            )
+        }
+        // 4. Build + install
+        project.exec {
+            commandLine("cmake", "--build", buildDir.absolutePath, "--target", "install", "-j8")
+        }
+    }
+}
+tasks.register("fetchSqlite") {
+    description = "Download the SQLite 3.49.1 amalgamation sources (Stage 09 dep)"
+
+    val nativeDir = file("build/native")
+    val srcDir = file("$nativeDir/src/sqlite-amalgamation")
+    val zipFile = file("$nativeDir/src/sqlite-amalgamation-3490100.zip")
+    val url = "https://www.sqlite.org/2025/sqlite-amalgamation-3490100.zip"
+
+    outputs.dir(srcDir)
+
+    doLast {
+        // 1. Fetch zip if missing
+        if (!zipFile.exists()) {
+            zipFile.parentFile.mkdirs()
+            project.exec {
+                commandLine("curl", "-L", "--fail", "-o", zipFile.absolutePath, url)
+            }
+        }
+        // 2. Extract + flatten so sqlite3.c/sqlite3.h sit directly under srcDir
+        if (!file("$srcDir/sqlite3.c").exists()) {
+            project.exec {
+                commandLine("unzip", "-o", zipFile.absolutePath, "-d", nativeDir.absolutePath)
+            }
+            srcDir.deleteRecursively()
+            project.exec {
+                commandLine("mv", file("$nativeDir/sqlite-amalgamation-3490100").absolutePath, srcDir.absolutePath)
+            }
+        }
+    }
+}
+tasks.register("prepareDhtCrawlerSrc") {
+    description = "Copy dht_crawler sources to build/native/src/dht_crawler and apply the 3 patches"
+
+    val crawlerSrc = providers.gradleProperty("dhtCrawlerSrc").orNull?.let { file(it).absoluteFile }
+        ?: file("src/main/cpp/dht_crawler")
+    val nativeDir = file("build/native")
+    val destDir = file("$nativeDir/src/dht_crawler")
+
+    inputs.dir(file("$crawlerSrc/src"))
+    inputs.dir(file("$crawlerSrc/include"))
+    inputs.files(fileTree(file("$crawlerSrc/lib")) { exclude(".git") })
+    inputs.dir(file("$crawlerSrc/patches"))
+    outputs.dir(destDir)
+
+    doLast {
+        // 1. Fail early if the source tree is incomplete (submodules not initialized)
+        if (!file("$crawlerSrc/src/main.c").exists()) {
+            error(
+                "dht_crawler source is missing at $crawlerSrc (no src/main.c). " +
+                    "Run 'git submodule update --init --recursive' or pass -PdhtCrawlerSrc=<path>."
+            )
+        }
+        // 2. Delete + re-copy sources (exclude .git dirs, build/data artifacts, object files, binary)
+        destDir.deleteRecursively()
+        copy {
+            from(crawlerSrc)
+            into(destDir)
+            exclude(".git", "build", "data", "backup.data", "**/*.o", "dht_crawler")
+            // civetweb test fixtures (not compiled into the crawler); one filename
+            // also trips the daemon JVM's non-UTF-8 filename encoding on this host
+            exclude("lib/civetweb/test")
+        }
+        // 3. Apply the three upstream patches (same order as the upstream Makefile)
+        for (patchName in listOf(
+            "bencode-cap-fix.patch",
+            "bencode-init-fix.patch",
+            "civetweb-stop-flag-atomic.patch"
+        )) {
+            project.exec {
+                commandLine("patch", "-p1", "-d", destDir.absolutePath, "-i", file("$destDir/patches/$patchName").absolutePath)
+            }
+        }
+    }
+}
+
+tasks.register<Copy>("copyDhtCrawlerAssets") {
+    description = "Copy dht_crawler keyword files into generated assets (Stage 09)"
+    // Same source-resolution logic as prepareDhtCrawlerSrc
+    val crawlerSrc = providers.gradleProperty("dhtCrawlerSrc").orNull?.let { file(it).absoluteFile }
+        ?: file("src/main/cpp/dht_crawler")
+    from(crawlerSrc) {
+        include("porn_filter_keywords.txt", "torrent_search_keywords.txt")
+    }
+    into(file("build/generated/assets/dht_crawler/dht_crawler"))
+}
+
+tasks.register("buildDhtCrawler") {
+    description = "Cross-compile dht_crawler for arm64, package libdhtcrawler.so (Stage 09)"
+    dependsOn("buildMbedtls", "buildLibuv", "fetchSqlite", "prepareDhtCrawlerSrc")
+
+    val ndk = providers.environmentVariable("ANDROID_NDK_HOME")
+        .orElse(providers.provider {
+            val sdk = android.sdkDirectory
+            val ndks = file("$sdk/ndk").listFiles()?.sortedByDescending { it.name }
+            ndks?.firstOrNull()?.absolutePath ?: error("NDK not found")
+        })
+    val ndkDir = file(ndk.get())
+    val toolchainFile = file("$ndkDir/build/cmake/android.toolchain.cmake")
+
+    val nativeDir = file("build/native")
+    val crawlerCmakeDir = file("src/main/cpp/dht_crawler-android")
+    val crawlerSrcDir = file("$nativeDir/src/dht_crawler")
+    val sqliteDir = file("$nativeDir/src/sqlite-amalgamation")
+    val libuvInstall = file("$nativeDir/libuv-install")
+    val mbedtlsInstall = file("$nativeDir/mbedtls-install")
+    val buildDir = file("$nativeDir/dht_crawler-build")
+    val crawlerOut = file("$buildDir/dhtcrawler")
+    val jniLibsArm64 = file("src/main/jniLibs/arm64-v8a")
+
+    outputs.file("$jniLibsArm64/libdhtcrawler.so")
+    inputs.dir(crawlerCmakeDir)
+    inputs.dir(crawlerSrcDir)
+    inputs.dir(sqliteDir)
+    inputs.dir(libuvInstall)
+    inputs.file("$mbedtlsInstall/lib/libmbedcrypto.a")
+
+    doLast {
+        // 1. Configure (Ninja + NDK toolchain, dynamic PIE, static deps)
+        project.exec {
+            commandLine(
+                "cmake", "-G", "Ninja",
+                "-S", crawlerCmakeDir.absolutePath, "-B", buildDir.absolutePath,
+                "-DCMAKE_TOOLCHAIN_FILE=${toolchainFile.absolutePath}",
+                "-DANDROID_ABI=arm64-v8a",
+                "-DANDROID_PLATFORM=android-24",
+                "-DCMAKE_BUILD_TYPE=Release",
+                "-DDHT_CRAWLER_SRC=${crawlerSrcDir.absolutePath}",
+                "-DSQLITE_DIR=${sqliteDir.absolutePath}",
+                "-DLIBUV_INSTALL=${libuvInstall.absolutePath}",
+                "-DMBEDTLS_INSTALL=${mbedtlsInstall.absolutePath}"
+            )
+        }
+        // 2. Build the crawler executable
+        project.exec {
+            commandLine("cmake", "--build", buildDir.absolutePath, "--target", "dhtcrawler", "-j8")
+        }
+        // 3. Copy + rename to jniLibs (lib*.so name required for packaging)
+        copy {
+            from(crawlerOut)
+            into(jniLibsArm64)
+            rename { "libdhtcrawler.so" }
+        }
+    }
+}
+
 // Ensure buildTransmission runs before jniLibs are merged into the APK
 afterEvaluate {
+    // Ensure native libs and generated crawler assets are ready before packaging
     tasks.named("mergeDebugJniLibFolders").configure {
         dependsOn("buildTransmission")
+        dependsOn("buildDhtCrawler")
+    }
+    tasks.named("mergeDebugAssets").configure {
+        dependsOn("copyDhtCrawlerAssets")
+    }
+    tasks.named("mergeReleaseAssets").configure {
+        dependsOn("copyDhtCrawlerAssets")
     }
 }
 }

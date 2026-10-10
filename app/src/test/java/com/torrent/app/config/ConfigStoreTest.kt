@@ -23,6 +23,7 @@ class ConfigStoreTest {
         assertEquals(2121, c.ftp.port)
         assertTrue(c.ftp.wifiOnly)
         assertEquals(0, c.ftp.maxDownloadKiBps)
+        assertFalse("crawler must be disabled by default", c.crawler.enabled)
     }
 
     @Test fun saveTransmission_persistsAndReloads() {
@@ -47,6 +48,14 @@ class ConfigStoreTest {
         assertFalse(loaded.wifiOnly)
         assertEquals("Media", loaded.exposedRoot)
         assertEquals(512, loaded.maxDownloadKiBps)
+    }
+
+    @Test fun saveCrawler_persistsAndReloads() {
+        val s = store()
+        s.saveCrawler(CrawlerSettings(enabled = true))
+        assertTrue(s.load().crawler.enabled)
+        s.saveCrawler(CrawlerSettings(enabled = false))
+        assertFalse(s.load().crawler.enabled)
     }
 
     @Test fun ftpPassword_autoGeneratesWhenEmpty_thenIdempotent() {

@@ -27,6 +27,9 @@ class ConfigStore(context: Context) {
             exposedRoot = prefs.getString(KEY_FTP_ROOT, ConfigDefaults.FTP.exposedRoot)!!,
             maxDownloadKiBps = prefs.getInt(KEY_FTP_MAX_DL_KIBPS, ConfigDefaults.FTP.maxDownloadKiBps),
         ),
+        crawler = CrawlerSettings(
+            enabled = prefs.getBoolean(KEY_CRAWLER_ENABLED, ConfigDefaults.CRAWLER.enabled),
+        ),
     )
 
     fun saveTransmission(s: TransmissionSettings) {
@@ -50,6 +53,12 @@ class ConfigStore(context: Context) {
             .putBoolean(KEY_FTP_WIFI_ONLY, s.wifiOnly)
             .putString(KEY_FTP_ROOT, s.exposedRoot)
             .putInt(KEY_FTP_MAX_DL_KIBPS, s.maxDownloadKiBps)
+            .apply()
+    }
+
+    fun saveCrawler(s: CrawlerSettings) {
+        prefs.edit()
+            .putBoolean(KEY_CRAWLER_ENABLED, s.enabled)
             .apply()
     }
 
@@ -111,6 +120,7 @@ class ConfigStore(context: Context) {
         private const val KEY_FTP_WIFI_ONLY = "ftp_wifi_only"
         private const val KEY_FTP_ROOT = "ftp_exposed_root"
         private const val KEY_FTP_MAX_DL_KIBPS = "ftp_max_download_kibps"
+        private const val KEY_CRAWLER_ENABLED = "crawler_enabled"
         private const val KEY_LKG_PRESENT = "lkg_present"
         private const val KEY_LKG_TX_USER = "lkg_tx_username"
         private const val KEY_LKG_TX_PASS = "lkg_tx_password"

@@ -17,6 +17,9 @@ app/build/
 local.properties
 
 # NDK / CMake
+# Native daemon binaries built by Gradle (buildTransmission / buildDhtCrawler)
+app/src/main/jniLibs/arm64-v8a/libtransmissiond.so
+app/src/main/jniLibs/arm64-v8a/libdhtcrawler.so
 .externalNativeBuild/
 .cxx/
 

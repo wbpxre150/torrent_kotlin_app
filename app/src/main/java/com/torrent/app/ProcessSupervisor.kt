@@ -39,6 +39,7 @@ class ProcessSupervisor(
     private val extraEnv: Map<String, String> = emptyMap(),
     private val selfLogging: Boolean = false,
     private val pipelineMaxLines: Int = 200,
+    private val graceMs: Long = DEFAULT_GRACE_MS,  // destroy() → destroyForcibly() window
 ) {
     companion object {
         private const val TAG = "ProcessSupervisor"
@@ -48,7 +49,7 @@ class ProcessSupervisor(
         private const val BACKOFF_CAP_MS = 30000L
 
         // Grace period between destroy() and destroyForcibly()
-        private const val GRACE_MS = 5000L
+        private const val DEFAULT_GRACE_MS = 5000L
 
         // Max log file size before rotation (1 MB)
         private const val MAX_LOG_BYTES = 1_000_000L
@@ -90,7 +91,7 @@ class ProcessSupervisor(
         scope!!.launch { runLoop() }
     }
 
-    /** Graceful stop: SIGTERM → wait GRACE_MS → SIGKILL. Idempotent. */
+    /** Graceful stop: SIGTERM → wait [graceMs] → SIGKILL. Idempotent. */
     fun stop() {
         Log.d(TAG, "[$label] stop() requested")
         stopping = true
@@ -329,7 +330,7 @@ class ProcessSupervisor(
         val proc = child ?: return
         try {
             proc.destroy() // SIGTERM
-            if (proc.waitFor(GRACE_MS, java.util.concurrent.TimeUnit.MILLISECONDS)) return
+            if (proc.waitFor(graceMs, java.util.concurrent.TimeUnit.MILLISECONDS)) return
             proc.destroyForcibly() // SIGKILL
             proc.waitFor(2, java.util.concurrent.TimeUnit.SECONDS)
         } catch (_: Exception) {

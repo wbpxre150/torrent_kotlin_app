@@ -52,7 +52,8 @@ class DaemonService : Service() {
     private var wifiLock: WifiManager.WifiLock? = null
     private lateinit var controlServer: ControlServer
     private lateinit var tokenManager: TokenManager
-    private val supervisors = mutableListOf<ProcessSupervisor>()
+    // Mutated from the main thread, the crawler-control thread and ControlServer threads.
+    private val supervisors = java.util.concurrent.CopyOnWriteArrayList<ProcessSupervisor>()
     private lateinit var usbPermissionManager: UsbPermissionManager
     @Volatile private var gateway: SafStorageGateway? = null
     @Volatile private var ftpController: FtpServerController? = null
@@ -63,6 +64,7 @@ class DaemonService : Service() {
     private val ftpControlExecutor = Executors.newSingleThreadExecutor(ThreadFactory {
         Thread(it, "ftp-control").apply { isDaemon = true }
     })
+
     private lateinit var safSocketFile: java.io.File
     private lateinit var safIpcServer: SafIpcServer
     private lateinit var transmissionConfig: TransmissionConfig
@@ -333,8 +335,12 @@ class DaemonService : Service() {
         sup.stop(); return true
     }
     fun startDaemon(label: String): Boolean {
-        val sup = supervisors.firstOrNull { it.status.value.label == label } ?: return false
-        sup.start(); return true
+        val sup = supervisors.firstOrNull { it.status.value.label == label }
+        if (sup != null) { sup.start(); return true }
+        // Manual start from the dashboard: lazily register+start the crawler even
+        // when it is disabled in config (auto-start happens only when enabled).
+        if (label == CRAWLER_LABEL) { startCrawlerSupervisor(); return true }
+        return false
     }
 
     fun transmissionRpcSummary(): com.torrent.app.transmission.TransmissionSummary? {
@@ -461,6 +467,9 @@ class DaemonService : Service() {
         if (supervisors.isNotEmpty()) return
         transmissionConfig = TransmissionConfig(this, configStore)
         if (configStore.load().wizardCompleted) startTransmissionSupervisor()
+        // The crawler does not need the wizard/SAF: start it whenever it is
+        // enabled in config (plan 09 §5), independent of transmission.
+        if (configStore.load().crawler.enabled) startCrawlerSupervisor()
     }
 
     private fun startTransmissionSupervisor() {
@@ -483,15 +492,74 @@ class DaemonService : Service() {
         transmission.start(); supervisors.add(transmission)
     }
 
-    private fun stopSupervisors() {
-        for (s in supervisors) {
-            s.stop()
+    /**
+     * Registers and starts the dht_crawler supervisor. The work runs on the
+     * crawler-control executor, which also hosts the crawler's stop(): a pending
+     * stop from a previous service instance is serialized ahead of this block, so
+     * a new child is never launched while the old one is still shutting down.
+     * Failures are logged, never thrown — a broken crawler must not crash the service.
+     */
+    private fun startCrawlerSupervisor() {
+        if (supervisors.any { it.status.value.label == CRAWLER_LABEL }) return
+        crawlerControlExecutor.execute {
+            if (supervisors.any { it.status.value.label == CRAWLER_LABEL }) return@execute
+            try {
+                val crawlerConfig = CrawlerConfig(this)
+                crawlerConfig.ensureLayout()
+                val logDir = File(filesDir, "logs")
+                val crawler = ProcessSupervisor(
+                    label = CRAWLER_LABEL, binaryName = "libdhtcrawler.so",
+                    args = emptyList(),
+                    nativeLibraryDir = applicationInfo.nativeLibraryDir,
+                    workDir = crawlerConfig.workDir, logDir = logDir,
+                    selfLogging = false,
+                    graceMs = CRAWLER_GRACE_MS,
+                    extraEnv = mapOf("TMPDIR" to File(filesDir, "tmp").apply { mkdirs() }.absolutePath))
+                crawler.start()
+                supervisors.add(crawler)
+            } catch (e: Exception) {
+                android.util.Log.e("DaemonService", "failed to start crawler supervisor", e)
+            }
         }
-        supervisors.clear()
+    }
+
+    private fun stopSupervisors() {
+        // The crawler has a long (60 s) SIGTERM grace and never uses SAF, so it
+        // stops on the crawler-control executor and is NOT awaited here — the
+        // SAF gateway shutdown in onDestroy must not block on it. All other
+        // supervisors (transmission uses SAF) stop synchronously, as before.
+        // The crawler stop is queued first so it runs in parallel with transmission's.
+        // It looks the crawler up when it runs (not now), so a start that is still
+        // queued on the executor is registered first and then stopped here too.
+        crawlerControlExecutor.execute {
+            val crawlers = supervisors.filter { it.status.value.label == CRAWLER_LABEL }
+            supervisors.removeAll(crawlers.toSet())
+            for (c in crawlers) {
+                try {
+                    c.stop()
+                } catch (e: Exception) {
+                    android.util.Log.w("DaemonService", "crawler stop failed: ${e.message}")
+                }
+            }
+        }
+        val others = supervisors.filter { it.status.value.label != CRAWLER_LABEL }
+        for (s in others) s.stop()
+        supervisors.removeAll(others.toSet())
     }
 
     companion object {
         const val CHANNEL_ID = "daemon_service"
         const val NOTIFICATION_ID = 1
+        const val CRAWLER_LABEL = "dht_crawler"
+        const val CRAWLER_GRACE_MS = 60_000L
+
+        // The dht_crawler supervisor gets a long (60 s) SIGTERM grace (plan 09 §5),
+        // so its stop/start are serialized on one process-wide single-thread executor
+        // (never shut down): onDestroy never blocks on the crawler, and a pending stop
+        // from a previous service instance always finishes before a new child is
+        // launched. The thread is a daemon and dies with the process.
+        private val crawlerControlExecutor = Executors.newSingleThreadExecutor(ThreadFactory {
+            Thread(it, "crawler-control").apply { isDaemon = true }
+        })
     }
 }

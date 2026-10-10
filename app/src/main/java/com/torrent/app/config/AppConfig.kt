@@ -20,10 +20,15 @@ data class FtpSettings(
     val maxDownloadKiBps: Int = 0,   // 0 = unlimited
 )
 
+data class CrawlerSettings(
+    val enabled: Boolean = false,
+)
+
 data class AppConfig(
     val wizardCompleted: Boolean,
     val transmission: TransmissionSettings,
     val ftp: FtpSettings,
+    val crawler: CrawlerSettings,
 )
 
 object ConfigDefaults {
@@ -53,7 +58,10 @@ object ConfigDefaults {
         wifiOnly = true,
         exposedRoot = "",
     )
-    val INITIAL = AppConfig(wizardCompleted = false, transmission = TRANSMISSION, ftp = FTP)
+    val CRAWLER = CrawlerSettings(
+        enabled = false,
+    )
+    val INITIAL = AppConfig(wizardCompleted = false, transmission = TRANSMISSION, ftp = FTP, crawler = CRAWLER)
 
     fun randomPassword(len: Int = FTP_PASSWORD_LEN): String {
         val rnd = java.security.SecureRandom()

@@ -1,0 +1,3 @@
+[submodule "app/src/main/cpp/dht_crawler"]
+	path = app/src/main/cpp/dht_crawler
+	url = https://github.com/wbpxre150/dht_crawler.git
