@@ -89,7 +89,8 @@ fun requiredFreeSpace(totalBytes: Long): Long = totalBytes + totalBytes / 10
  * The migration's file layout under the crawler work dir
  * (`filesDir/crawler/`): the live [data] dir, the import staging dir
  * [import], the pre-migration [old] dir, the [failed] dir (created by a
- * revert) and the [verify] dir holding the one-shot's config.ini.
+ * revert) and the [verify] dir holding the one-shot's config.ini (plus, only
+ * while the verify one-shot runs, a `data` symlink into [import]).
  */
 data class MigrationDirs(
     val data: File,

@@ -13,6 +13,8 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.nio.file.Files
+import java.nio.file.Path
 import java.util.concurrent.CancellationException
 import java.util.concurrent.Executor
 import java.util.concurrent.RejectedExecutionException
@@ -298,6 +300,12 @@ class TermuxMigration(
      * Verify (plan 10 §6.5): runs `libdhtcrawler.so --check-database` as a
      * one-shot with cwd `verify/` (a generated config.ini pointing at the
      * imported DB, backups pinned to 0), then counts the torrents read-only.
+     *
+     * `verify/data` is a symlink to `../data.import` so that old crawlers
+     * (cwd-relative `data/torrents.db`) and new crawlers (config `db_path`)
+     * resolve the same imported DB. The symlink is unlinked as soon as the
+     * one-shot exits (success or failure), so no later cleanup of `verify/`
+     * can follow it into `data.import/`.
      */
     private fun doVerify() {
         if (!File(dirs.import, "torrents.db").exists()) {
@@ -305,12 +313,23 @@ class TermuxMigration(
         }
         setPhase(MigrationPhase.VERIFYING, "running --check-database on the imported data")
         dirs.verify.mkdirs()
+        prepareVerifyDataLink()?.let { err ->
+            return setPhase(MigrationPhase.FAILED, "cannot verify: $err")
+        }
         CrawlerConfig.writeAtomically(
             File(dirs.verify, "config.ini"),
             CrawlerConfig.applyPinnedKeys("db_path = ../data.import/torrents.db\n"))
         val lines = ArrayDeque<String>()
-        val exit = oneShotRunner.run(listOf("--check-database"), dirs.verify) { line ->
-            pushLine(lines, line)
+        var exit: Int
+        try {
+            exit = oneShotRunner.run(listOf("--check-database"), dirs.verify) { line ->
+                pushLine(lines, line)
+            }
+        } finally {
+            // Unlink verify/data the moment the one-shot exits so nothing
+            // that later cleans up verify/ (now or in the future) can follow
+            // the symlink into data.import/.
+            unlinkVerifyData()
         }
         val count = if (exit == 0) countTorrents(File(dirs.import, "torrents.db")) else null
         cached = cached.copy(verifyExitCode = exit, torrentCount = count)
@@ -319,7 +338,57 @@ class TermuxMigration(
                 MigrationPhase.VERIFIED,
                 "check-database passed" + count?.let { " — $it torrents" } + " — run swap")
         } else {
-            setPhase(MigrationPhase.FAILED, "--check-database exited with code $exit — see the log")
+            setPhase(MigrationPhase.FAILED, verifyFailureMessage(exit, lines))
+        }
+    }
+
+    /**
+     * Makes `verify/data` a symlink to `../data.import` (relative to
+     * `verify/`). An existing `verify/data` entry is removed first: a
+     * symlink is unlinked — never followed — while a plain leftover
+     * directory is deleted recursively. The link itself is created via
+     * `java.nio.file.Files` (supported on minSdk 26), which is also what
+     * lets the unit tests exercise it. Returns null on success, an error
+     * description otherwise.
+     */
+    internal fun prepareVerifyDataLink(): String? {
+        val link = File(dirs.verify, "data")
+        if (link.exists() || isSymlink(link)) {
+            // File.delete() unlinks a symlink without following it; it only
+            // fails for a (non-symlink) directory, which is a plain leftover
+            // of an older run and safe to delete recursively.
+            if (!link.delete() && link.isDirectory) link.deleteRecursively()
+            if (link.exists() || isSymlink(link)) {
+                return "the existing verify/data entry could not be removed"
+            }
+        }
+        return try {
+            Files.createSymbolicLink(link.toPath(), Path.of(VERIFY_DATA_LINK_TARGET))
+            null
+        } catch (e: Exception) {
+            "creating the verify/data symlink failed: ${e.message}"
+        }
+    }
+
+    /** True when [f] is a symlink, even when its target is missing. */
+    private fun isSymlink(f: File): Boolean = try {
+        Files.isSymbolicLink(f.toPath())
+    } catch (e: Exception) {
+        false
+    }
+
+    /**
+     * Unlinks `verify/data` (best effort). Never recursive: only the link
+     * itself is removed, never its target (`data.import/`).
+     */
+    private fun unlinkVerifyData() {
+        try {
+            val link = File(dirs.verify, "data")
+            if (isSymlink(link) && !link.delete()) {
+                android.util.Log.w("TermuxMigration", "could not unlink verify/data")
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("TermuxMigration", "verify/data cleanup failed: ${e.message}")
         }
     }
 
@@ -669,6 +738,27 @@ class TermuxMigration(
 
         /** Ring-buffer cap for the one-shot output tail (same as maintenance). */
         internal const val MAX_LINES = 2000
+
+        /** Target of the `verify/data` symlink (relative to `verify/`). */
+        internal const val VERIFY_DATA_LINK_TARGET = "../data.import"
+
+        /** How many of the last one-shot lines the FAILED message carries. */
+        internal const val VERIFY_TAIL_LINES = 5
+
+        /** Per-line cap in the FAILED message tail. */
+        internal const val VERIFY_TAIL_LINE_MAX = 200
+
+        /**
+         * The FAILED message for a failed `--check-database` run: the exit
+         * code plus the last few output lines so the cause is visible in the
+         * UI (the full tail stays in [MigrationStatus.verifyLines]).
+         */
+        internal fun verifyFailureMessage(exit: Int, lines: List<String>): String {
+            val tail = lines.takeLast(VERIFY_TAIL_LINES)
+                .joinToString(" | ") { it.take(VERIFY_TAIL_LINE_MAX) }
+            return "--check-database exited with code $exit — " +
+                if (tail.isEmpty()) "no output" else tail
+        }
 
         /** Copy chunk size; the cancel flag is checked between chunks. */
         private const val COPY_CHUNK = 16L * 1024 * 1024

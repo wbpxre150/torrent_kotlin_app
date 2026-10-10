@@ -8,11 +8,14 @@ import com.torrent.app.OneShotRunner
 import com.torrent.app.config.CrawlerSettings
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import java.nio.file.Files
+import java.nio.file.Path
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -143,5 +146,68 @@ class TermuxMigrationTest {
         assertEquals(uri, grant.treeUri())
         grant.clear()
         assertEquals(null, grant.treeUri())
+    }
+
+    @Test fun prepareVerifyDataLink_createsSymlinkToImport() {
+        val verify = context.filesDir.resolve("crawler/verify")
+        verify.mkdirs()
+        assertNull(migration.prepareVerifyDataLink())
+        val link = verify.resolve("data")
+        assertTrue(Files.isSymbolicLink(link.toPath()))
+        assertEquals("../data.import", Files.readSymbolicLink(link.toPath()).toString())
+    }
+
+    @Test fun prepareVerifyDataLink_replacesStaleSymlinkWithoutFollowingItsTarget() {
+        val workDir = context.filesDir.resolve("crawler")
+        val verify = workDir.resolve("verify")
+        val decoy = workDir.resolve("decoy")
+        verify.mkdirs()
+        decoy.mkdirs()
+        decoy.resolve("precious.txt").writeText("keep me")
+        // A stale link pointing at something else (e.g. a leftover from a
+        // manual edit) must be unlinked, never followed.
+        val link = verify.resolve("data")
+        Files.createSymbolicLink(link.toPath(), Path.of("../decoy"))
+        assertNull(migration.prepareVerifyDataLink())
+        assertTrue(decoy.resolve("precious.txt").exists())
+        assertTrue(Files.isSymbolicLink(link.toPath()))
+        assertEquals("../data.import", Files.readSymbolicLink(link.toPath()).toString())
+    }
+
+    @Test fun prepareVerifyDataLink_replacesPlainLeftoverDirectory() {
+        val verify = context.filesDir.resolve("crawler/verify")
+        val link = verify.resolve("data")
+        link.mkdirs()
+        link.resolve("stale.bin").writeText("x")
+        assertNull(migration.prepareVerifyDataLink())
+        assertTrue(Files.isSymbolicLink(link.toPath()))
+    }
+
+    @Test fun verifyFailureMessage_containsExitCodeAndTheLastFewLines() {
+        val msg = TermuxMigration.verifyFailureMessage(1, listOf("a", "b", "c", "d", "e", "f"))
+        assertTrue(msg, msg.contains("exited with code 1"))
+        assertTrue(msg, msg.contains("b | c | d | e | f"))
+        assertFalse(msg, msg.contains("a | b"))
+        assertEquals(
+            "--check-database exited with code 1 — no output",
+            TermuxMigration.verifyFailureMessage(1, emptyList()))
+    }
+
+    @Test fun doVerify_unlinksSymlinkAndKeepsImportIntact() {
+        val workDir = context.filesDir.resolve("crawler")
+        val import = workDir.resolve("data.import")
+        import.mkdirs()
+        import.resolve("torrents.db").writeText("db")
+        assertEquals("started: verify", migration.action("verify"))
+        executor.last?.run()
+        // The one-shot binary does not exist in the test, so the run fails
+        // (exit -1) — but the verify/ hygiene must still hold: no symlink
+        // left behind, the import untouched, and the config written.
+        assertEquals(MigrationPhase.FAILED, migration.status.phase)
+        assertTrue(migration.status.message, migration.status.message.contains("exited with code -1"))
+        assertFalse(workDir.resolve("verify/data").exists())
+        assertTrue(import.resolve("torrents.db").exists())
+        val cfg = workDir.resolve("verify/config.ini").readText()
+        assertTrue(cfg, cfg.contains("db_path = ../data.import/torrents.db"))
     }
 }
