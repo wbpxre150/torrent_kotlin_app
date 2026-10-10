@@ -79,11 +79,37 @@ fun classifySourceFile(
 fun isRequiredSourceFile(name: String): Boolean = name == "torrents.db"
 
 /**
+ * Decides whether an existing `data.import/` already holds a complete copy
+ * of the scanned IMPORT files (plan 10 §6.4 recovery): `torrents.db` must be
+ * among them, every scanned IMPORT file (an optional source
+ * `torrents.db-wal` included) must exist there with an identical size, and
+ * the import dir must contain no files the import would not have produced.
+ * Pure: [importedSizes] is the `data.import/` name→size listing.
+ */
+fun isImportComplete(
+    importFiles: List<ScannedFile>,
+    importedSizes: Map<String, Long>,
+): Boolean {
+    val wanted = importFiles.associate { it.name to it.size }
+    if ("torrents.db" !in wanted) return false
+    if (importedSizes.size != wanted.size) return false
+    return wanted.entries.all { (name, size) -> importedSizes[name] == size }
+}
+
+/**
  * Free internal space required to import [totalBytes]: the total plus a 10%
  * headroom (plan 10 §6.3). The swap keeps the old `data/` until it is moved
  * aside, so both copies must fit.
  */
 fun requiredFreeSpace(totalBytes: Long): Long = totalBytes + totalBytes / 10
+
+/**
+ * Space check for a scan (plan 10 §6.3) with an existing `data.import/`:
+ * the copy deletes the import dir before writing, so its
+ * [reclaimableBytes] count as available on top of [freeBytes].
+ */
+fun isSpaceOk(freeBytes: Long, reclaimableBytes: Long, totalBytes: Long): Boolean =
+    freeBytes + reclaimableBytes >= requiredFreeSpace(totalBytes)
 
 /**
  * The migration's file layout under the crawler work dir

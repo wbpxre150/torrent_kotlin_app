@@ -40,6 +40,12 @@ data class MigrationStatus(
     val totalBytes: Long = 0,
     val freeSpaceBytes: Long = 0,
     val spaceOk: Boolean = true,
+    /** True when data.import/ already holds a complete copy of the scan. */
+    val importComplete: Boolean = false,
+    /** Bytes currently in data.import/ (reclaimable: the copy deletes it). */
+    val importBytes: Long = 0,
+    /** Bytes of the current internal data/ (+ data.old/), deletable by choice. */
+    val currentDataBytes: Long = 0,
     val currentFile: String? = null,
     val copiedBytes: Long = 0,
     val copyBytesPerSec: Long = 0,
@@ -126,8 +132,9 @@ class TermuxMigration(
 
     /**
      * Runs a migration action (plan 10 §6): scan, copy, cancel, verify, swap,
-     * adopt-config, start, confirm, revert, delete-source. Long work is
-     * queued on [executor] and this returns a short message immediately;
+     * adopt-config, start, confirm, revert, delete-source and
+     * delete-current-data. Long work is queued on [executor] and this returns
+     * a short message immediately;
      * progress is polled via [status].
      */
     fun action(name: String): String {
@@ -146,6 +153,7 @@ class TermuxMigration(
             "swap" -> MigrationPhase.SWAPPING
             "revert" -> MigrationPhase.SWAPPING
             "delete-source" -> MigrationPhase.SWAPPING
+            "delete-current-data" -> MigrationPhase.SCANNING
             else -> null
         }
         val body: (() -> Unit)? = when (n) {
@@ -158,6 +166,7 @@ class TermuxMigration(
             "confirm" -> ::doConfirm
             "revert" -> ::doRevert
             "delete-source" -> ::doDeleteSource
+            "delete-current-data" -> ::doDeleteCurrentData
             else -> null
         }
         if (body == null) return "unknown migration action: $name"
@@ -214,7 +223,14 @@ class TermuxMigration(
         }
         val total = importFiles.sumOf { it.size }
         val free = freeSpace()
-        val spaceOk = free >= requiredFreeSpace(total)
+        // An existing data.import/ is reclaimable: the copy deletes it before
+        // writing, so its bytes count toward the space check.
+        val importedSizes = dirs.import.listFiles()?.associate { it.name to it.length() }
+            ?: emptyMap<String, Long>()
+        val importBytes = importedSizes.values.sum()
+        val importComplete = isImportComplete(importFiles, importedSizes)
+        val spaceOk = isSpaceOk(free, importBytes, total)
+        val currentDataBytes = dirSize(dirs.data) + dirSize(dirs.old)
         val rejected = files.filter { it.role == FileRole.REJECT }.map { it.name }
         cached = cached.copy(
             dataDocId = dataDoc.docId,
@@ -222,16 +238,26 @@ class TermuxMigration(
             totalBytes = total,
             freeSpaceBytes = free,
             spaceOk = spaceOk,
+            importComplete = importComplete,
+            importBytes = importBytes,
+            currentDataBytes = currentDataBytes,
         )
         val warnings = buildList {
             if (rejected.isNotEmpty()) add("rejected entries: ${rejected.joinToString()}")
             if (!spaceOk) add(
                 "not enough free space (need ${formatBytes(requiredFreeSpace(total))}, " +
-                    "have ${formatBytes(free)})")
+                    "have ${formatBytes(free)}" +
+                    if (importBytes > 0) " + ${formatBytes(importBytes)} reclaimable from data.import/" else "" +
+                    ")")
+            if (!spaceOk && currentDataBytes > 0) add(
+                "the current internal data (${formatBytes(currentDataBytes)}) can be deleted to make room")
         }
         setPhase(
             MigrationPhase.SCANNED,
             "scan complete: ${importFiles.size} files, ${formatBytes(total)}" +
+                if (importComplete) {
+                    " — data.import/ already holds a complete copy of the scan; run verify directly"
+                } else "" +
                 if (warnings.isEmpty()) "" else " — " + warnings.joinToString("; "))
     }
 
@@ -293,6 +319,9 @@ class TermuxMigration(
                 copyBytesPerSec = if (elapsedSec > 0) (copied / elapsedSec).toLong() else 0)
         }
         cached = cached.copy(currentFile = null)
+        // The per-file size checks above guarantee data.import/ now matches
+        // the scan exactly.
+        cached = cached.copy(importComplete = true, importBytes = copied)
         setPhase(MigrationPhase.COPIED, "copy complete: ${formatBytes(copied)} — run verify")
     }
 
@@ -310,6 +339,12 @@ class TermuxMigration(
     private fun doVerify() {
         if (!File(dirs.import, "torrents.db").exists()) {
             return setPhase(MigrationPhase.FAILED, "nothing to verify — copy the files first")
+        }
+        if (verifyRefusedDueToPartialImport(cached.files.isNotEmpty(), cached.importComplete)) {
+            return setPhase(
+                MigrationPhase.FAILED,
+                "refused: data.import/ does not match the scan (partial or stale copy) — " +
+                    "run the copy first")
         }
         setPhase(MigrationPhase.VERIFYING, "running --check-database on the imported data")
         dirs.verify.mkdirs()
@@ -528,6 +563,28 @@ class TermuxMigration(
         setPhase(cached.phase, "source delete — " + results.joinToString(", "))
     }
 
+    /**
+     * Optional explicit cleanup (space recovery): stops the crawler, deletes
+     * the current internal `data/` and `data.old/` — never `data.import/`,
+     * never the Termux source — and re-scans, so the freed space is visible
+     * in the new scan. Never automatic: the UI requires a confirmation that
+     * warns a revert will then have no previous data to restore.
+     */
+    private fun doDeleteCurrentData() {
+        if (!dirs.data.exists() && !dirs.old.exists()) {
+            return setPhase(MigrationPhase.FAILED, "no current internal data to delete")
+        }
+        setPhase(MigrationPhase.SCANNING, "stopping crawler, deleting the current internal data")
+        stopCrawler()
+        if (dirs.data.exists() && !dirs.data.deleteRecursively()) {
+            return setPhase(MigrationPhase.FAILED, "could not delete data/")
+        }
+        if (dirs.old.exists() && !dirs.old.deleteRecursively()) {
+            return setPhase(MigrationPhase.FAILED, "could not delete data.old/")
+        }
+        doScan()
+    }
+
     // ── helpers ─────────────────────────────────────────────────────────────
 
     private fun abortCopy(reason: String, phase: MigrationPhase = MigrationPhase.FAILED) {
@@ -538,6 +595,10 @@ class TermuxMigration(
         }
         setPhase(phase, reason)
     }
+
+    /** Total size of the regular files under [dir] (0 when it does not exist). */
+    private fun dirSize(dir: File): Long =
+        if (dir.isDirectory) dir.walkTopDown().filter { it.isFile }.sumOf { it.length() } else 0L
 
     /** One `data/` directory entry as returned by a DocumentsContract query. */
     private data class RawEntry(
@@ -759,6 +820,17 @@ class TermuxMigration(
             return "--check-database exited with code $exit — " +
                 if (tail.isEmpty()) "no output" else tail
         }
+
+        /**
+         * True when a verify must be refused because a scan is on record and
+         * it did not find data.import/ complete: verifying a partial copy
+         * would be misleading. With no scan on record (e.g. after a service
+         * restart) the existence of data.import/torrents.db is the only gate.
+         */
+        internal fun verifyRefusedDueToPartialImport(
+            scanOnRecord: Boolean,
+            importComplete: Boolean,
+        ): Boolean = scanOnRecord && !importComplete
 
         /** Copy chunk size; the cancel flag is checked between chunks. */
         private const val COPY_CHUNK = 16L * 1024 * 1024

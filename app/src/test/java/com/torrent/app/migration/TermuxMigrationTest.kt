@@ -210,4 +210,48 @@ class TermuxMigrationTest {
         val cfg = workDir.resolve("verify/config.ini").readText()
         assertTrue(cfg, cfg.contains("db_path = ../data.import/torrents.db"))
     }
+
+    @Test fun verifyRefusedDueToPartialImport_onlyWithAnIncompleteScanOnRecord() {
+        assertTrue(TermuxMigration.verifyRefusedDueToPartialImport(true, false))
+        assertFalse(TermuxMigration.verifyRefusedDueToPartialImport(true, true))
+        // No scan on record (e.g. after a service restart): the existence of
+        // data.import/torrents.db is the only gate.
+        assertFalse(TermuxMigration.verifyRefusedDueToPartialImport(false, false))
+        assertFalse(TermuxMigration.verifyRefusedDueToPartialImport(false, true))
+    }
+
+    @Test fun deleteCurrentData_actionQueuesAndRemovesOnlyDataAndDataOld() {
+        val workDir = context.filesDir.resolve("crawler")
+        val data = workDir.resolve("data")
+        data.mkdirs()
+        data.resolve("torrents.db").writeText("current")
+        val old = workDir.resolve("data.old")
+        old.mkdirs()
+        old.resolve("torrents.db").writeText("old")
+        val imp = workDir.resolve("data.import")
+        imp.mkdirs()
+        imp.resolve("torrents.db").writeText("import")
+
+        assertEquals("started: delete-current-data", migration.action("delete-current-data"))
+        assertTrue(migration.isBusy())
+        executor.last?.run()
+
+        // data/ and data.old/ are gone; data.import/ (and any Termux source)
+        // must be untouched.
+        assertFalse(data.exists())
+        assertFalse(old.exists())
+        assertTrue(imp.resolve("torrents.db").exists())
+        // No SAF tree in the test, so the follow-up re-scan fails cleanly.
+        assertEquals(MigrationPhase.FAILED, migration.status.phase)
+        assertTrue(migration.status.message, migration.status.message.contains("no tree granted"))
+    }
+
+    @Test fun deleteCurrentData_withoutAnyCurrentData_failsCleanly() {
+        assertEquals("started: delete-current-data", migration.action("delete-current-data"))
+        executor.last?.run()
+        assertEquals(MigrationPhase.FAILED, migration.status.phase)
+        assertTrue(
+            migration.status.message,
+            migration.status.message.contains("no current internal data"))
+    }
 }

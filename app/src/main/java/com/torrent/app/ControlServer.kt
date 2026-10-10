@@ -773,6 +773,12 @@ class ControlServer(
             append("<p class=\"meta\">Total to import: <strong>").append(formatBytes(st.totalBytes))
                 .append("</strong> &nbsp; Free internal: <strong>").append(formatBytes(st.freeSpaceBytes))
                 .append("</strong>")
+            if (st.importBytes > 0) append(" &nbsp; data.import/: <strong>")
+                .append(formatBytes(st.importBytes))
+                .append("</strong> (reclaimable by a copy)")
+            if (st.currentDataBytes > 0) append(" &nbsp; Current internal data: <strong>")
+                .append(formatBytes(st.currentDataBytes))
+                .append("</strong> (deletable by choice)")
             if (!st.spaceOk) append(" <span class=\"warn\">not enough free space (need total + 10%)</span>")
             append("</p>")
         }
@@ -799,7 +805,11 @@ class ControlServer(
             if (st.treeUri != null && !phase.isActive && phase != MigrationPhase.CONFIRMED)
                 add(migAction("scan", "Scan", "Scan the Termux dht_crawler folder?"))
             if (phase == MigrationPhase.SCANNED && st.spaceOk)
-                add(migAction("copy", "Copy", "Copy the files? The app crawler is stopped while it runs."))
+                add(migAction("copy", if (st.importComplete) "Copy again" else "Copy",
+                    "Copy the files? The app crawler is stopped while it runs."))
+            if (phase == MigrationPhase.SCANNED && st.importComplete)
+                add(migAction("verify", "Verify existing copy",
+                    "Run --check-database on the existing data.import/ copy?"))
             if (phase == MigrationPhase.COPYING)
                 add(migAction("cancel", "Cancel copy", "Cancel the copy? data.import/ is deleted."))
             if (phase == MigrationPhase.COPIED)
@@ -828,6 +838,13 @@ class ControlServer(
                           onsubmit="return confirm('Delete the source files in the Termux tree via SAF? They are gone for good.') &&
                                      confirm('Second check: really delete the Termux source files now?')">
                     <button type="submit">Delete source files via SAF</button></form>
+                """.trimIndent())
+            if (phase == MigrationPhase.SCANNED && !st.spaceOk && st.currentDataBytes > 0)
+                add("""
+                    <form method="post" action="/crawler/migration/delete-current-data"
+                          onsubmit="return confirm('Delete the current internal data (data/ and data.old/, ${formatBytes(st.currentDataBytes)}) to free space? The app crawler is stopped and a new scan runs.') &&
+                                     confirm('Second check: really delete the current data? A revert will then have no previous data to restore.')">
+                    <button type="submit">Delete current data</button></form>
                 """.trimIndent())
         }.joinToString("")
         val cleanup = if (phase == MigrationPhase.CONFIRMED) {
@@ -985,6 +1002,9 @@ class ControlServer(
             append(",\"totalBytes\":").append(st.totalBytes)
             append(",\"freeSpaceBytes\":").append(st.freeSpaceBytes)
             append(",\"spaceOk\":").append(st.spaceOk)
+            append(",\"importComplete\":").append(st.importComplete)
+            append(",\"importBytes\":").append(st.importBytes)
+            append(",\"currentDataBytes\":").append(st.currentDataBytes)
             append(",\"currentFile\":").append(jsonStr(st.currentFile))
             append(",\"copiedBytes\":").append(st.copiedBytes)
             append(",\"copyBytesPerSec\":").append(st.copyBytesPerSec)

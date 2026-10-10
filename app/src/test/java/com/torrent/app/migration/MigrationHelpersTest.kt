@@ -57,6 +57,58 @@ class MigrationHelpersTest {
         assertEquals(5L, requiredFreeSpace(5L))
     }
 
+    @Test fun isSpaceOk_countsTheReclaimableImportBytes() {
+        // requiredFreeSpace(1_000) = 1_100.
+        assertFalse(isSpaceOk(1_000L, 0L, 1_000L))
+        assertTrue(isSpaceOk(1_100L, 0L, 1_000L))
+        assertTrue(isSpaceOk(600L, 500L, 1_000L))
+        assertFalse(isSpaceOk(599L, 500L, 1_000L))
+        assertTrue(isSpaceOk(0L, 1_100L, 1_000L))
+    }
+
+    // --- import completeness ---
+
+    private fun scanned(vararg namesAndSizes: Pair<String, Long>): List<ScannedFile> =
+        namesAndSizes.map { (name, size) -> ScannedFile(name, "doc-$name", size, 0L, FileRole.IMPORT) }
+
+    @Test fun isImportComplete_trueWhenEveryScannedFileMatchesAndNoExtras() {
+        val scannedFiles = scanned("torrents.db" to 100L, "bloom.dat" to 50L)
+        assertTrue(isImportComplete(
+            scannedFiles,
+            mapOf("torrents.db" to 100L, "bloom.dat" to 50L)))
+    }
+
+    @Test fun isImportComplete_walMustMatchWhenListed() {
+        val scannedFiles = scanned("torrents.db" to 100L, "torrents.db-wal" to 7L)
+        assertTrue(isImportComplete(
+            scannedFiles, mapOf("torrents.db" to 100L, "torrents.db-wal" to 7L)))
+        // A different WAL size (the source grew after the copy) is not complete.
+        assertFalse(isImportComplete(
+            scannedFiles, mapOf("torrents.db" to 100L, "torrents.db-wal" to 8L)))
+        // A WAL listed in the scan that the import dir lacks is not complete.
+        assertFalse(isImportComplete(scannedFiles, mapOf("torrents.db" to 100L)))
+    }
+
+    @Test fun isImportComplete_falseWhenAFileIsMissingOrResized() {
+        val scannedFiles = scanned("torrents.db" to 100L, "bloom.dat" to 50L)
+        assertFalse(isImportComplete(scannedFiles, mapOf("torrents.db" to 100L)))
+        assertFalse(isImportComplete(
+            scannedFiles, mapOf("torrents.db" to 99L, "bloom.dat" to 50L)))
+    }
+
+    @Test fun isImportComplete_falseWhenTheImportDirHasExtraFiles() {
+        val scannedFiles = scanned("torrents.db" to 100L)
+        assertFalse(isImportComplete(
+            scannedFiles, mapOf("torrents.db" to 100L, "stray.dat" to 1L)))
+    }
+
+    @Test fun isImportComplete_falseWithoutTorrentsDb() {
+        // torrents.db is required on both sides.
+        assertFalse(isImportComplete(
+            scanned("bloom.dat" to 50L), mapOf("bloom.dat" to 50L)))
+        assertFalse(isImportComplete(emptyList(), emptyMap()))
+    }
+
     // --- path layout ---
 
     @Test fun migrationDirs_layoutsUnderTheCrawlerWorkDir() {
