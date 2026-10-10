@@ -82,6 +82,10 @@ class DaemonService : Service() {
     @Volatile var crawlerApplyStatus = CrawlerApplyStatus()
     @Volatile var crawlerPausedNoWifi = false
     private var crawlerObservingJob: Job? = null
+    // One-shot maintenance runner + its coordinator (plan 10 step 5); both are
+    // created in onCreate() once applicationInfo is available.
+    private lateinit var oneShotRunner: OneShotRunner
+    private lateinit var crawlerMaintenance: CrawlerMaintenance
 
     override fun onCreate() {
         super.onCreate()
@@ -95,6 +99,24 @@ class DaemonService : Service() {
         }
         safSocketFile = java.io.File(filesDir, "saf-bridge.sock")
         safIpcServer = SafIpcServer(safSocketFile, SafIpcRequestHandler { gateway })
+        // One-shot maintenance runner + coordinator (plan 10 step 5). The
+        // runner execs the same libdhtcrawler.so the supervisor supervises;
+        // the coordinator serializes actions on the crawler-control executor.
+        oneShotRunner = OneShotRunner(
+            binaryName = "libdhtcrawler.so",
+            nativeLibraryDir = applicationInfo.nativeLibraryDir,
+            extraEnv = mapOf("TMPDIR" to File(filesDir, "tmp").apply { mkdirs() }.absolutePath),
+        )
+        crawlerMaintenance = CrawlerMaintenance(
+            oneShotRunner = oneShotRunner,
+            workDir = File(filesDir, "crawler"),
+            executor = crawlerControlExecutor,
+            dbSize = { crawlerDbSize() ?: 0L },
+            freeSpace = ::internalFreeSpace,
+            stopCrawler = { stopCrawlerSupervisors() },
+            startCrawlerIfEnabled = ::startCrawlerIfEnabled,
+            busy = { crawlerApplyStatus.phase.isActive },
+        )
         controlServer = ControlServer(
             tokenManager = tokenManager,
             serviceState = _state,
@@ -118,6 +140,8 @@ class DaemonService : Service() {
             crawlerHttpPort = ::crawlerHttpPort,
             crawlerDbSize = ::crawlerDbSize,
             internalFreeSpace = ::internalFreeSpace,
+            crawlerMaintenanceStart = ::startCrawlerMaintenance,
+            crawlerMaintenanceStatus = { crawlerMaintenance.status },
 )
         wifiGateMonitor = WifiGateMonitor(this)
     }
@@ -744,6 +768,30 @@ class DaemonService : Service() {
                 android.util.Log.e("DaemonService", "failed to start crawler supervisor", e)
             }
         }
+    }
+
+    /**
+     * Starts the crawler if it is enabled and the wifi gate allows (plan 10 §5).
+     * Used after a maintenance action to restore the crawler. The actual start
+     * is queued on the crawler-control executor by [startCrawlerSupervisor].
+     */
+    private fun startCrawlerIfEnabled() {
+        val c = configStore.load().crawler
+        if (CrawlerGate.shouldRun(c.enabled, c.wifiOnly, wifiGateMonitor.state.value.wifi)) {
+            startCrawlerSupervisor()
+        }
+    }
+
+    /**
+     * Queues a crawler maintenance action (plan 10 §4) by its route name,
+     * returning a human message (the resulting [CrawlerMaintenance] status
+     * message). The `POST /crawler/maintenance/{action}` route redirects back
+     * with this text.
+     */
+    fun startCrawlerMaintenance(action: String): String {
+        val a = MaintenanceAction.fromRoute(action)
+            ?: return "unknown maintenance action: $action"
+        return crawlerMaintenance.start(a).message
     }
 
     /** Builds (does not start) the dht_crawler supervisor for [args]. */

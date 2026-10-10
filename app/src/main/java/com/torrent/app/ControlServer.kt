@@ -41,6 +41,10 @@ class ControlServer(
     private val crawlerHttpPort: () -> Int = { 8081 },
     private val crawlerDbSize: () -> Long? = { null },
     private val internalFreeSpace: () -> Long = { 0L },
+    // Maintenance (plan 10 step 5): the POST route queues an action by name and
+    // the GET route polls its status (incl. output lines since an offset).
+    private val crawlerMaintenanceStart: (String) -> String = { "maintenance is not wired" },
+    private val crawlerMaintenanceStatus: () -> MaintenanceStatus = { MaintenanceStatus() },
     private val port: Int = 8090,
 ) {
     @Volatile private var server: EmbeddedServer<*, *>? = null
@@ -221,6 +225,39 @@ class ControlServer(
                             .firstOrNull { it.label == DaemonService.CRAWLER_LABEL }?.state == ProcessState.RUNNING
                         val body = if (running) fetchCrawlerStats(crawlerHttpPort()) else null
                         call.respondText(crawlerStatsJson(body), ContentType.Application.Json)
+                    }
+
+                    // Maintenance (plan 10 step 4): queue a one-shot action by name.
+                    // The page confirms via JS confirm(); the action stops the
+                    // crawler, runs, and restarts it — all off the request thread.
+                    post("crawler/maintenance/{action}") {
+                        val action = call.parameters["action"] ?: ""
+                        val msg = crawlerMaintenanceStart(action)
+                        val ok = !msg.startsWith("refused") && !msg.startsWith("unknown")
+                        val token = parseCookieToken(call.request.headers["Cookie"])
+                            ?: call.request.queryParameters["token"] ?: ""
+                        call.respondRedirect("/settings/crawler?msg=${urlEnc(msg)}&ok=$ok&token=$token")
+                    }
+
+                    // Maintenance status JSON; `?offset=` returns only output
+                    // lines appended since that index (for incremental polling).
+                    get("api/crawler/maintenance") {
+                        val offset = (call.request.queryParameters["offset"]?.toIntOrNull() ?: 0).coerceAtLeast(0)
+                        val st = crawlerMaintenanceStatus()
+                        val lines = st.lines
+                        val newLines = if (offset < lines.size) lines.subList(offset, lines.size) else emptyList()
+                        val json = buildString {
+                            append("{\"action\":").append(jsonStr(st.action?.route))
+                            append(",\"running\":").append(st.running)
+                            append(",\"exitCode\":").append(st.exitCode?.toString() ?: "null")
+                            append(",\"startedAt\":").append(st.startedAt?.toString() ?: "null")
+                            append(",\"finishedAt\":").append(st.finishedAt?.toString() ?: "null")
+                            append(",\"message\":").append(jsonStr(st.message))
+                            append(",\"totalLines\":").append(lines.size)
+                            append(",\"lines\":[").append(newLines.joinToString(",") { jsonStr(it) }).append("]")
+                            .append("}")
+                        }
+                        call.respondText(json, ContentType.Application.Json)
                     }
                 }
             }
@@ -501,6 +538,7 @@ class ControlServer(
             <form method="post" action="/crawler/maintenance/rebuild-bloom-filter"
                   onsubmit="return confirm('Rebuild the bloom filter? The crawler is stopped while it runs (a few minutes).')">
             <button type="submit">Run --rebuild-bloom-filter</button></form></div>""" else ""
+        val maintenanceSection = buildMaintenanceSection()
         return """
             <!DOCTYPE html><html><head><title>DHT crawler settings</title>
             <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -509,6 +547,10 @@ class ControlServer(
             #apply-status{background:#e7f1ff;padding:.6em;border-radius:4px;margin:1em 0;font-size:.9em}
             #apply-status.busy{background:#fff3cd}
             pre.apply-log{margin:.4em 0 0;padding:8px;background:#fafafa;border-radius:4px;font-size:.8em;max-height:200px;overflow-y:auto;white-space:pre-wrap;word-break:break-all}
+            #maint-btns form{display:inline-block;margin:0 .5em .5em 0}
+            #maint-btns button{margin:0;padding:.4em .8em}
+            #maint-status{font-size:.9em}
+            #maint-status.busy{background:#fff3cd;padding:.4em;border-radius:4px}
             </style></head><body>
             <h1>DHT crawler</h1>$banner
             <form method="post" action="/settings/crawler">
@@ -553,6 +595,7 @@ class ControlServer(
             $rebuildBox
             <div id="apply-status">Apply status: IDLE</div>
             <pre id="apply-log" class="apply-log" style="display:none"></pre>
+            $maintenanceSection
             <p><a href="/">Back to dashboard</a></p>
             <script>
             (function () {
@@ -579,9 +622,55 @@ class ControlServer(
                 }).catch(function () {});
               }
               setInterval(pollApply, 2000); pollApply();
+              var maintOffset = 0;
+              var maintSeenAction = null;
+              function pollMaint() {
+                fetch('/api/crawler/maintenance?offset=' + maintOffset).then(function (r) { return r.json(); }).then(function (st) {
+                  var box = document.getElementById('maint-status');
+                  var log = document.getElementById('maint-log');
+                  var skip = false;
+                  if (st.action !== maintSeenAction) {
+                    maintSeenAction = st.action;
+                    maintOffset = 0;
+                    log.textContent = '';
+                    skip = true;  // st.lines was sliced with the old offset; refetch from 0 next round
+                  } else if (st.lines && st.lines.length) {
+                    log.textContent += (log.textContent ? '\n' : '') + st.lines.join('\n');
+                    log.scrollTop = log.scrollHeight;
+                  }
+                  if (!skip) maintOffset = st.totalLines;
+                  var state = st.running ? 'running\u2026' : (st.exitCode === null ? 'idle' : 'exit ' + st.exitCode);
+                  box.textContent = st.action ? ('Maintenance: ' + st.action + ' \u2014 ' + state + (st.message ? ' (' + st.message + ')' : '')) : 'Maintenance: idle';
+                  box.className = st.running ? 'busy' : 'meta';
+                  log.style.display = st.totalLines ? '' : 'none';
+                }).catch(function () {});
+              }
+              setInterval(pollMaint, 1500); pollMaint();
             })();
             </script>
             </body></html>
+        """.trimIndent()
+    }
+
+    /** The maintenance fieldset on the crawler panel (plan 10 step 4). */
+    private fun buildMaintenanceSection(): String {
+        val buttons = MaintenanceAction.entries.joinToString("") { a ->
+            val warn = if (a.needsSpaceCheck) " (needs ~DB size of free internal space)" else ""
+            """
+              <form method="post" action="/crawler/maintenance/${a.route}"
+                    onsubmit="return confirm('Run ${a.flag}? The crawler is stopped while it runs.$warn')">
+              <button type="submit">${a.route}</button></form>
+            """.trimIndent()
+        }
+        return """
+            <fieldset><legend>Maintenance (one at a time; crawler stopped while running)</legend>
+              <p class="meta">Runs <code>libdhtcrawler.so &lt;flag&gt;</code> as a one-shot in the crawler
+              work dir. compact / recover-database need ~DB size of free internal space. The supervised
+              crawler is stopped first and restarted afterwards if enabled (and wifi is up).</p>
+              <div id="maint-btns">$buttons</div>
+              <div id="maint-status" class="meta">Maintenance: idle</div>
+              <pre id="maint-log" class="apply-log" style="display:none"></pre>
+            </fieldset>
         """.trimIndent()
     }
 

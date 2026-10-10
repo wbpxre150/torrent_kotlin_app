@@ -174,51 +174,13 @@ class ProcessSupervisor(
      * (label `app_data_file`) is forbidden by Android W^X enforcement and
      * must not be done.
      */
-    internal fun resolveBinary(): File? {
-        val binary = File(nativeLibraryDir, binaryName)
-        if (!binary.exists()) {
-            Log.e(TAG, "[$label] binary not found: ${binary.absolutePath}")
-            return null
-        }
-        if (!binary.canExecute()) {
-            binary.setExecutable(true, false)
-            if (!binary.canExecute()) {
-                Log.e(TAG, "[$label] binary not executable: ${binary.absolutePath}")
-                return null
-            }
-        }
-        return binary
-    }
+    internal fun resolveBinary(): File? =
+        NativeProcess.resolveBinary(label, nativeLibraryDir, binaryName)
 
     private fun launchChild(): Process? {
-        // workDir is the child's cwd (ProcessBuilder.directory). It must exist
-        // before start(): ProcessBuilder forks and calls chdir(workDir) before
-        // execve(); a missing cwd yields ENOENT that Java's IOException reports
-        // against the program path, masking the real cause.
-        workDir.mkdirs()
-
         val binary = resolveBinary() ?: return null
-
-        val env = ProcessBuilder().environment().apply {
-            if (ldLibraryPath != null) {
-                put("LD_LIBRARY_PATH", ldLibraryPath)
-            }
-            putAll(extraEnv)
-        }
-
-        val cmd = mutableListOf(binary.absolutePath)
-        cmd.addAll(args)
-
-        return try {
-            ProcessBuilder(cmd)
-                .directory(workDir)
-                .redirectErrorStream(true)
-                .apply { environment().putAll(env) }
-                .start()
-        } catch (e: Exception) {
-            Log.e(TAG, "[$label] exec failed: ${e.message}", e)
-            null
-        }
+        return NativeProcess.startProcess(
+            NativeProcess.buildCommand(binary, args), workDir, ldLibraryPath, extraEnv)
     }
 
     /**
@@ -349,13 +311,7 @@ class ProcessSupervisor(
             // Expected during stop()
         }
     }
-    private fun pidOf(proc: Process): Int? = try {
-        val f = proc.javaClass.getDeclaredField("pid")
-        f.isAccessible = true
-        (f.get(proc) as? Int)
-    } catch (_: Exception) {
-        null
-    }
+    private fun pidOf(proc: Process): Int? = NativeProcess.pidOf(proc)
     /**
      * One-shot read of any log file content appended since [tailLastPos], pushed
      * into the ring buffer. Returns immediately after a single pass (no looping).
