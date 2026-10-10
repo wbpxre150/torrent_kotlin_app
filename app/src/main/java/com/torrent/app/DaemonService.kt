@@ -36,6 +36,8 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadFactory
 import org.json.JSONObject
 import com.torrent.app.config.CrawlerGate
+import com.torrent.app.migration.CrawlerTreeGrant
+import com.torrent.app.migration.TermuxMigration
 
 sealed class ServiceState {
     data object Starting : ServiceState()
@@ -86,6 +88,11 @@ class DaemonService : Service() {
     // created in onCreate() once applicationInfo is available.
     private lateinit var oneShotRunner: OneShotRunner
     private lateinit var crawlerMaintenance: CrawlerMaintenance
+    // Termux migration backend (plan 10 step 6): background jobs on the
+    // crawler-control executor; the SAF tree grant is persisted separately so
+    // a long copy survives a service restart.
+    private lateinit var crawlerTreeGrant: CrawlerTreeGrant
+    private lateinit var crawlerMigration: TermuxMigration
 
     override fun onCreate() {
         super.onCreate()
@@ -115,8 +122,33 @@ class DaemonService : Service() {
             freeSpace = ::internalFreeSpace,
             stopCrawler = { stopCrawlerSupervisors() },
             startCrawlerIfEnabled = ::startCrawlerIfEnabled,
-            busy = { crawlerApplyStatus.phase.isActive },
+            busy = { crawlerApplyStatus.phase.isActive || crawlerMigration.isBusy() },
         )
+        // Termux migration backend (plan 10 step 6): scan/copy/verify/swap/
+        // start/confirm/revert as background jobs, mutually exclusive with
+        // the apply and maintenance jobs (both consult isBusy).
+        crawlerTreeGrant = CrawlerTreeGrant(this)
+        crawlerMigration = TermuxMigration(
+            context = this,
+            oneShotRunner = oneShotRunner,
+            executor = crawlerControlExecutor,
+            crawlerConfig = CrawlerConfig(this),
+            grant = crawlerTreeGrant,
+            freeSpace = ::internalFreeSpace,
+            stopCrawler = { stopCrawlerSupervisors() },
+            startCrawlerIfEnabled = ::startCrawlerIfEnabled,
+            applyCrawler = ::applyCrawlerSettings,
+            currentSettings = { configStore.load().crawler },
+            crawlerRunning = {
+                supervisors.any { s ->
+                    s.status.value.label == CRAWLER_LABEL && s.status.value.state == ProcessState.RUNNING
+                }
+            },
+            statsReachable = ::crawlerStatsReachable,
+        )
+        // A tree granted before the last service start is still persisted
+        // (persistable permission): hand it back to the coordinator.
+        crawlerTreeGrant.treeUri()?.let { crawlerMigration.setTree(it) }
         controlServer = ControlServer(
             tokenManager = tokenManager,
             serviceState = _state,
@@ -178,6 +210,7 @@ class DaemonService : Service() {
         fun usbFreeSpace(): Long? = this@DaemonService.usbFreeSpace()
         fun completeWizard() = this@DaemonService.completeWizard()
         fun lastApplyRolledBack(): Boolean = this@DaemonService.lastApplyRolledBack
+        fun setCrawlerImportTree(uri: Uri): String = this@DaemonService.setCrawlerImportTree(uri)
     }
 
     override fun onBind(intent: Intent?): IBinder = LocalBinder()
@@ -382,6 +415,12 @@ class DaemonService : Service() {
      * every other crawler stop/start.
      */
     fun applyCrawlerSettings(s: com.torrent.app.config.CrawlerSettings): com.torrent.app.config.ApplyResult {
+        // Mutual exclusion (plan 10 step 6): never apply settings while a
+        // migration job is in flight.
+        if (crawlerMigration.isBusy()) {
+            return com.torrent.app.config.ApplyResult(
+                false, "a migration job is running; try again when it finishes", false)
+        }
         val errors = com.torrent.app.config.ConfigValidator.validateCrawler(s)
         if (errors.isNotEmpty()) {
             return com.torrent.app.config.ApplyResult(false, errors.joinToString("; "), false)
@@ -792,6 +831,37 @@ class DaemonService : Service() {
         val a = MaintenanceAction.fromRoute(action)
             ?: return "unknown maintenance action: $action"
         return crawlerMaintenance.start(a).message
+    }
+
+    /**
+     * Persists the Termux migration tree picked in MainActivity
+     * (plan 10 §6.2) and hands it to the migration backend. Refuses the USB
+     * tree URI — the crawler data never touches USB.
+     */
+    fun setCrawlerImportTree(uri: Uri): String {
+        val usb = usbPermissionManager.treeUri()
+        if (usb != null && usb == uri) {
+            return "refused: that is the USB storage tree — pick the Termux dht_crawler folder"
+        }
+        crawlerTreeGrant.grant(uri)
+        return crawlerMigration.setTree(uri)
+    }
+
+    /** True when the crawler's /stats answers on loopback (~2 s timeout). */
+    private fun crawlerStatsReachable(): Boolean {
+        return try {
+            val conn = (java.net.URL("http://127.0.0.1:${crawlerHttpPort()}/stats")
+                .openConnection() as java.net.HttpURLConnection).apply {
+                connectTimeout = 2000
+                readTimeout = 2000
+                instanceFollowRedirects = false
+            }
+            val ok = conn.responseCode == 200
+            conn.disconnect()
+            ok
+        } catch (e: Exception) {
+            false
+        }
     }
 
     /** Builds (does not start) the dht_crawler supervisor for [args]. */
