@@ -112,6 +112,8 @@ class DaemonService : Service() {
             crawlerApplyStatus = { crawlerApplyStatus },
             crawlerPausedNoWifi = { crawlerPausedNoWifi },
             crawlerHttpPort = ::crawlerHttpPort,
+            crawlerDbSize = ::crawlerDbSize,
+            internalFreeSpace = ::internalFreeSpace,
 )
         wifiGateMonitor = WifiGateMonitor(this)
     }
@@ -374,6 +376,18 @@ class DaemonService : Service() {
         val c = configStore.load().crawler
         return if (c.lanDirect) c.proxyPort else c.crawlerHttpPort
     }
+
+    /** Combined size of the crawler's `torrents.db` + WAL, null when no DB exists. */
+    fun crawlerDbSize(): Long? {
+        val data = File(filesDir, "crawler/data")
+        val db = File(data, "torrents.db")
+        val wal = File(data, "torrents.db-wal")
+        if (!db.exists() && !wal.exists()) return null
+        return (if (db.exists()) db.length() else 0L) + (if (wal.exists()) wal.length() else 0L)
+    }
+
+    /** Free internal storage in bytes (the crawler DB lives on internal storage). */
+    fun internalFreeSpace(): Long = filesDir.usableSpace
 
     /**
      * The apply job body; runs on the crawler-control executor (see

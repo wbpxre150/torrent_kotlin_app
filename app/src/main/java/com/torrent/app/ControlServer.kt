@@ -12,6 +12,8 @@ import java.net.URLDecoder
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 import com.torrent.app.config.TransmissionApplyMode
+import com.torrent.app.config.CrawlerKeys
+import com.torrent.app.config.CrawlerSettings
 
 class ControlServer(
     private val tokenManager: TokenManager,
@@ -36,6 +38,8 @@ class ControlServer(
     private val crawlerApplyStatus: () -> CrawlerApplyStatus = { CrawlerApplyStatus() },
     private val crawlerPausedNoWifi: () -> Boolean = { false },
     private val crawlerHttpPort: () -> Int = { 8081 },
+    private val crawlerDbSize: () -> Long? = { null },
+    private val internalFreeSpace: () -> Long = { 0L },
     private val port: Int = 8090,
 ) {
     @Volatile private var server: EmbeddedServer<*, *>? = null
@@ -184,10 +188,38 @@ class ControlServer(
                         call.respondText(buildStoragePanel(), ContentType.Text.Html)
                     }
                     get("settings/crawler") {
-                        call.respondText(buildStubPanel("DHT crawler", "Available after Stage 10."), ContentType.Text.Html)
+                        val msg = call.request.queryParameters["msg"]
+                        val ok = call.request.queryParameters["ok"]?.toBoolean() ?: false
+                        val rebuildBloom = call.request.queryParameters["rebuildBloom"]?.toBoolean() ?: false
+                        call.respondText(buildCrawlerPanel(msg, ok, rebuildBloom), ContentType.Text.Html)
                     }
-                    get("settings/rclone") {
-                        call.respondText(buildStubPanel("Backups (rclone)", "Available after Stage 11."), ContentType.Text.Html)
+                    post("settings/crawler") {
+                        val form = parseForm(call.receiveText())
+                        val current = loadConfig().crawler
+                        val s = crawlerSettingsFromForm(form, current)
+                        val bloomChanged = current.bloomCapacity != s.bloomCapacity ||
+                            current.failureBloomCapacity != s.failureBloomCapacity ||
+                            current.bloomErrorRate != s.bloomErrorRate
+                        val r = applyCrawler(s)
+                        val token = parseCookieToken(call.request.headers["Cookie"]) ?: call.request.queryParameters["token"] ?: ""
+                        val rebuild = if (bloomChanged) "&rebuildBloom=true" else ""
+                        call.respondRedirect("/settings/crawler?msg=${urlEnc(r.message)}&ok=${r.ok}&token=$token$rebuild")
+                    }
+                    get("api/crawler/apply-status") {
+                        val st = crawlerApplyStatus()
+                        val json = buildString {
+                            append("{\"phase\":\"").append(st.phase.name).append("\"")
+                            append(",\"message\":").append(jsonStr(st.message))
+                            append(",\"logTail\":[").append(st.logTail.joinToString(",") { jsonStr(it) }).append("]")
+                            .append("}")
+                        }
+                        call.respondText(json, ContentType.Application.Json)
+                    }
+                    get("api/crawler/stats") {
+                        val running = daemonStatuses()
+                            .firstOrNull { it.label == DaemonService.CRAWLER_LABEL }?.state == ProcessState.RUNNING
+                        val body = if (running) fetchCrawlerStats(crawlerHttpPort()) else null
+                        call.respondText(crawlerStatsJson(body), ContentType.Application.Json)
                     }
                 }
             }
@@ -311,8 +343,7 @@ class ControlServer(
               <a class="cfg" href="/settings/transmission">Transmission settings</a>
               <a class="cfg" href="/settings/ftp">FTP settings</a>
               <a class="cfg" href="/settings/storage">Storage</a>
-              <a class="cfg" href="/settings/crawler" aria-disabled="true">Crawler (soon)</a>
-              <a class="cfg" href="/settings/rclone" aria-disabled="true">Backups (soon)</a>
+              <a class="cfg" href="/settings/crawler">Crawler</a>
             </p>
             <h2>Daemons</h2>
             <table><tr><th>Name</th><th>State</th><th>PID</th><th>Uptime</th><th>Restarts</th><th>Control</th></tr>
@@ -324,6 +355,8 @@ class ControlServer(
             $usbSection
             <h2>FTP Server (wifi only)</h2>
             ${ftpStatusSection()}
+            <h2>DHT Crawler</h2>
+            ${crawlerSection()}
             </body></html>
         """.trimIndent()
     }
@@ -333,6 +366,7 @@ class ControlServer(
         val usb = usbFreeSpace()
         val f = ftpStatus()
         val s = safStatus()
+        val crawler = daemons.firstOrNull { it.label == DaemonService.CRAWLER_LABEL }
         return buildString {
             append("{\"service\":\"").append(serviceState.value.toString()).append("\"")
             append(",\"wizardCompleted\":").append(wizardCompleted())
@@ -340,6 +374,8 @@ class ControlServer(
             append(",\"usb\":{\"granted\":").append(s.granted).append(",\"freeBytes\":").append(usb ?: "null").append("}")
             append(",\"wifiUp\":").append(f.wifiUp)
             append(",\"ftp\":{").append("\"running\":").append(f.running).append(",\"port\":").append(f.port).append("}")
+            append(",\"crawler\":{\"state\":\"").append(crawler?.state?.name ?: "STOPPED")
+                .append("\",\"pausedNoWifi\":").append(crawlerPausedNoWifi()).append("}")
             append(",\"daemons\":[")
             append(daemons.joinToString(",") { d ->
                 "{\"label\":\"" + d.label + "\",\"state\":\"" + d.state + "\",\"pid\":" + (d.pid ?: "null") +
@@ -451,15 +487,161 @@ class ControlServer(
         """.trimIndent()
     }
 
-    private fun buildStubPanel(title: String, note: String): String = """
-        <!DOCTYPE html><html><head><title>$title</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <style>$panelCss</style></head><body>
-        <h1>$title</h1>
-        <div class="warn">$note This panel is a placeholder.</div>
-        <p><a href="/">Back to dashboard</a></p>
-        </body></html>
-    """.trimIndent()
+    private fun buildCrawlerPanel(msg: String?, ok: Boolean, rebuildBloom: Boolean): String {
+        val s = loadConfig().crawler
+        val banner = if (msg != null)
+            """<div class="${if (ok) "ok" else "err"}">${esc(msg)}</div>""" else ""
+        val checked = { b: Boolean -> if (b) "checked" else "" }
+        val levelOptions = CrawlerKeys.LOG_LEVELS.joinToString("") { l ->
+            """<option value="$l"${if (l == s.logLevel) " selected" else ""}>$l</option>"""
+        }
+        val rebuildBox = if (rebuildBloom) """
+            <div class="warn">Bloom filter settings changed — the persisted filters are now stale.
+            <form method="post" action="/crawler/maintenance/rebuild-bloom-filter"
+                  onsubmit="return confirm('Rebuild the bloom filter? The crawler is stopped while it runs (a few minutes).')">
+            <button type="submit">Run --rebuild-bloom-filter</button></form></div>""" else ""
+        return """
+            <!DOCTYPE html><html><head><title>DHT crawler settings</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <style>$panelCss
+            .warn-num{color:#721c24;font-weight:700}
+            #apply-status{background:#e7f1ff;padding:.6em;border-radius:4px;margin:1em 0;font-size:.9em}
+            #apply-status.busy{background:#fff3cd}
+            pre.apply-log{margin:.4em 0 0;padding:8px;background:#fafafa;border-radius:4px;font-size:.8em;max-height:200px;overflow-y:auto;white-space:pre-wrap;word-break:break-all}
+            </style></head><body>
+            <h1>DHT crawler</h1>$banner
+            <form method="post" action="/settings/crawler">
+              <fieldset><legend>General</legend>
+                <label class="row"><input type="checkbox" name="enabled" ${checked(s.enabled)}> Enabled (start with the service)</label>
+                <label class="row"><input type="checkbox" name="wifiOnly" ${checked(s.wifiOnly)}> WiFi only (pause when wifi is down)</label>
+                <label>Log level<select name="logLevel">$levelOptions</select></label>
+                <label>DHT port<input name="dhtPort" value="${s.dhtPort}"></label>
+                <label>Nice level (-20..19)<input name="niceLevel" value="${s.niceLevel}"></label>
+                <label class="row"><input type="checkbox" name="skipIntegrityCheck" ${checked(s.skipIntegrityCheck)}> Skip startup integrity check (--dont-check-database)</label>
+              </fieldset>
+              <fieldset><legend>Resources</legend>
+                <label>Tree count (1..64)<input id="numTrees" name="numTrees" value="${s.numTrees}"></label>
+                <label>Find-node workers<input id="treeFindNodeWorkers" name="treeFindNodeWorkers" value="${s.treeFindNodeWorkers}"></label>
+                <label>BEP51 workers<input id="treeBep51Workers" name="treeBep51Workers" value="${s.treeBep51Workers}"></label>
+                <label>Get-peers workers<input id="treeGetPeersWorkers" name="treeGetPeersWorkers" value="${s.treeGetPeersWorkers}"></label>
+                <label>Metadata workers<input id="treeMetadataWorkers" name="treeMetadataWorkers" value="${s.treeMetadataWorkers}"></label>
+                <label>Infohash queue capacity<input name="treeInfohashQueueCapacity" value="${s.treeInfohashQueueCapacity}"></label>
+                <label>Peers queue capacity<input name="treePeersQueueCapacity" value="${s.treePeersQueueCapacity}"></label>
+                <p class="meta">Estimated worker threads: <span id="est-threads"></span><span id="est-warn" style="display:none;color:#721c24"> — above ${CrawlerKeys.THREAD_WARN_THRESHOLD}; the Termux-proven config uses ~1,552</span></p>
+              </fieldset>
+              <fieldset><legend>Filters</legend>
+                <label class="row"><input type="checkbox" name="pornFilterEnabled" ${checked(s.pornFilterEnabled)}> Porn filter</label>
+                <label>Non-Latin language threshold (0..100)<input name="languageFilterNonLatinThreshold" value="${s.languageFilterNonLatinThreshold}"></label>
+              </fieldset>
+              <fieldset><legend>Bloom filters (changing these invalidates the persisted filters)</legend>
+                <label>Bloom capacity<input name="bloomCapacity" value="${s.bloomCapacity}"></label>
+                <label>Failure bloom capacity<input name="failureBloomCapacity" value="${s.failureBloomCapacity}"></label>
+                <label>Bloom error rate (0..1)<input name="bloomErrorRate" value="${s.bloomErrorRate}"></label>
+              </fieldset>
+              <fieldset><legend>Advanced overrides (key=value, one per line)</legend>
+                <textarea name="advancedOverrides" rows="6" placeholder="# key=value">${esc(s.advancedOverrides)}</textarea>
+                <p class="meta">Path and backup keys are not allowed; form-managed keys must use the fields above.</p>
+              </fieldset>
+              <fieldset><legend>Access</legend>
+                <label>Proxy port (LAN, authenticated)<input name="proxyPort" value="${s.proxyPort}"></label>
+                <label>Crawler HTTP port (loopback)<input name="crawlerHttpPort" value="${s.crawlerHttpPort}"></label>
+                <label class="row"><input type="checkbox" name="lanDirect" ${checked(s.lanDirect)}> LAN direct (bind 0.0.0.0, no proxy, no auth)</label>
+              </fieldset>
+              <button type="submit">Apply</button>
+            </form>
+            $rebuildBox
+            <div id="apply-status">Apply status: IDLE</div>
+            <pre id="apply-log" class="apply-log" style="display:none"></pre>
+            <p><a href="/">Back to dashboard</a></p>
+            <script>
+            (function () {
+              var ids = ['numTrees','treeFindNodeWorkers','treeBep51Workers','treeGetPeersWorkers','treeMetadataWorkers'];
+              function v(id) { var n = parseInt(document.getElementById(id).value, 10); return isNaN(n) ? 0 : n; }
+              function updateEst() {
+                var n = v('numTrees') * (v('treeFindNodeWorkers') + v('treeBep51Workers') +
+                    v('treeGetPeersWorkers') + v('treeMetadataWorkers')) + ${CrawlerKeys.THREAD_OVERHEAD};
+                var el = document.getElementById('est-threads');
+                el.textContent = n;
+                el.className = n > ${CrawlerKeys.THREAD_WARN_THRESHOLD} ? 'warn-num' : '';
+                document.getElementById('est-warn').style.display = n > ${CrawlerKeys.THREAD_WARN_THRESHOLD} ? '' : 'none';
+              }
+              ids.forEach(function (id) { document.getElementById(id).addEventListener('input', updateEst); });
+              updateEst();
+              function pollApply() {
+                fetch('/api/crawler/apply-status').then(function (r) { return r.json(); }).then(function (st) {
+                  var box = document.getElementById('apply-status');
+                  box.textContent = 'Apply status: ' + st.phase + (st.message ? ' — ' + st.message : '');
+                  box.className = ['IDLE','OK','ROLLED_BACK','FAILED'].indexOf(st.phase) >= 0 ? '' : 'busy';
+                  var tail = document.getElementById('apply-log');
+                  tail.style.display = st.logTail.length ? '' : 'none';
+                  tail.textContent = st.logTail.join('\\n');
+                }).catch(function () {});
+              }
+              setInterval(pollApply, 2000); pollApply();
+            })();
+            </script>
+            </body></html>
+        """.trimIndent()
+    }
+
+    private fun crawlerSection(): String {
+        val c = loadConfig().crawler
+        val d = daemonStatuses().firstOrNull { it.label == DaemonService.CRAWLER_LABEL }
+        val state = d?.state ?: ProcessState.STOPPED
+        val uptime = d?.startTimeMs?.let { formatUptime(System.currentTimeMillis() - it) } ?: "—"
+        val logs = d?.lastLogLines?.takeLast(30)?.joinToString("<br>") { esc(it) } ?: "—"
+        val dbSize = crawlerDbSize()
+        val free = internalFreeSpace()
+        val spaceWarn = if (free < CRAWLER_LOW_FREE_SPACE_BYTES) " <span class=\"warn\">low free space</span>" else ""
+        val paused = if (crawlerPausedNoWifi()) " <span class=\"state STOPPED\">paused: no wifi</span>" else ""
+        val host = wifiIp() ?: "127.0.0.1"
+        val searchUrl = "http://$host:${c.proxyPort}/"
+        return """
+            <p class="meta">State: <span class="state $state">$state</span>$paused
+               &nbsp; PID: <strong>${d?.pid ?: "—"}</strong>
+               &nbsp; Uptime: <strong>$uptime</strong>
+               &nbsp; Restarts: <strong>${d?.restartCount ?: 0}</strong></p>
+            <p class="meta">DB: <strong>${dbSize?.let { formatBytes(it) } ?: "—"}</strong>
+               &nbsp; Internal free: <strong>${formatBytes(free)}</strong>$spaceWarn</p>
+            <p class="meta">Search UI: <a href="$searchUrl" target="_blank">$searchUrl</a></p>
+            <p class="meta" id="crawler-stats">Stats: loading…</p>
+            <pre class="loglines">$logs</pre>
+            <script>
+            (function () {
+              function poll() {
+                fetch('/api/crawler/stats').then(function (r) { return r.json(); }).then(function (s) {
+                  var el = document.getElementById('crawler-stats');
+                  if (!s || s.running === false) { el.textContent = 'Stats: crawler not running'; return; }
+                  var rate = 0;
+                  (s.trees || []).forEach(function (t) { rate += (t.metadata_rate || 0); });
+                  el.textContent = 'Stats: ' + (s.torrents_indexed || 0) + ' torrents, ' +
+                      ((s.supervisor && s.supervisor.active_trees) || 0) + ' active trees, ' +
+                      rate.toFixed(1) + ' metadata/s';
+                }).catch(function () {});
+              }
+              setInterval(poll, 5000); poll();
+            })();
+            </script>
+        """.trimIndent()
+    }
+
+    /**
+     * Fetches the crawler's own /stats JSON over loopback with a short
+     * timeout. Returns null when the crawler is unreachable — the caller
+     * responds with the clean "not running" fallback.
+     */
+    private fun fetchCrawlerStats(port: Int): String? {
+        return try {
+            val conn = (java.net.URL("http://127.0.0.1:$port/stats").openConnection() as java.net.HttpURLConnection).apply {
+                connectTimeout = 2000
+                readTimeout = 2000
+                instanceFollowRedirects = false
+            }
+            if (conn.responseCode == 200) conn.inputStream.bufferedReader().use { it.readText() } else null
+        } catch (e: Exception) {
+            null
+        }
+    }
 
     private val panelCss = """
         body{font-family:system-ui,sans-serif;max-width:640px;margin:2em auto;padding:0 1em}
@@ -537,5 +719,49 @@ class ControlServer(
             if (bearer != null && isValid(bearer)) return bearer to false
             return null to false
         }
+
+        /** Free internal storage below which the dashboard card warns. */
+        internal const val CRAWLER_LOW_FREE_SPACE_BYTES = 2L * 1024 * 1024 * 1024
+
+        /**
+         * The /api/crawler/stats response body: the crawler's own /stats JSON
+         * passed through when [statsBody] was fetched, or a clean
+         * `{"running":false}` when the crawler is down/unreachable.
+         */
+        internal fun crawlerStatsJson(statsBody: String?): String =
+            if (statsBody.isNullOrBlank()) "{\"running\":false}" else statsBody
+
+        /**
+         * Builds CrawlerSettings from the settings form (checkbox presence =
+         * true, blank/missing numerics fall back to [current]). Pure and
+         * unit-testable; the POST route validates the result server-side.
+         */
+        internal fun crawlerSettingsFromForm(
+            form: Map<String, String>,
+            current: CrawlerSettings,
+        ): CrawlerSettings = CrawlerSettings(
+            enabled = form.containsKey("enabled"),
+            wifiOnly = form.containsKey("wifiOnly"),
+            logLevel = form["logLevel"]?.takeIf { it.isNotEmpty() } ?: current.logLevel,
+            dhtPort = form["dhtPort"]?.toIntOrNull() ?: current.dhtPort,
+            niceLevel = form["niceLevel"]?.toIntOrNull() ?: current.niceLevel,
+            skipIntegrityCheck = form.containsKey("skipIntegrityCheck"),
+            numTrees = form["numTrees"]?.toIntOrNull() ?: current.numTrees,
+            treeFindNodeWorkers = form["treeFindNodeWorkers"]?.toIntOrNull() ?: current.treeFindNodeWorkers,
+            treeBep51Workers = form["treeBep51Workers"]?.toIntOrNull() ?: current.treeBep51Workers,
+            treeGetPeersWorkers = form["treeGetPeersWorkers"]?.toIntOrNull() ?: current.treeGetPeersWorkers,
+            treeMetadataWorkers = form["treeMetadataWorkers"]?.toIntOrNull() ?: current.treeMetadataWorkers,
+            treeInfohashQueueCapacity = form["treeInfohashQueueCapacity"]?.toIntOrNull() ?: current.treeInfohashQueueCapacity,
+            treePeersQueueCapacity = form["treePeersQueueCapacity"]?.toIntOrNull() ?: current.treePeersQueueCapacity,
+            pornFilterEnabled = form.containsKey("pornFilterEnabled"),
+            languageFilterNonLatinThreshold = form["languageFilterNonLatinThreshold"]?.toIntOrNull() ?: current.languageFilterNonLatinThreshold,
+            bloomCapacity = form["bloomCapacity"]?.toIntOrNull() ?: current.bloomCapacity,
+            failureBloomCapacity = form["failureBloomCapacity"]?.toIntOrNull() ?: current.failureBloomCapacity,
+            bloomErrorRate = form["bloomErrorRate"]?.toDoubleOrNull() ?: current.bloomErrorRate,
+            advancedOverrides = form["advancedOverrides"] ?: current.advancedOverrides,
+            proxyPort = form["proxyPort"]?.toIntOrNull() ?: current.proxyPort,
+            crawlerHttpPort = form["crawlerHttpPort"]?.toIntOrNull() ?: current.crawlerHttpPort,
+            lanDirect = form.containsKey("lanDirect"),
+        )
     }
 }
