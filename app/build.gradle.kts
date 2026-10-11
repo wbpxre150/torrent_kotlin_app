@@ -44,6 +44,10 @@ android {
     testOptions {
         unitTests {
             isIncludeAndroidResources = true
+            // Production code calls android.util.Log (CrawlerProxyServer's bind
+            // failure / bad-gateway paths); return defaults instead of throwing
+            // "not mocked" in JVM unit tests.
+            isReturnDefaultValues = true
         }
     }
 

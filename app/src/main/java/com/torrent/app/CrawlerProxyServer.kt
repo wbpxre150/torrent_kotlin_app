@@ -41,31 +41,38 @@ class CrawlerProxyServer(
         try {
             server = embeddedServer(CIO, port = port, host = "0.0.0.0") {
                 routing {
-                    handle {
-                        val (token, setCookie) = ControlServer.resolveAuthToken(
-                            call.request.headers["Cookie"],
-                            call.request.queryParameters["token"],
-                            call.request.headers["Authorization"],
-                            tokenManager::validate,
-                        )
-                        if (token == null) {
-                            val host = call.request.headers[HttpHeaders.Host]
-                                ?.substringBefore(':') ?: "127.0.0.1"
-                            call.response.headers.append(
-                                HttpHeaders.WWWAuthenticate, "Basic realm=\"dht_crawler\"")
-                            call.respondText(
-                                unauthorizedPage("http://$host:$controlPort/login"),
-                                ContentType.Text.Html,
-                                HttpStatusCode.Unauthorized,
+                    // A bare `handle` directly under `routing` only matches "/",
+                    // so every other path (/search, /stats, /refresh, ...) would
+                    // get Ktor's default empty 404. The tail card matches every
+                    // remaining path (zero or more segments, including empty)
+                    // for all HTTP methods.
+                    route("{...}") {
+                        handle {
+                            val (token, setCookie) = ControlServer.resolveAuthToken(
+                                call.request.headers["Cookie"],
+                                call.request.queryParameters["token"],
+                                call.request.headers["Authorization"],
+                                tokenManager::validate,
                             )
-                            return@handle
+                            if (token == null) {
+                                val host = call.request.headers[HttpHeaders.Host]
+                                    ?.substringBefore(':') ?: "127.0.0.1"
+                                call.response.headers.append(
+                                    HttpHeaders.WWWAuthenticate, "Basic realm=\"dht_crawler\"")
+                                call.respondText(
+                                    unauthorizedPage("http://$host:$controlPort/login"),
+                                    ContentType.Text.Html,
+                                    HttpStatusCode.Unauthorized,
+                                )
+                                return@handle
+                            }
+                            if (setCookie) {
+                                call.response.headers.append(
+                                    "Set-Cookie",
+                                    "control_token=$token; Path=/; HttpOnly; SameSite=Strict")
+                            }
+                            forwardToCrawler(call)
                         }
-                        if (setCookie) {
-                            call.response.headers.append(
-                                "Set-Cookie",
-                                "control_token=$token; Path=/; HttpOnly; SameSite=Strict")
-                        }
-                        forwardToCrawler(call)
                     }
                 }
             }
