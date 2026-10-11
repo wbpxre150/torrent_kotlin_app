@@ -1,5 +1,6 @@
 package com.torrent.app.transmission
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -18,5 +19,16 @@ class TransmissionRpcClientTest {
         val body = TransmissionRpcClient.buildRequestBody("session-get", null)
         assertTrue(body.contains("\"method\":\"session-get\""))
         assertTrue(!body.contains("arguments"))
+    }
+
+    @Test fun buildTorrentAddArgs_hasMagnetFilenameDataDirAndNormalPriority() {
+        val args = TransmissionRpcClient.buildTorrentAddArgs(
+            "magnet:?xt=urn:btih:abc", "/saf/usb/torrent_data")
+        val o = JSONObject(TransmissionRpcClient.buildRequestBody("torrent-add", args))
+        assertEquals("torrent-add", o.getString("method"))
+        val a = o.getJSONObject("arguments")
+        assertEquals("magnet:?xt=urn:btih:abc", a.getString("filename"))
+        assertEquals("/saf/usb/torrent_data", a.getString("download-dir"))
+        assertEquals(0, a.getInt("bandwidthPriority"))
     }
 }

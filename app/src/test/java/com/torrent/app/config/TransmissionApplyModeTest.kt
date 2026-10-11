@@ -5,27 +5,48 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TransmissionApplyModeTest {
-    private fun tx() = TransmissionSettings("u", "password", 51413, 100, 50, 10, 5, "Dl")
+    private fun tx() = TransmissionSettings("u", "password", 51413, 100, 50, 10, 5)
+
+    private fun app() = AppConfig(
+        wizardCompleted = true,
+        transmission = tx(),
+        ftp = FtpSettings("u", "password", 2121, true),
+        crawler = CrawlerSettings(),
+        dataSubpath = "Dl",
+    )
 
     @Test fun speedOnlyChange_doesNotNeedRestart() {
-        assertFalse(TransmissionApplyMode.needsRestart(tx(), tx().copy(speedLimitDown = 200)))
+        val a = app()
+        assertFalse(TransmissionApplyMode.needsRestart(a, a.copy(transmission = a.transmission.copy(speedLimitDown = 200))))
     }
+
     @Test fun altSpeedChange_doesNotNeedRestart() {
-        assertFalse(TransmissionApplyMode.needsRestart(tx(), tx().copy(altSpeedUp = 99)))
+        val a = app()
+        assertFalse(TransmissionApplyMode.needsRestart(a, a.copy(transmission = a.transmission.copy(altSpeedUp = 99))))
     }
+
     @Test fun usernameChange_needsRestart() {
-        assertTrue(TransmissionApplyMode.needsRestart(tx(), tx().copy(username = "other")))
+        val a = app()
+        assertTrue(TransmissionApplyMode.needsRestart(a, a.copy(transmission = a.transmission.copy(username = "other"))))
     }
+
     @Test fun passwordChange_needsRestart() {
-        assertTrue(TransmissionApplyMode.needsRestart(tx(), tx().copy(password = "newpass")))
+        val a = app()
+        assertTrue(TransmissionApplyMode.needsRestart(a, a.copy(transmission = a.transmission.copy(password = "newpass"))))
     }
+
     @Test fun peerPortChange_needsRestart() {
-        assertTrue(TransmissionApplyMode.needsRestart(tx(), tx().copy(peerPort = 51415)))
+        val a = app()
+        assertTrue(TransmissionApplyMode.needsRestart(a, a.copy(transmission = a.transmission.copy(peerPort = 51415))))
     }
-    @Test fun downloadSubpathChange_needsRestart() {
-        assertTrue(TransmissionApplyMode.needsRestart(tx(), tx().copy(downloadSubpath = "Other")))
+
+    @Test fun dataSubpathChange_needsRestart() {
+        val a = app()
+        assertTrue(TransmissionApplyMode.needsRestart(a, a.copy(dataSubpath = "Other")))
     }
+
     @Test fun identical_needsNoRestart() {
-        assertFalse(TransmissionApplyMode.needsRestart(tx(), tx()))
+        val a = app()
+        assertFalse(TransmissionApplyMode.needsRestart(a, a))
     }
 }

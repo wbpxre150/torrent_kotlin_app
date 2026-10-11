@@ -17,14 +17,12 @@ class ConfigStore(context: Context) {
             speedLimitUp = prefs.getInt(KEY_TX_SPEED_UP, ConfigDefaults.TRANSMISSION.speedLimitUp),
             altSpeedDown = prefs.getInt(KEY_TX_ALT_DOWN, ConfigDefaults.TRANSMISSION.altSpeedDown),
             altSpeedUp = prefs.getInt(KEY_TX_ALT_UP, ConfigDefaults.TRANSMISSION.altSpeedUp),
-            downloadSubpath = prefs.getString(KEY_TX_SUBPATH, ConfigDefaults.TRANSMISSION.downloadSubpath)!!,
         ),
         ftp = FtpSettings(
             username = prefs.getString(KEY_FTP_USER, ConfigDefaults.FTP.username)!!,
             password = prefs.getString(KEY_FTP_PASS, ConfigDefaults.FTP.password)!!,
             port = prefs.getInt(KEY_FTP_PORT, ConfigDefaults.FTP.port),
             wifiOnly = prefs.getBoolean(KEY_FTP_WIFI_ONLY, ConfigDefaults.FTP.wifiOnly),
-            exposedRoot = prefs.getString(KEY_FTP_ROOT, ConfigDefaults.FTP.exposedRoot)!!,
             maxDownloadKiBps = prefs.getInt(KEY_FTP_MAX_DL_KIBPS, ConfigDefaults.FTP.maxDownloadKiBps),
         ),
         crawler = CrawlerSettings(
@@ -50,7 +48,19 @@ class ConfigStore(context: Context) {
             crawlerHttpPort = prefs.getInt(KEY_CRAWLER_HTTP_PORT, ConfigDefaults.CRAWLER.crawlerHttpPort),
             lanDirect = prefs.getBoolean(KEY_CRAWLER_LAN_DIRECT, ConfigDefaults.CRAWLER.lanDirect),
         ),
+        dataSubpath = prefs.getString(KEY_DATA_SUBPATH, null)
+            ?: prefs.getString(KEY_TX_SUBPATH, null)
+            ?: prefs.getString(KEY_FTP_ROOT, null)
+            ?: ConfigDefaults.DATA_SUBPATH,
     )
+
+    /** Persist the whole config; includes the shared data directory key (Stage 11). */
+    fun save(s: AppConfig) {
+        saveTransmission(s.transmission)
+        saveFtp(s.ftp)
+        saveCrawler(s.crawler)
+        prefs.edit().putString(KEY_DATA_SUBPATH, s.dataSubpath).apply()
+    }
 
     fun saveTransmission(s: TransmissionSettings) {
         prefs.edit()
@@ -61,7 +71,6 @@ class ConfigStore(context: Context) {
             .putInt(KEY_TX_SPEED_UP, s.speedLimitUp)
             .putInt(KEY_TX_ALT_DOWN, s.altSpeedDown)
             .putInt(KEY_TX_ALT_UP, s.altSpeedUp)
-            .putString(KEY_TX_SUBPATH, s.downloadSubpath)
             .apply()
     }
 
@@ -71,7 +80,6 @@ class ConfigStore(context: Context) {
             .putString(KEY_FTP_PASS, s.password)
             .putInt(KEY_FTP_PORT, s.port)
             .putBoolean(KEY_FTP_WIFI_ONLY, s.wifiOnly)
-            .putString(KEY_FTP_ROOT, s.exposedRoot)
             .putInt(KEY_FTP_MAX_DL_KIBPS, s.maxDownloadKiBps)
             .apply()
     }
@@ -122,7 +130,6 @@ class ConfigStore(context: Context) {
             .putInt(KEY_LKG_TX_SPEED_UP, s.speedLimitUp)
             .putInt(KEY_LKG_TX_ALT_DOWN, s.altSpeedDown)
             .putInt(KEY_LKG_TX_ALT_UP, s.altSpeedUp)
-            .putString(KEY_LKG_TX_SUBPATH, s.downloadSubpath)
             .putBoolean(KEY_LKG_PRESENT, true)
             .apply()
     }
@@ -137,7 +144,6 @@ class ConfigStore(context: Context) {
             speedLimitUp = prefs.getInt(KEY_LKG_TX_SPEED_UP, ConfigDefaults.TRANSMISSION.speedLimitUp),
             altSpeedDown = prefs.getInt(KEY_LKG_TX_ALT_DOWN, ConfigDefaults.TRANSMISSION.altSpeedDown),
             altSpeedUp = prefs.getInt(KEY_LKG_TX_ALT_UP, ConfigDefaults.TRANSMISSION.altSpeedUp),
-            downloadSubpath = prefs.getString(KEY_LKG_TX_SUBPATH, ConfigDefaults.TRANSMISSION.downloadSubpath)!!,
         )
     }
 
@@ -204,6 +210,7 @@ class ConfigStore(context: Context) {
     companion object {
         private const val PREFS = "app_config"
         private const val KEY_WIZARD = "wizard_completed"
+        private const val KEY_DATA_SUBPATH = "data_subpath"
         private const val KEY_TX_USER = "tx_username"
         private const val KEY_TX_PASS = "tx_password"
         private const val KEY_TX_PEER_PORT = "tx_peer_port"
@@ -269,6 +276,5 @@ class ConfigStore(context: Context) {
         private const val KEY_LKG_TX_SPEED_UP = "lkg_tx_speed_limit_up"
         private const val KEY_LKG_TX_ALT_DOWN = "lkg_tx_alt_speed_down"
         private const val KEY_LKG_TX_ALT_UP = "lkg_tx_alt_speed_up"
-        private const val KEY_LKG_TX_SUBPATH = "lkg_tx_download_subpath"
     }
 }

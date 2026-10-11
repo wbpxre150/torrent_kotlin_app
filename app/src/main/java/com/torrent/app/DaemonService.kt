@@ -217,8 +217,8 @@ class DaemonService : Service() {
         fun getSafStatus(): SafStatus = this@DaemonService.getSafStatus()
         fun getFtpStatus(): FtpStatus = this@DaemonService.getFtpStatus()
         fun loadConfig(): com.torrent.app.config.AppConfig = this@DaemonService.loadConfig()
-        fun applyTransmissionSettings(s: com.torrent.app.config.TransmissionSettings, liveOnly: Boolean) =
-            this@DaemonService.applyTransmissionSettings(s, liveOnly)
+        fun applyTransmissionSettings(cfg: com.torrent.app.config.AppConfig, liveOnly: Boolean) =
+            this@DaemonService.applyTransmissionSettings(cfg, liveOnly)
         fun applyFtpSettings(s: com.torrent.app.config.FtpSettings) =
             this@DaemonService.applyFtpSettings(s)
         fun restartDaemon(label: String) = this@DaemonService.restartDaemon(label)
@@ -316,15 +316,17 @@ class DaemonService : Service() {
         maybeStartFtp()
     }
 
-    fun applyTransmissionSettings(s: com.torrent.app.config.TransmissionSettings, liveOnly: Boolean): com.torrent.app.config.ApplyResult {
-        val vr = com.torrent.app.config.ConfigValidator.validateTransmission(s)
-        if (!vr.ok) return com.torrent.app.config.ApplyResult(false, vr.errors.joinToString("; "), false)
-        val before = configStore.load().transmission
-        configStore.snapshotLastKnownGood(before)
-        configStore.saveTransmission(s)
+    fun applyTransmissionSettings(cfg: com.torrent.app.config.AppConfig, liveOnly: Boolean): com.torrent.app.config.ApplyResult {
+        val s = cfg.transmission
+        val errors = com.torrent.app.config.ConfigValidator.validateTransmission(s).errors +
+                     com.torrent.app.config.ConfigValidator.validateDataDir(cfg).errors
+        if (errors.isNotEmpty()) return com.torrent.app.config.ApplyResult(false, errors.joinToString("; "), false)
+        val before = configStore.load()
+        configStore.snapshotLastKnownGood(before.transmission)
+        configStore.save(cfg)
         lastApplyRolledBack = false
         if (liveOnly) {
-            val rpc = com.torrent.app.transmission.TransmissionRpcClient(before.username, before.password)
+            val rpc = com.torrent.app.transmission.TransmissionRpcClient(before.transmission.username, before.transmission.password)
             val args = JSONObject()
                 .put("speed-limit-down", s.speedLimitDown)
                 .put("speed-limit-up", s.speedLimitUp)
@@ -339,17 +341,32 @@ class DaemonService : Service() {
         sup?.start()
         val statusAtApply = sup?.status?.value ?: ProcessStatus("transmission", ProcessState.STOPPED)
         launchRollbackWatcher(sup, statusAtApply, before)
+        // Shared data dir (Stage 11): the FTP root follows dataSubpath, so a data-dir
+        // change rebuilds/restarts the FTP controller exactly like applyFtpSettings does.
+        if (before.dataSubpath != cfg.dataSubpath) {
+            val old = ftpController
+            runOnFtpControl { old?.stop() }
+            val g = gateway
+            if (g != null) {
+                ftpController = FtpServerController(
+                    g, FtpCredentials(configStore),
+                    port = cfg.ftp.port, rootRelPath = cfg.dataSubpath,
+                    maxDownloadKiBps = cfg.ftp.maxDownloadKiBps,
+                )
+                maybeStartFtp()
+            }
+        }
         return com.torrent.app.config.ApplyResult(true, "applied; restarting transmission", false)
     }
 
     // ── FTP (plan 07) ───────────────────────────────────────────────────────
 
     private fun newFtpController(g: SafStorageGateway): FtpServerController {
-        val ftp = configStore.load().ftp
+        val cfg = configStore.load()
         return FtpServerController(
             g, FtpCredentials(configStore),
-            port = ftp.port, rootRelPath = ftp.exposedRoot,
-            maxDownloadKiBps = ftp.maxDownloadKiBps,
+            port = cfg.ftp.port, rootRelPath = cfg.dataSubpath,
+            maxDownloadKiBps = cfg.ftp.maxDownloadKiBps,
         )
     }
 
@@ -413,7 +430,7 @@ class DaemonService : Service() {
         if (g != null) {
             ftpController = FtpServerController(
                 g, FtpCredentials(configStore),
-                port = s.port, rootRelPath = s.exposedRoot,
+                port = s.port, rootRelPath = configStore.load().dataSubpath,
                 maxDownloadKiBps = s.maxDownloadKiBps,
             )
             maybeStartFtp()
@@ -485,10 +502,18 @@ class DaemonService : Service() {
         val existing = crawlerProxy
         if (existing != null && existing.port == s.proxyPort) return
         existing?.stop()
+        // Plan 11 D2: magnet add endpoint. The DB file is the same one
+        // [crawlerDbSize] reads (filesDir/crawler/data per CrawlerConfig).
+        val addHandler = CrawlerAddHandler(
+            store = configStore,
+            gateway = { gateway },
+            crawlerDbFile = { File(filesDir, "crawler/data/torrents.db") },
+        )
         val proxy = CrawlerProxyServer(
             tokenManager = tokenManager,
             crawlerHttpPort = ::crawlerHttpPort,
             port = s.proxyPort,
+            addHandler = addHandler,
         )
         crawlerProxy = proxy
         proxy.start()
@@ -736,7 +761,7 @@ class DaemonService : Service() {
     fun loadConfig(): com.torrent.app.config.AppConfig = configStore.load()
     fun completeWizard() { configStore.setWizardCompleted(); startConfiguredDaemons() }
 
-    private fun launchRollbackWatcher(sup: ProcessSupervisor?, statusAtApply: ProcessStatus, previous: com.torrent.app.config.TransmissionSettings) {
+    private fun launchRollbackWatcher(sup: ProcessSupervisor?, statusAtApply: ProcessStatus, previous: com.torrent.app.config.AppConfig) {
         rollbackJob?.cancel()
         if (sup == null) return
         rollbackJob = MainScope().launch {
@@ -748,7 +773,7 @@ class DaemonService : Service() {
                 if (RollbackPolicy.shouldRollback(statusAtApply, cur, 3)) {
                     android.util.Log.w("DaemonService", "transmission crash-loop after apply; rolling back")
                     lastApplyRolledBack = true
-                    configStore.saveTransmission(previous)
+                    configStore.save(previous)
                     transmissionConfig.ensureSettingsJson()
                     // stop() blocks for the SIGTERM grace: keep it off the main thread.
                     kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {

@@ -1,6 +1,7 @@
 package com.torrent.app.config
 
 import androidx.test.core.app.ApplicationProvider
+import android.content.Context
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -26,27 +27,59 @@ class ConfigStoreTest {
         assertFalse("crawler must be disabled by default", c.crawler.enabled)
     }
 
+    private fun prefs() =
+        ApplicationProvider.getApplicationContext<Context>()
+            .getSharedPreferences("app_config", Context.MODE_PRIVATE)
+
+    @Test fun save_dataSubpath_roundTrips() {
+        val s = store()
+        s.save(s.load().copy(dataSubpath = "torrent_data"))
+        assertEquals("torrent_data", s.load().dataSubpath)
+    }
+
+    @Test fun load_dataSubpath_newKeyWinsOverLegacyKeys() {
+        prefs().edit().clear()
+            .putString("data_subpath", "New")
+            .putString("tx_download_subpath", "LegacyTx")
+            .putString("ftp_exposed_root", "LegacyFtp")
+            .apply()
+        assertEquals("New", store().load().dataSubpath)
+    }
+
+    @Test fun load_dataSubpath_fallsBackToLegacyTxSubpath() {
+        prefs().edit().clear().putString("tx_download_subpath", "LegacyTx").apply()
+        assertEquals("LegacyTx", store().load().dataSubpath)
+    }
+
+    @Test fun load_dataSubpath_fallsBackToLegacyFtpRoot() {
+        prefs().edit().clear().putString("ftp_exposed_root", "LegacyFtp").apply()
+        assertEquals("LegacyFtp", store().load().dataSubpath)
+    }
+
+    @Test fun load_dataSubpath_defaultsToEmptyWhenNoKeyPresent() {
+        prefs().edit().clear().apply()
+        assertEquals("", store().load().dataSubpath)
+    }
+
     @Test fun saveTransmission_persistsAndReloads() {
         val s = store()
-        val tx = TransmissionSettings("user1", "pass1234", 51414, 100, 50, 10, 5, "Dl")
+        val tx = TransmissionSettings("user1", "pass1234", 51414, 100, 50, 10, 5)
         s.saveTransmission(tx)
         val loaded = s.load().transmission
         assertEquals("user1", loaded.username)
         assertEquals("pass1234", loaded.password)
         assertEquals(51414, loaded.peerPort)
         assertEquals(100, loaded.speedLimitDown)
-        assertEquals("Dl", loaded.downloadSubpath)
     }
 
     @Test fun saveFtp_persistsAndReloads() {
         val s = store()
-        s.saveFtp(FtpSettings("u", "password1", 2200, false, "Media", 512))
+        s.saveFtp(FtpSettings("u", "password1", 2200, false, 512))
         val loaded = s.load().ftp
         assertEquals("u", loaded.username)
         assertEquals("password1", loaded.password)
         assertEquals(2200, loaded.port)
         assertFalse(loaded.wifiOnly)
-        assertEquals("Media", loaded.exposedRoot)
         assertEquals(512, loaded.maxDownloadKiBps)
     }
 
@@ -75,7 +108,7 @@ class ConfigStoreTest {
     @Test fun snapshotAndRestoreLastKnownGoodTransmission() {
         val s = store()
         assertNull(s.restoreLastKnownGoodTransmission())
-        s.snapshotLastKnownGood(TransmissionSettings("u", "p", 51413, 0, 0, 0, 0, ""))
+        s.snapshotLastKnownGood(TransmissionSettings("u", "p", 51413, 0, 0, 0, 0))
         val restored = s.restoreLastKnownGoodTransmission()
         assertNotNull(restored)
         assertEquals("u", restored!!.username)
@@ -84,7 +117,7 @@ class ConfigStoreTest {
 
     @Test fun clearLastKnownGood_removesSnapshot() {
         val s = store()
-        s.snapshotLastKnownGood(TransmissionSettings("u", "p", 51413, 0, 0, 0, 0, ""))
+        s.snapshotLastKnownGood(TransmissionSettings("u", "p", 51413, 0, 0, 0, 0))
         s.clearLastKnownGood()
         assertNull(s.restoreLastKnownGoodTransmission())
     }

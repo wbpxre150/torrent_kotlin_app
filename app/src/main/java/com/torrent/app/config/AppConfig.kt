@@ -8,7 +8,6 @@ data class TransmissionSettings(
     val speedLimitUp: Int,
     val altSpeedDown: Int,
     val altSpeedUp: Int,
-    val downloadSubpath: String,
 )
 
 data class FtpSettings(
@@ -16,7 +15,6 @@ data class FtpSettings(
     val password: String,
     val port: Int,
     val wifiOnly: Boolean,
-    val exposedRoot: String,
     val maxDownloadKiBps: Int = 0,   // 0 = unlimited
 )
 
@@ -54,6 +52,7 @@ data class AppConfig(
     val transmission: TransmissionSettings,
     val ftp: FtpSettings,
     val crawler: CrawlerSettings,
+    val dataSubpath: String,
 )
 
 object ConfigDefaults {
@@ -63,6 +62,7 @@ object ConfigDefaults {
     const val FTP_PORT = 2121
     const val PASSWORD_MIN_LEN = 6
     const val FTP_PASSWORD_LEN = 24
+    const val DATA_SUBPATH = ""
     private val FTP_PASSWORD_CHARS =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789".toCharArray()
 
@@ -74,19 +74,17 @@ object ConfigDefaults {
         speedLimitUp = 0,
         altSpeedDown = 0,
         altSpeedUp = 0,
-        downloadSubpath = "",
     )
     val FTP = FtpSettings(
         username = FTP_USERNAME,
         password = "",
         port = FTP_PORT,
         wifiOnly = true,
-        exposedRoot = "",
     )
     val CRAWLER = CrawlerSettings(
         enabled = false,
     )
-    val INITIAL = AppConfig(wizardCompleted = false, transmission = TRANSMISSION, ftp = FTP, crawler = CRAWLER)
+    val INITIAL = AppConfig(wizardCompleted = false, transmission = TRANSMISSION, ftp = FTP, crawler = CRAWLER, dataSubpath = DATA_SUBPATH)
 
     fun randomPassword(len: Int = FTP_PASSWORD_LEN): String {
         val rnd = java.security.SecureRandom()

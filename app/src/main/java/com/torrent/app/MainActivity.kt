@@ -324,12 +324,11 @@ fun WizardScreen(
     var txUser by remember { mutableStateOf(cfg?.transmission?.username ?: "torrentapp") }
     var txPass by remember { mutableStateOf("") }
     var peerPort by remember { mutableStateOf((cfg?.transmission?.peerPort ?: 51413).toString()) }
-    var dlSubpath by remember { mutableStateOf(cfg?.transmission?.downloadSubpath ?: "") }
+    var dlSubpath by remember { mutableStateOf(cfg?.dataSubpath ?: "") }
     var ftpUser by remember { mutableStateOf(cfg?.ftp?.username ?: "kodi") }
     var ftpPass by remember { mutableStateOf("") }
     var ftpPort by remember { mutableStateOf((cfg?.ftp?.port ?: 2121).toString()) }
     var ftpWifiOnly by remember { mutableStateOf(cfg?.ftp?.wifiOnly ?: true) }
-    var ftpRoot by remember { mutableStateOf(cfg?.ftp?.exposedRoot ?: "") }
     var crawlerEnabled by remember { mutableStateOf(false) }
     var errors by remember { mutableStateOf<List<String>>(emptyList()) }
 
@@ -348,7 +347,7 @@ fun WizardScreen(
         OutlinedTextField(txUser, { txUser = it }, label = { Text("Username") })
         OutlinedTextField(txPass, { txPass = it }, label = { Text("Password (min 6)") })
         OutlinedTextField(peerPort, { peerPort = it }, label = { Text("Peer port") })
-        OutlinedTextField(dlSubpath, { dlSubpath = it }, label = { Text("Download subpath (blank = USB root)") })
+        OutlinedTextField(dlSubpath, { dlSubpath = it }, label = { Text("Data directory (under USB root; blank = root)") })
 
         Text("3. FTP (Kodi)", style = MaterialTheme.typography.titleMedium)
         OutlinedTextField(ftpUser, { ftpUser = it }, label = { Text("FTP username") })
@@ -358,7 +357,6 @@ fun WizardScreen(
             Switch(checked = ftpWifiOnly, onCheckedChange = { ftpWifiOnly = it })
             Spacer(Modifier.width(8.dp)); Text("WiFi only")
         }
-        OutlinedTextField(ftpRoot, { ftpRoot = it }, label = { Text("Exposed root (blank = USB root)") })
 
         Text("4. DHT crawler (optional)", style = MaterialTheme.typography.titleMedium)
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -374,14 +372,21 @@ fun WizardScreen(
                 val svc = boundService ?: return@Button
                 val form = WizardSubmit.Form(
                     txUser, txPass, peerPort.toIntOrNull() ?: 0, dlSubpath,
-                    ftpUser, ftpPass, ftpPort.toIntOrNull() ?: 0, ftpWifiOnly, ftpRoot,
+                    ftpUser, ftpPass, ftpPort.toIntOrNull() ?: 0, ftpWifiOnly,
                     crawlerEnabled,
                 )
                 val outcome = WizardSubmit.submit(form)
                 if (!outcome.ok) { errors = outcome.errors; return@Button }
-                val ftpR = svc.applyFtpSettings(outcome.ftp!!)
-                val txR = svc.applyTransmissionSettings(outcome.transmission!!, liveOnly = false)
-                if (ftpR.ok && txR.ok) {
+                // Transmission apply first: it persists the shared data dir, which the
+                // FTP controller construction below reads from the store (Stage 11).
+                val newCfg = svc.loadConfig().copy(
+                    transmission = outcome.transmission!!,
+                    ftp = outcome.ftp!!,
+                    dataSubpath = form.dataSubpath,
+                )
+                val txR = svc.applyTransmissionSettings(newCfg, liveOnly = false)
+                val ftpR = svc.applyFtpSettings(newCfg.ftp)
+                if (txR.ok && ftpR.ok) {
                     if (outcome.crawlerEnabled) svc.setCrawlerEnabled(true)
                     svc.completeWizard(); onFinished()
                 }

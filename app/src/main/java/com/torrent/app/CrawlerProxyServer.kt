@@ -33,6 +33,8 @@ class CrawlerProxyServer(
     private val crawlerHttpPort: () -> Int,
     val port: Int,
     private val controlPort: Int = DEFAULT_CONTROL_PORT,
+    /** Plan 11 D2: `/api/transmission/add` handler; null = route answers 503. */
+    private val addHandler: CrawlerAddHandler? = null,
 ) {
     @Volatile private var server: EmbeddedServer<*, *>? = null
 
@@ -46,6 +48,49 @@ class CrawlerProxyServer(
                     // get Ktor's default empty 404. The tail card matches every
                     // remaining path (zero or more segments, including empty)
                     // for all HTTP methods.
+                    // Plan 11 D2: the add endpoint. Registered BEFORE the tail
+                    // card (Ktor matches in registration order) so the specific
+                    // path wins over the `{...}` catch-all. Auth mirrors the
+                    // tail card, but the caller is fetch, not a human: 401 is
+                    // JSON, not the HTML login page.
+                    route("/api/transmission/add") {
+                        handle {
+                            val (token, setCookie) = ControlServer.resolveAuthToken(
+                                call.request.headers["Cookie"],
+                                call.request.queryParameters["token"],
+                                call.request.headers["Authorization"],
+                                tokenManager::validate,
+                            )
+                            if (token == null) {
+                                call.respondText(
+                                    """{"ok":false,"error":"unauthorized"}""",
+                                    ContentType.Application.Json,
+                                    HttpStatusCode.Unauthorized,
+                                )
+                                return@handle
+                            }
+                            if (setCookie) {
+                                call.response.headers.append(
+                                    "Set-Cookie",
+                                    "control_token=$token; Path=/; HttpOnly; SameSite=Strict")
+                            }
+                            val handler = addHandler
+                            if (handler == null) {
+                                call.respondText(
+                                    """{"ok":false,"error":"db_unavailable"}""",
+                                    ContentType.Application.Json,
+                                    HttpStatusCode.ServiceUnavailable,
+                                )
+                                return@handle
+                            }
+                            val outcome = handler.add(call.request.queryParameters["hash"] ?: "")
+                            call.respondText(
+                                outcome.toJson(),
+                                ContentType.Application.Json,
+                                HttpStatusCode.fromValue(outcome.httpStatus),
+                            )
+                        }
+                    }
                     route("{...}") {
                         handle {
                             val (token, setCookie) = ControlServer.resolveAuthToken(

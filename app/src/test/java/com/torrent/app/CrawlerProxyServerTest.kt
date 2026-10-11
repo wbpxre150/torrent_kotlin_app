@@ -213,6 +213,35 @@ class CrawlerProxyServerTest {
         throw AssertionError("proxy never came up for $url", last)
     }
 
+    /** POST with a short retry so the CIO listener has a beat to come up. */
+    private fun httpPost(url: String): Pair<Int, String> {
+        var last: Exception? = null
+        repeat(40) {
+            try {
+                val conn = URL(url).openConnection() as HttpURLConnection
+                conn.requestMethod = "POST"
+                conn.doOutput = true
+                conn.outputStream.use { it.write(ByteArray(0)) }
+                val code = conn.responseCode
+                val stream = if (code in 200..399) conn.inputStream else conn.errorStream
+                val body = stream?.bufferedReader()?.readText() ?: ""
+                conn.disconnect()
+                return code to body
+            } catch (e: ConnectException) {
+                last = e
+                Thread.sleep(50)
+            }
+        }
+        throw AssertionError("proxy never came up for $url", last)
+    }
+
+    /** Mockito stub of the add handler (Mockito 5's inline maker mocks finals). */
+    private fun mockAddHandler(outcome: CrawlerAddOutcome): CrawlerAddHandler {
+        val handler = Mockito.mock(CrawlerAddHandler::class.java)
+        Mockito.`when`(handler.add(Mockito.anyString())).thenReturn(outcome)
+        return handler
+    }
+
     @Test fun proxyForwardsNonRootPath_withValidToken_returnsUpstreamBody() {
         val upstream = startUpstream()
         val proxy = CrawlerProxyServer(
@@ -254,6 +283,55 @@ class CrawlerProxyServerTest {
             val (code, body) = httpGet("http://127.0.0.1:${proxy.port}/random-tv")
             assertEquals(401, code)
             assertTrue(body.contains("Authentication required"))
+        } finally {
+            proxy.stop()
+        }
+    }
+
+    // ── plan 11 D2: /api/transmission/add ──────────────────────────────────
+
+    @Test fun addRoute_withoutToken_returns401Json() {
+        val proxy = CrawlerProxyServer(
+            tokenManagerWith(TOKEN), { 0 }, freePort(),
+            addHandler = mockAddHandler(CrawlerAddOutcome.Added(false, "x", true)),
+        )
+        proxy.start()
+        try {
+            val (code, body) = httpPost(
+                "http://127.0.0.1:${proxy.port}/api/transmission/add?hash=${"a".repeat(40)}")
+            assertEquals(401, code)
+            assertEquals("""{"ok":false,"error":"unauthorized"}""", body)
+        } finally {
+            proxy.stop()
+        }
+    }
+
+    @Test fun addRoute_withToken_returnsHandlerJson() {
+        val proxy = CrawlerProxyServer(
+            tokenManagerWith(TOKEN), { 0 }, freePort(),
+            addHandler = mockAddHandler(CrawlerAddOutcome.Added(false, "Movie", true)),
+        )
+        proxy.start()
+        try {
+            val (code, body) = httpPost(
+                "http://127.0.0.1:${proxy.port}/api/transmission/add?hash=${"a".repeat(40)}&token=$TOKEN")
+            assertEquals(200, code)
+            assertEquals(
+                """{"ok":true,"added":true,"duplicate":false,"name":"Movie","checked":true}""",
+                body)
+        } finally {
+            proxy.stop()
+        }
+    }
+
+    @Test fun addRoute_withTokenAndNoHandler_returns503DbUnavailable() {
+        val proxy = CrawlerProxyServer(tokenManagerWith(TOKEN), { 0 }, freePort())
+        proxy.start()
+        try {
+            val (code, body) = httpPost(
+                "http://127.0.0.1:${proxy.port}/api/transmission/add?hash=${"a".repeat(40)}&token=$TOKEN")
+            assertEquals(503, code)
+            assertEquals("""{"ok":false,"error":"db_unavailable"}""", body)
         } finally {
             proxy.stop()
         }

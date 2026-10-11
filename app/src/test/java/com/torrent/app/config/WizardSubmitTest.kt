@@ -9,8 +9,8 @@ import org.junit.Test
 
 class WizardSubmitTest {
     private fun validForm() = WizardSubmit.Form(
-        txUsername = "torrentapp", txPassword = "secret123", peerPort = 51413, downloadSubpath = "Downloads",
-        ftpUsername = "kodi", ftpPassword = "kodiallday", ftpPort = 2121, ftpWifiOnly = true, ftpExposedRoot = "Media",
+        txUsername = "torrentapp", txPassword = "secret123", peerPort = 51413, dataSubpath = "Downloads",
+        ftpUsername = "kodi", ftpPassword = "kodiallday", ftpPort = 2121, ftpWifiOnly = true,
     )
 
     @Test fun validForm_producesSettings() {
@@ -20,7 +20,7 @@ class WizardSubmitTest {
         assertNotNull(o.transmission)
         assertNotNull(o.ftp)
         assertEquals("torrentapp", o.transmission!!.username)
-        assertEquals("Media", o.ftp!!.exposedRoot)
+        assertEquals(2121, o.ftp!!.port)
         assertEquals(0, o.ftp!!.maxDownloadKiBps)
     }
 
@@ -34,8 +34,8 @@ class WizardSubmitTest {
         assertTrue(o.errors.any { it.contains("port", true) })
     }
 
-    @Test fun blankDownloadSubpath_passes() {
-        assertTrue(WizardSubmit.submit(validForm().copy(downloadSubpath = "")).ok)
+    @Test fun blankDataDir_passes() {
+        assertTrue(WizardSubmit.submit(validForm().copy(dataSubpath = "")).ok)
     }
 
     @Test fun crawlerEnabledDefaultsToOff() {
@@ -52,9 +52,9 @@ class WizardSubmitTest {
         assertTrue(o.errors.any { it.contains("port", true) })
     }
 
-    @Test fun dotDotFtpRootFailsValidation() {
-        val o = WizardSubmit.submit(validForm().copy(ftpExposedRoot = "../etc"))
+    @Test fun dotDotDataDirFailsValidation() {
+        val o = WizardSubmit.submit(validForm().copy(dataSubpath = "../etc"))
         assertFalse(o.ok)
-        assertTrue(o.errors.any { it.contains("exposed root", true) })
+        assertTrue(o.errors.any { it.contains("data directory", true) })
     }
 }

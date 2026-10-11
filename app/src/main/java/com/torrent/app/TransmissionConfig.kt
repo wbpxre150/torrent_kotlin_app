@@ -25,11 +25,12 @@ class TransmissionConfig(context: Context, private val store: ConfigStore) {
     fun username(): String = store.load().transmission.username
     fun password(): String = store.load().transmission.password
 
-    /** Writes settings.json from the current ConfigStore transmission settings. */
+    /** Writes settings.json from the current ConfigStore settings (shared data dir, Stage 11). */
     fun ensureSettingsJson() {
-        val s = store.load().transmission
-        val downloadDir = if (s.downloadSubpath.isEmpty()) USB_DOWNLOAD_DIR
-                          else "$USB_DOWNLOAD_DIR/${s.downloadSubpath}"
+        val cfg = store.load()
+        val s = cfg.transmission
+        val downloadDir = if (cfg.dataSubpath.isEmpty()) USB_DOWNLOAD_DIR
+                          else "$USB_DOWNLOAD_DIR/${cfg.dataSubpath}"
         settingsFile.writeText(
             buildSettingsJson(
                 s.username, ssha1Hash(s.password), downloadDir,

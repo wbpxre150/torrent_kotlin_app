@@ -24,13 +24,24 @@ data class TransmissionSummary(
     val torrents: List<TorrentSummary>,
 )
 
+/** Result of a `torrent-add` RPC (plan 11 D2). [name] is null: the handler uses the crawler DB name. */
+data class TorrentAddResult(val ok: Boolean, val duplicate: Boolean, val name: String?)
+
+/**
+ * Narrow RPC surface the add handler needs; lets unit tests inject a fake
+ * instead of a live transmission daemon.
+ */
+interface TorrentAdder {
+    fun torrentAdd(filename: String, downloadDir: String): TorrentAddResult
+}
+
 class TransmissionRpcClient(
     private val username: String,
     private val password: String,
     private val host: String = "127.0.0.1",
     private val port: Int = 9091,
     private val timeoutMs: Int = 3000,
-) {
+) : TorrentAdder {
     @Volatile private var sessionId: String? = null
 
     fun sessionGet(): JSONObject? = call("session-get", null)?.optJSONObject("arguments")
@@ -56,6 +67,22 @@ class TransmissionRpcClient(
             ))
         }
         return out
+    }
+
+    /**
+     * Adds a magnet (or .torrent path) to the daemon at normal priority
+     * (plan 11 D2). transmission 4.1.2 answers `result: "success"` for BOTH
+     * new and duplicate adds; a duplicate is signalled by a `torrent-duplicate`
+     * argument object (verified in the 4.1.2 rpcimpl.cc the fork builds from).
+     * Null response (daemon down / RPC error) or any non-success result is a
+     * failure.
+     */
+    override fun torrentAdd(filename: String, downloadDir: String): TorrentAddResult {
+        val resp = call("torrent-add", buildTorrentAddArgs(filename, downloadDir))
+            ?: return TorrentAddResult(false, false, null)
+        if (resp.optString("result") != "success") return TorrentAddResult(false, false, null)
+        val duplicate = resp.optJSONObject("arguments")?.has("torrent-duplicate") == true
+        return TorrentAddResult(true, duplicate, null)
     }
 
     private fun call(method: String, arguments: JSONObject?): JSONObject? = try {
@@ -90,6 +117,17 @@ class TransmissionRpcClient(
 
     companion object {
         private const val TAG = "TransmissionRpcClient"
+
+        /**
+         * Pure argument builder for `torrent-add` (plan 11 D2): the magnet as
+         * `filename`, the data-dir root as `download-dir`, and explicit normal
+         * bandwidth priority (TR_PRI_NORMAL = 0, also the daemon default).
+         */
+        fun buildTorrentAddArgs(filename: String, downloadDir: String): JSONObject =
+            JSONObject()
+                .put("filename", filename)
+                .put("download-dir", downloadDir)
+                .put("bandwidthPriority", 0)
         fun buildRequestBody(method: String, arguments: JSONObject?): String {
             val o = JSONObject().put("method", method)
             if (arguments != null) o.put("arguments", arguments)

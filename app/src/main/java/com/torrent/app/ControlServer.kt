@@ -33,7 +33,7 @@ class ControlServer(
     private val restartDaemon: (String) -> Boolean,
     private val stopDaemon: (String) -> Boolean,
     private val startDaemon: (String) -> Boolean,
-    private val applyTransmission: (com.torrent.app.config.TransmissionSettings, Boolean) -> com.torrent.app.config.ApplyResult,
+    private val applyTransmission: (com.torrent.app.config.AppConfig, Boolean) -> com.torrent.app.config.ApplyResult,
     private val applyFtp: (com.torrent.app.config.FtpSettings) -> com.torrent.app.config.ApplyResult,
     // Crawler (plan 10 step 2): wired by DaemonService; the UI arrives in step 3.
     private val applyCrawler: (com.torrent.app.config.CrawlerSettings) -> com.torrent.app.config.ApplyResult =
@@ -154,7 +154,8 @@ class ControlServer(
                     }
                     post("settings/transmission") {
                         val form = parseForm(call.receiveText())
-                        val current = loadConfig().transmission
+                        val currentCfg = loadConfig()
+                        val current = currentCfg.transmission
                         val password = form["password"]?.takeIf { it.isNotEmpty() } ?: current.password
                         val s = com.torrent.app.config.TransmissionSettings(
                             username = form["username"] ?: current.username,
@@ -164,10 +165,13 @@ class ControlServer(
                             speedLimitUp = form["speedLimitUp"]?.toIntOrNull() ?: current.speedLimitUp,
                             altSpeedDown = form["altSpeedDown"]?.toIntOrNull() ?: current.altSpeedDown,
                             altSpeedUp = form["altSpeedUp"]?.toIntOrNull() ?: current.altSpeedUp,
-                            downloadSubpath = form["downloadSubpath"] ?: current.downloadSubpath,
                         )
-                        val liveOnly = !TransmissionApplyMode.needsRestart(current, s)
-                        val r = applyTransmission(s, liveOnly)
+                        val newCfg = currentCfg.copy(
+                            transmission = s,
+                            dataSubpath = form["dataSubpath"] ?: currentCfg.dataSubpath,
+                        )
+                        val liveOnly = !TransmissionApplyMode.needsRestart(currentCfg, newCfg)
+                        val r = applyTransmission(newCfg, liveOnly)
                         val token = parseCookieToken(call.request.headers["Cookie"]) ?: call.request.queryParameters["token"] ?: ""
                         val mode = if (liveOnly) "live+RPC" else "restart"
                         call.respondRedirect("/settings/transmission?msg=${urlEnc(r.message + " ($mode)")}&ok=${r.ok}&token=$token")
@@ -187,7 +191,6 @@ class ControlServer(
                             password = password,
                             port = form["port"]?.toIntOrNull() ?: current.port,
                             wifiOnly = form.containsKey("wifiOnly"),
-                            exposedRoot = form["exposedRoot"] ?: current.exposedRoot,
                             maxDownloadKiBps = form["maxDownloadKiBps"]?.toIntOrNull() ?: current.maxDownloadKiBps,
                         )
                         val r = applyFtp(s)
@@ -475,7 +478,8 @@ class ControlServer(
     // ── settings panel builders ───────────────────────────────────────────
 
     private fun buildTransmissionPanel(msg: String?, ok: Boolean): String {
-        val s = loadConfig().transmission
+        val cfg = loadConfig()
+        val s = cfg.transmission
         val banner = if (msg != null)
             """<div class="${if (ok) "ok" else "err"}">${esc(msg)}</div>""" else ""
         return """
@@ -493,10 +497,10 @@ class ControlServer(
                 <label>Alt down<input name="altSpeedDown" value="${s.altSpeedDown}"></label>
                 <label>Alt up<input name="altSpeedUp" value="${s.altSpeedUp}"></label>
               </fieldset>
-              <label>Download subpath (under USB root; blank = root)<input name="downloadSubpath" value="${esc(s.downloadSubpath)}"></label>
+              <label>Data directory (under USB root; blank = root)<input name="dataSubpath" value="${esc(cfg.dataSubpath)}"></label>
               <button type="submit">Apply</button>
             </form>
-            <p class="meta">Speed-only changes apply live via RPC. Username/password/peer-port/subpath changes restart transmission.</p>
+            <p class="meta">Speed-only changes apply live via RPC. Username/password/peer-port/data-directory changes restart transmission.</p>
             <p><a href="/">Back to dashboard</a></p>
             </body></html>
         """.trimIndent()
@@ -517,8 +521,8 @@ class ControlServer(
               <label>Password (leave blank to keep)<input type="password" name="password" placeholder="unchanged"></label>
               <label>Port<input name="port" value="${s.port}"></label>
               <label class="row"><input type="checkbox" name="wifiOnly" $checked> WiFi only</label>
-              <label>Exposed root (under USB root; blank = root)<input name="exposedRoot" value="${esc(s.exposedRoot)}"></label>
               <label>Max download (KiB/s, 0 = unlimited)<input name="maxDownloadKiBps" value="${s.maxDownloadKiBps}"></label>
+              <p class="meta">The FTP root follows the shared data directory (Transmission settings).</p>
               <button type="submit">Apply</button>
             </form>
             <p><a href="/">Back to dashboard</a></p>
@@ -540,7 +544,7 @@ class ControlServer(
             <p class="meta">Free: <strong>${free?.let { formatBytes(it) } ?: "unknown"}</strong></p>
             <p class="meta">WiFi: <strong>${if (f.wifiUp) "up" else "down"}</strong></p>
             <div class="warn">To re-grant or change the USB drive, open the Torrent App on the
-            Android device and tap <strong>Grant USB</strong>. The download subpath is set in
+            Android device and tap <strong>Grant USB</strong>. The data directory is set in
             <a href="/settings/transmission">Transmission settings</a>.</div>
             <p><a href="/">Back to dashboard</a></p>
             </body></html>

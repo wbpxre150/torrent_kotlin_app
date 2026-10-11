@@ -5,12 +5,11 @@ object WizardSubmit {
         val txUsername: String,
         val txPassword: String,
         val peerPort: Int,
-        val downloadSubpath: String,
+        val dataSubpath: String,
         val ftpUsername: String,
         val ftpPassword: String,
         val ftpPort: Int,
         val ftpWifiOnly: Boolean,
-        val ftpExposedRoot: String,
         val crawlerEnabled: Boolean = false,
     )
 
@@ -26,11 +25,18 @@ object WizardSubmit {
         val tx = TransmissionSettings(
             f.txUsername, f.txPassword, f.peerPort,
             speedLimitDown = 0, speedLimitUp = 0, altSpeedDown = 0, altSpeedUp = 0,
-            downloadSubpath = f.downloadSubpath,
         )
-        val ftp = FtpSettings(f.ftpUsername, f.ftpPassword, f.ftpPort, f.ftpWifiOnly, f.ftpExposedRoot)
+        val ftp = FtpSettings(f.ftpUsername, f.ftpPassword, f.ftpPort, f.ftpWifiOnly)
+        val cfg = AppConfig(
+            wizardCompleted = true,
+            transmission = tx,
+            ftp = ftp,
+            crawler = CrawlerSettings(),
+            dataSubpath = f.dataSubpath,
+        )
         val errors = ConfigValidator.validateTransmission(tx).errors +
-                     ConfigValidator.validateFtp(ftp).errors
+                     ConfigValidator.validateFtp(ftp).errors +
+                     ConfigValidator.validateDataDir(cfg).errors
         return if (errors.isEmpty()) Outcome(true, emptyList(), tx, ftp, f.crawlerEnabled)
                else Outcome(false, errors, null, null, false)
     }

@@ -13,8 +13,6 @@ object ConfigValidator {
         if (s.speedLimitUp < 0) errors.add("speed-limit-up must be >= 0")
         if (s.altSpeedDown < 0) errors.add("alt-speed-down must be >= 0")
         if (s.altSpeedUp < 0) errors.add("alt-speed-up must be >= 0")
-        if (!validSubpath(s.downloadSubpath))
-            errors.add("download subpath must be relative, no '..', alphanumeric/./-/_/space only")
         return ValidationResult(errors.isEmpty(), errors)
     }
 
@@ -24,9 +22,15 @@ object ConfigValidator {
         if (s.password.length < ConfigDefaults.PASSWORD_MIN_LEN)
             errors.add("password must be at least ${ConfigDefaults.PASSWORD_MIN_LEN} characters")
         if (!validPort(s.port)) errors.add("port must be 1..65535")
-        if (!validSubpath(s.exposedRoot))
-            errors.add("exposed root must be relative, no '..', alphanumeric/./-/_/space only")
         if (s.maxDownloadKiBps < 0) errors.add("max download must be >= 0")
+        return ValidationResult(errors.isEmpty(), errors)
+    }
+
+    /** Shared data directory (Stage 11): one setting drives the transmission download dir and the FTP root. */
+    fun validateDataDir(cfg: AppConfig): ValidationResult {
+        val errors = mutableListOf<String>()
+        if (!validSubpath(cfg.dataSubpath))
+            errors.add("data directory must be relative, no '..', alphanumeric/./-/_/space only")
         return ValidationResult(errors.isEmpty(), errors)
     }
 

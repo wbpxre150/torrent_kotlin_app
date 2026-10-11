@@ -11,11 +11,10 @@ class ConfigValidatorTest {
         peerPort = 51413,
         speedLimitDown = 0, speedLimitUp = 0,
         altSpeedDown = 50, altSpeedUp = 10,
-        downloadSubpath = "Downloads",
     )
     private fun validFtp() = FtpSettings(
         username = "kodi", password = "kodiallday",
-        port = 2121, wifiOnly = true, exposedRoot = "Media",
+        port = 2121, wifiOnly = true,
     )
     @Test fun validTransmission_passes() {
         assertTrue(ConfigValidator.validateTransmission(validTx()).ok)
@@ -36,16 +35,6 @@ class ConfigValidatorTest {
         val r = ConfigValidator.validateTransmission(validTx().copy(speedLimitDown = -1))
         assertFalse(r.ok)
     }
-    @Test fun downloadSubpathWithDotDot_fails() {
-        val r = ConfigValidator.validateTransmission(validTx().copy(downloadSubpath = "../etc"))
-        assertFalse(r.ok); assertTrue(r.errors.any { it.contains("download", true) })
-    }
-    @Test fun leadingSlashSubpath_fails() {
-        assertFalse(ConfigValidator.validateTransmission(validTx().copy(downloadSubpath = "/Downloads")).ok)
-    }
-    @Test fun emptySubpath_passes() {
-        assertTrue(ConfigValidator.validateTransmission(validTx().copy(downloadSubpath = "")).ok)
-    }
     @Test fun validFtp_passes() {
         assertTrue(ConfigValidator.validateFtp(validFtp()).ok)
     }
@@ -55,17 +44,46 @@ class ConfigValidatorTest {
     @Test fun ftpBadPort_fails() {
         assertFalse(ConfigValidator.validateFtp(validFtp().copy(port = 0)).ok)
     }
-    @Test fun ftpExposedRootDotDot_fails() {
-        assertFalse(ConfigValidator.validateFtp(validFtp().copy(exposedRoot = "../x")).ok)
-    }
-    @Test fun ftpEmptyExposedRoot_passes() {
-        assertTrue(ConfigValidator.validateFtp(validFtp().copy(exposedRoot = "")).ok)
-    }
     @Test fun ftpNegativeMaxDownload_fails() {
         assertFalse(ConfigValidator.validateFtp(validFtp().copy(maxDownloadKiBps = -1)).ok)
     }
     @Test fun ftpZeroMaxDownload_passes() {
         assertTrue(ConfigValidator.validateFtp(validFtp().copy(maxDownloadKiBps = 0)).ok)
+    }
+
+    private fun validApp() = AppConfig(
+        wizardCompleted = true,
+        transmission = validTx(),
+        ftp = validFtp(),
+        crawler = CrawlerSettings(),
+        dataSubpath = "torrent_data",
+    )
+
+    @Test fun emptyDataDir_passes() {
+        assertTrue(ConfigValidator.validateDataDir(validApp().copy(dataSubpath = "")).ok)
+    }
+
+    @Test fun validDataDir_passes() {
+        assertTrue(ConfigValidator.validateDataDir(validApp()).ok)
+        assertTrue(ConfigValidator.validateDataDir(validApp().copy(dataSubpath = "a/b")).ok)
+    }
+
+    @Test fun dataDirLeadingSlash_fails() {
+        val r = ConfigValidator.validateDataDir(validApp().copy(dataSubpath = "/abs"))
+        assertFalse(r.ok)
+        assertTrue(r.errors.any { it.contains("data directory must be relative", true) })
+    }
+
+    @Test fun dataDirDotDot_fails() {
+        val r = ConfigValidator.validateDataDir(validApp().copy(dataSubpath = "../x"))
+        assertFalse(r.ok)
+        assertTrue(r.errors.any { it.contains("data directory must be relative", true) })
+    }
+
+    @Test fun dataDirBadChars_fails() {
+        val r = ConfigValidator.validateDataDir(validApp().copy(dataSubpath = "bad\$chars"))
+        assertFalse(r.ok)
+        assertTrue(r.errors.any { it.contains("data directory must be relative", true) })
     }
 
     private fun validCrawler() = CrawlerSettings()
