@@ -33,7 +33,6 @@ class ConfigStore(context: Context) {
             logLevel = prefs.getString(KEY_CRAWLER_LOG_LEVEL, ConfigDefaults.CRAWLER.logLevel)!!,
             dhtPort = prefs.getInt(KEY_CRAWLER_DHT_PORT, ConfigDefaults.CRAWLER.dhtPort),
             niceLevel = prefs.getInt(KEY_CRAWLER_NICE_LEVEL, ConfigDefaults.CRAWLER.niceLevel),
-            skipIntegrityCheck = prefs.getBoolean(KEY_CRAWLER_SKIP_INTEGRITY, ConfigDefaults.CRAWLER.skipIntegrityCheck),
             numTrees = prefs.getInt(KEY_CRAWLER_NUM_TREES, ConfigDefaults.CRAWLER.numTrees),
             treeFindNodeWorkers = prefs.getInt(KEY_CRAWLER_FIND_NODE_WORKERS, ConfigDefaults.CRAWLER.treeFindNodeWorkers),
             treeBep51Workers = prefs.getInt(KEY_CRAWLER_BEP51_WORKERS, ConfigDefaults.CRAWLER.treeBep51Workers),
@@ -84,7 +83,6 @@ class ConfigStore(context: Context) {
             .putString(KEY_CRAWLER_LOG_LEVEL, s.logLevel)
             .putInt(KEY_CRAWLER_DHT_PORT, s.dhtPort)
             .putInt(KEY_CRAWLER_NICE_LEVEL, s.niceLevel)
-            .putBoolean(KEY_CRAWLER_SKIP_INTEGRITY, s.skipIntegrityCheck)
             .putInt(KEY_CRAWLER_NUM_TREES, s.numTrees)
             .putInt(KEY_CRAWLER_FIND_NODE_WORKERS, s.treeFindNodeWorkers)
             .putInt(KEY_CRAWLER_BEP51_WORKERS, s.treeBep51Workers)
@@ -154,7 +152,6 @@ class ConfigStore(context: Context) {
             .putString(KEY_LKG_CRAWLER_LOG_LEVEL, s.logLevel)
             .putInt(KEY_LKG_CRAWLER_DHT_PORT, s.dhtPort)
             .putInt(KEY_LKG_CRAWLER_NICE_LEVEL, s.niceLevel)
-            .putBoolean(KEY_LKG_CRAWLER_SKIP_INTEGRITY, s.skipIntegrityCheck)
             .putInt(KEY_LKG_CRAWLER_NUM_TREES, s.numTrees)
             .putInt(KEY_LKG_CRAWLER_FIND_NODE_WORKERS, s.treeFindNodeWorkers)
             .putInt(KEY_LKG_CRAWLER_BEP51_WORKERS, s.treeBep51Workers)
@@ -183,7 +180,6 @@ class ConfigStore(context: Context) {
             logLevel = prefs.getString(KEY_LKG_CRAWLER_LOG_LEVEL, ConfigDefaults.CRAWLER.logLevel)!!,
             dhtPort = prefs.getInt(KEY_LKG_CRAWLER_DHT_PORT, ConfigDefaults.CRAWLER.dhtPort),
             niceLevel = prefs.getInt(KEY_LKG_CRAWLER_NICE_LEVEL, ConfigDefaults.CRAWLER.niceLevel),
-            skipIntegrityCheck = prefs.getBoolean(KEY_LKG_CRAWLER_SKIP_INTEGRITY, ConfigDefaults.CRAWLER.skipIntegrityCheck),
             numTrees = prefs.getInt(KEY_LKG_CRAWLER_NUM_TREES, ConfigDefaults.CRAWLER.numTrees),
             treeFindNodeWorkers = prefs.getInt(KEY_LKG_CRAWLER_FIND_NODE_WORKERS, ConfigDefaults.CRAWLER.treeFindNodeWorkers),
             treeBep51Workers = prefs.getInt(KEY_LKG_CRAWLER_BEP51_WORKERS, ConfigDefaults.CRAWLER.treeBep51Workers),
@@ -227,7 +223,6 @@ class ConfigStore(context: Context) {
         private const val KEY_CRAWLER_LOG_LEVEL = "crawler_log_level"
         private const val KEY_CRAWLER_DHT_PORT = "crawler_dht_port"
         private const val KEY_CRAWLER_NICE_LEVEL = "crawler_nice_level"
-        private const val KEY_CRAWLER_SKIP_INTEGRITY = "crawler_skip_integrity_check"
         private const val KEY_CRAWLER_NUM_TREES = "crawler_num_trees"
         private const val KEY_CRAWLER_FIND_NODE_WORKERS = "crawler_tree_find_node_workers"
         private const val KEY_CRAWLER_BEP51_WORKERS = "crawler_tree_bep51_workers"
@@ -250,7 +245,6 @@ class ConfigStore(context: Context) {
         private const val KEY_LKG_CRAWLER_LOG_LEVEL = "lkg_crawler_log_level"
         private const val KEY_LKG_CRAWLER_DHT_PORT = "lkg_crawler_dht_port"
         private const val KEY_LKG_CRAWLER_NICE_LEVEL = "lkg_crawler_nice_level"
-        private const val KEY_LKG_CRAWLER_SKIP_INTEGRITY = "lkg_crawler_skip_integrity_check"
         private const val KEY_LKG_CRAWLER_NUM_TREES = "lkg_crawler_num_trees"
         private const val KEY_LKG_CRAWLER_FIND_NODE_WORKERS = "lkg_crawler_tree_find_node_workers"
         private const val KEY_LKG_CRAWLER_BEP51_WORKERS = "lkg_crawler_tree_bep51_workers"

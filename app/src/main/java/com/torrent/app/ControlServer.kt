@@ -584,7 +584,6 @@ class ControlServer(
                 <label>Log level<select name="logLevel">$levelOptions</select></label>
                 <label>DHT port<input name="dhtPort" value="${s.dhtPort}"></label>
                 <label>Nice level (-20..19)<input name="niceLevel" value="${s.niceLevel}"></label>
-                <label class="row"><input type="checkbox" name="skipIntegrityCheck" ${checked(s.skipIntegrityCheck)}> Skip startup integrity check (--dont-check-database)</label>
               </fieldset>
               <fieldset><legend>Resources</legend>
                 <label>Tree count (1..64)<input id="numTrees" name="numTrees" value="${s.numTrees}"></label>
@@ -1105,7 +1104,6 @@ class ControlServer(
             logLevel = form["logLevel"]?.takeIf { it.isNotEmpty() } ?: current.logLevel,
             dhtPort = form["dhtPort"]?.toIntOrNull() ?: current.dhtPort,
             niceLevel = form["niceLevel"]?.toIntOrNull() ?: current.niceLevel,
-            skipIntegrityCheck = form.containsKey("skipIntegrityCheck"),
             numTrees = form["numTrees"]?.toIntOrNull() ?: current.numTrees,
             treeFindNodeWorkers = form["treeFindNodeWorkers"]?.toIntOrNull() ?: current.treeFindNodeWorkers,
             treeBep51Workers = form["treeBep51Workers"]?.toIntOrNull() ?: current.treeBep51Workers,

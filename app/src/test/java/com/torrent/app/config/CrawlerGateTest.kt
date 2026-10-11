@@ -1,6 +1,5 @@
 package com.torrent.app.config
 
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -21,16 +20,6 @@ class CrawlerGateTest {
     @Test fun enabledWifiOnly_followsWifi() {
         assertTrue(CrawlerGate.shouldRun(true, true, true))
         assertFalse(CrawlerGate.shouldRun(true, true, false))
-    }
-
-    @Test fun crawlerArgs_defaultHasNoArgs() {
-        assertEquals(emptyList<String>(), CrawlerGate.crawlerArgs(CrawlerSettings()))
-    }
-
-    @Test fun crawlerArgs_skipIntegrityCheckAddsFlag() {
-        assertEquals(
-            listOf("--dont-check-database"),
-            CrawlerGate.crawlerArgs(CrawlerSettings(skipIntegrityCheck = true)))
     }
 
     @Test fun exitedDuringWatch_onlyWhenRestartCountGrew() {

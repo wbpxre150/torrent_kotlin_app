@@ -164,7 +164,7 @@ class DaemonService : Service() {
         // is always listed in the daemons table (STOPPED until something starts
         // it), even when it is disabled or wifi-paused. Registration is pure —
         // no layout work happens until a start is requested.
-        registerCrawlerSupervisor(CrawlerGate.crawlerArgs(configStore.load().crawler))
+        registerCrawlerSupervisor(emptyList())
         controlServer = ControlServer(
             tokenManager = tokenManager,
             serviceState = _state,
@@ -508,9 +508,7 @@ class DaemonService : Service() {
 
     /**
      * The apply job body; runs on the crawler-control executor (see
-     * [applyCrawlerSettings]). The supervisor is recreated with the
-     * settings-derived args, so an arg change (e.g. `--dont-check-database`)
-     * is always picked up.
+     * [applyCrawlerSettings]).
      */
     private fun runCrawlerApply(s: com.torrent.app.config.CrawlerSettings) {
         val previous = configStore.load().crawler
@@ -541,10 +539,9 @@ class DaemonService : Service() {
         }
 
         setCrawlerApplyStatus(CrawlerApplyPhase.STARTING, "starting crawler")
-        // The supervisor is (re)registered with the settings-derived args —
-        // see registerCrawlerSupervisor — and stays listed in the daemons
-        // table even when the apply leaves it stopped.
-        val crawler = registerCrawlerSupervisor(CrawlerGate.crawlerArgs(s))
+        // The supervisor stays listed in the daemons table even when the
+        // apply leaves it stopped.
+        val crawler = registerCrawlerSupervisor(emptyList())
         crawler.start()
 
         // Watch the restarted crawler for the whole window (plan 10 §1): the
@@ -589,9 +586,9 @@ class DaemonService : Service() {
         stopCrawlerSupervisors()
         configStore.saveCrawler(previous)
         crawlerConfig.restoreLastKnownGood()
-        // (Re)register with the previous args — see registerCrawlerSupervisor —
-        // so the crawler stays listed in the daemons table.
-        val restored = registerCrawlerSupervisor(CrawlerGate.crawlerArgs(previous))
+        // (Re)register — see registerCrawlerSupervisor — so the crawler stays
+        // listed in the daemons table.
+        val restored = registerCrawlerSupervisor(emptyList())
         restored.start()
         setCrawlerApplyStatus(
             CrawlerApplyPhase.ROLLED_BACK,
@@ -657,7 +654,7 @@ class DaemonService : Service() {
                 return false
             }
             return runOnCrawlerControl {
-                val crawler = registerCrawlerSupervisor(CrawlerGate.crawlerArgs(c))
+                val crawler = registerCrawlerSupervisor(emptyList())
                 try {
                     crawler.restart()
                 } catch (e: Exception) {
@@ -907,7 +904,7 @@ class DaemonService : Service() {
                 val crawlerConfig = CrawlerConfig(this)
                 crawlerConfig.ensureLayout()
                 val crawler =
-                    registerCrawlerSupervisor(CrawlerGate.crawlerArgs(configStore.load().crawler))
+                    registerCrawlerSupervisor(emptyList())
                 crawler.start()
             } catch (e: Exception) {
                 android.util.Log.e("DaemonService", "failed to start crawler supervisor", e)

@@ -98,7 +98,6 @@ class ConfigStoreTest {
                 logLevel = "DEBUG",
                 dhtPort = 6882,
                 niceLevel = 5,
-                skipIntegrityCheck = true,
                 numTrees = 8,
                 treeFindNodeWorkers = 4,
                 treeBep51Workers = 12,
@@ -123,7 +122,6 @@ class ConfigStoreTest {
         assertEquals("DEBUG", c.logLevel)
         assertEquals(6882, c.dhtPort)
         assertEquals(5, c.niceLevel)
-        assertTrue(c.skipIntegrityCheck)
         assertEquals(8, c.numTrees)
         assertEquals(4, c.treeFindNodeWorkers)
         assertEquals(12, c.treeBep51Workers)
@@ -149,7 +147,6 @@ class ConfigStoreTest {
         assertEquals("INFO", c.logLevel)
         assertEquals(6881, c.dhtPort)
         assertEquals(10, c.niceLevel)
-        assertFalse(c.skipIntegrityCheck)
         assertEquals(16, c.numTrees)
         assertEquals(3, c.treeFindNodeWorkers)
         assertEquals(10, c.treeBep51Workers)

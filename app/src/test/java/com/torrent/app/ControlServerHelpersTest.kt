@@ -54,7 +54,7 @@ class ControlServerHelpersTest {
 
     @Test fun crawlerSettingsFromForm_parsesAllFields() {
         val m = ControlServer.parseForm(
-            "enabled=&wifiOnly=&skipIntegrityCheck=&lanDirect=&logLevel=WARN&dhtPort=6882&niceLevel=-5"
+            "enabled=&wifiOnly=&lanDirect=&logLevel=WARN&dhtPort=6882&niceLevel=-5"
                 + "&numTrees=8&treeFindNodeWorkers=2&treeBep51Workers=5&treeGetPeersWorkers=12&treeMetadataWorkers=40"
                 + "&treeInfohashQueueCapacity=100&treePeersQueueCapacity=200&pornFilterEnabled="
                 + "&languageFilterNonLatinThreshold=50&bloomCapacity=1000&failureBloomCapacity=2000"
@@ -62,7 +62,6 @@ class ControlServerHelpersTest {
         val s = ControlServer.crawlerSettingsFromForm(m, CrawlerSettings())
         assertTrue(s.enabled)
         assertTrue(s.wifiOnly)
-        assertTrue(s.skipIntegrityCheck)
         assertTrue(s.lanDirect)
         assertEquals("WARN", s.logLevel)
         assertEquals(6882, s.dhtPort)

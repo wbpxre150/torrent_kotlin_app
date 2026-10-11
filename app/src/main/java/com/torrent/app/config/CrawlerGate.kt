@@ -17,14 +17,6 @@ object CrawlerGate {
         enabled && (!wifiOnly || wifiUp)
 
     /**
-     * The crawler process's CLI args derived from [s]: `--dont-check-database`
-     * when the startup integrity check is skipped. The supervisor must be
-     * (re)created whenever these args change.
-     */
-    fun crawlerArgs(s: CrawlerSettings): List<String> =
-        if (s.skipIntegrityCheck) listOf("--dont-check-database") else emptyList()
-
-    /**
      * Post-apply rollback trigger (plan 10 §1): the crawler exited at least once
      * within the watch window after the restart. `ProcessSupervisor` bumps
      * `restartCount` on every relaunch, and a healthy crawler never exits.

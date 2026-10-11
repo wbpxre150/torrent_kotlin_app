@@ -27,8 +27,6 @@ data class CrawlerSettings(
     val logLevel: String = "INFO",
     val dhtPort: Int = 6881,
     val niceLevel: Int = 10,
-    /** Adds `--dont-check-database` to the crawler's args. */
-    val skipIntegrityCheck: Boolean = false,
     val numTrees: Int = 16,
     val treeFindNodeWorkers: Int = 3,
     val treeBep51Workers: Int = 10,
