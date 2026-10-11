@@ -227,10 +227,10 @@ class ControlServer(
                         call.respondText(json, ContentType.Application.Json)
                     }
                     get("api/crawler/stats") {
-                        val running = daemonStatuses()
-                            .firstOrNull { it.label == DaemonService.CRAWLER_LABEL }?.state == ProcessState.RUNNING
-                        val body = if (running) fetchCrawlerStats(crawlerHttpPort()) else null
-                        call.respondText(crawlerStatsJson(body), ContentType.Application.Json)
+                        val crawler = daemonStatuses()
+                            .firstOrNull { it.label == DaemonService.CRAWLER_LABEL }
+                        val body = if (crawler?.state == ProcessState.RUNNING) fetchCrawlerStats(crawlerHttpPort()) else null
+                        call.respondText(crawlerStatsJson(body, crawler?.state), ContentType.Application.Json)
                     }
 
                     // Maintenance (plan 10 step 4): queue a one-shot action by name.
@@ -910,7 +910,12 @@ class ControlServer(
               function poll() {
                 fetch('/api/crawler/stats').then(function (r) { return r.json(); }).then(function (s) {
                   var el = document.getElementById('crawler-stats');
-                  if (!s || s.running === false) { el.textContent = 'Stats: crawler not running'; return; }
+                  if (!s || s.running === false) {
+                    el.textContent = (s && (s.state === 'RUNNING' || s.state === 'STARTING'))
+                      ? 'Stats: crawler starting (HTTP API not ready yet)'
+                      : 'Stats: crawler not running';
+                    return;
+                  }
                   var rate = 0;
                   (s.trees || []).forEach(function (t) { rate += (t.metadata_rate || 0); });
                   el.textContent = 'Stats: ' + (s.torrents_indexed || 0) + ' torrents, ' +
@@ -1084,11 +1089,14 @@ class ControlServer(
 
         /**
          * The /api/crawler/stats response body: the crawler's own /stats JSON
-         * passed through when [statsBody] was fetched, or a clean
-         * `{"running":false}` when the crawler is down/unreachable.
+         * passed through when [statsBody] was fetched; otherwise a clean
+         * `{"running":false,"state":…}` fallback carrying the supervisor's
+         * process [state], so the dashboard can tell "starting" (process up,
+         * crawler's HTTP API — which comes up last, after the DB is opened —
+         * not answering yet) apart from genuinely stopped.
          */
-        internal fun crawlerStatsJson(statsBody: String?): String =
-            if (statsBody.isNullOrBlank()) "{\"running\":false}" else statsBody
+        internal fun crawlerStatsJson(statsBody: String?, state: ProcessState? = null): String =
+            if (statsBody.isNullOrBlank()) "{\"running\":false,\"state\":\"${state ?: ProcessState.STOPPED}\"}" else statsBody
 
         /**
          * Builds CrawlerSettings from the settings form (checkbox presence =

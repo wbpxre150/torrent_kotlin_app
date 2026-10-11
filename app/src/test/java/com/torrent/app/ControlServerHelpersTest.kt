@@ -42,9 +42,14 @@ class ControlServerHelpersTest {
         assertEquals("abc", ControlServer.parseCookieToken("foo=1; control_token=abc"))
     }
 
-    @Test fun crawlerStatsJson_fallbackWhenBodyMissing() {
-        assertEquals("{\"running\":false}", ControlServer.crawlerStatsJson(null))
-        assertEquals("{\"running\":false}", ControlServer.crawlerStatsJson("  "))
+    @Test fun crawlerStatsJson_fallbackCarriesProcessState() {
+        assertEquals("{\"running\":false,\"state\":\"STOPPED\"}", ControlServer.crawlerStatsJson(null))
+        assertEquals(
+            "{\"running\":false,\"state\":\"RUNNING\"}",
+            ControlServer.crawlerStatsJson("  ", ProcessState.RUNNING))
+        assertEquals(
+            "{\"running\":false,\"state\":\"STARTING\"}",
+            ControlServer.crawlerStatsJson(null, ProcessState.STARTING))
     }
 
     @Test fun crawlerStatsJson_passesThroughCrawlerBody() {

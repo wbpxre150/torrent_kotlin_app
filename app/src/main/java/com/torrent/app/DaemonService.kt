@@ -456,7 +456,7 @@ class DaemonService : Service() {
         } catch (e: RejectedExecutionException) {
             return com.torrent.app.config.ApplyResult(false, "service is shutting down", false)
         }
-        setCrawlerApplyStatus(CrawlerApplyPhase.STOPPING, "apply started")
+        setCrawlerApplyStatus(CrawlerApplyPhase.STOPPING, "apply started; stopping crawler first (up to 60 s)")
         return com.torrent.app.config.ApplyResult(true, "apply started", false)
     }
 
@@ -544,31 +544,41 @@ class DaemonService : Service() {
         val crawler = registerCrawlerSupervisor(emptyList())
         crawler.start()
 
-        // Watch the restarted crawler for the whole window (plan 10 §1): the
-        // supervisor reports RUNNING as soon as the process is launched, so an
-        // early RUNNING proves nothing. Any exit within the window (restart
-        // count grew) or a crawler not running at the end triggers rollback.
+        // Watch the restarted crawler for the whole window (plan 10 §1). The
+        // supervisor reports RUNNING as soon as the child is forked and bumps
+        // restartCount on every (re)launch, so the watch ARMS at the first
+        // poll that sees the crawler RUNNING — the restartCount of the launch
+        // this apply started. Snapshotting immediately after start() (as this
+        // used to do) captured the pre-launch count, so the launch's own bump
+        // looked like an early exit and every apply that started the crawler
+        // was rolled back (restoring enabled=false, which also stopped the
+        // crawler from auto-loading with the app). A slow start is fine: the
+        // crawler opens a large DB before its HTTP API answers, but
+        // restartCount only moves when a process actually exits.
+        val watch = CrawlerApplyWatch()
         setCrawlerApplyStatus(CrawlerApplyPhase.WATCHING, "watching for early exit (30 s)")
-        val statusAtApply = crawler.status.value
         val deadline = System.currentTimeMillis() + CRAWLER_APPLY_WATCH_MS
         while (System.currentTimeMillis() < deadline) {
             Thread.sleep(CRAWLER_APPLY_POLL_MS)
-            val cur = crawler.status.value
-            if (cur.state == ProcessState.STOPPED || cur.state == ProcessState.STOPPING) {
-                // Stopped externally (user / wifi gate) — nothing to judge.
+            when (watch.onPoll(crawler.status.value)) {
+                CrawlerWatchVerdict.STOPPED_EXTERNALLY -> {
+                    // Stopped externally (user / wifi gate) — nothing to judge.
+                    setCrawlerApplyStatus(CrawlerApplyPhase.OK, "applied; crawler stopped during watch")
+                    return
+                }
+                CrawlerWatchVerdict.EARLY_EXIT -> {
+                    rollBackCrawlerApply(crawlerConfig, previous)
+                    return
+                }
+                else -> {}
+            }
+        }
+        when (watch.onDeadline(crawler.status.value)) {
+            CrawlerWatchVerdict.EARLY_EXIT -> rollBackCrawlerApply(crawlerConfig, previous)
+            CrawlerWatchVerdict.STOPPED_EXTERNALLY ->
                 setCrawlerApplyStatus(CrawlerApplyPhase.OK, "applied; crawler stopped during watch")
-                return
-            }
-            if (CrawlerGate.exitedDuringWatch(statusAtApply.restartCount, cur.restartCount)) {
-                rollBackCrawlerApply(crawlerConfig, previous)
-                return
-            }
+            else -> setCrawlerApplyStatus(CrawlerApplyPhase.OK, "applied; crawler running")
         }
-        if (crawler.status.value.state != ProcessState.RUNNING) {
-            rollBackCrawlerApply(crawlerConfig, previous)
-            return
-        }
-        setCrawlerApplyStatus(CrawlerApplyPhase.OK, "applied; crawler running")
     }
 
     /**
