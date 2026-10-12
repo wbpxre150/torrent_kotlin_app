@@ -497,12 +497,60 @@ tasks.register("buildDhtCrawler") {
     }
 }
 
+tasks.register("buildFtpServer") {
+    description = "Cross-compile the native FTP daemon for arm64, package libftpserver.so (Stage 2)"
+
+    val ndk = providers.environmentVariable("ANDROID_NDK_HOME")
+        .orElse(providers.provider {
+            val sdk = android.sdkDirectory
+            val ndks = file("$sdk/ndk").listFiles()?.sortedByDescending { it.name }
+            ndks?.firstOrNull()?.absolutePath ?: error("NDK not found")
+        })
+    val ndkDir = file(ndk.get())
+    val toolchainFile = file("$ndkDir/build/cmake/android.toolchain.cmake")
+
+    val nativeDir = file("build/native")
+    val srcDir = file("src/main/cpp/ftp-server")
+    val buildDir = file("$nativeDir/build-ftpserver")
+    val serverOut = file("$buildDir/ftpserver")
+    val jniLibsArm64 = file("src/main/jniLibs/arm64-v8a")
+
+    outputs.file("$jniLibsArm64/libftpserver.so")
+    inputs.dir(srcDir)
+    inputs.file(toolchainFile)
+
+    doLast {
+        // 1. Configure (Ninja + NDK toolchain)
+        project.exec {
+            commandLine(
+                "cmake", "-G", "Ninja",
+                "-S", srcDir.absolutePath, "-B", buildDir.absolutePath,
+                "-DCMAKE_TOOLCHAIN_FILE=${toolchainFile.absolutePath}",
+                "-DANDROID_ABI=arm64-v8a",
+                "-DANDROID_PLATFORM=android-24",
+                "-DCMAKE_BUILD_TYPE=Release"
+            )
+        }
+        // 2. Build the daemon executable
+        project.exec {
+            commandLine("cmake", "--build", buildDir.absolutePath, "--target", "ftpserver", "-j8")
+        }
+        // 3. Copy + rename to jniLibs (lib*.so name required for packaging)
+        copy {
+            from(serverOut)
+            into(jniLibsArm64)
+            rename { "libftpserver.so" }
+        }
+    }
+}
+
 // Ensure buildTransmission runs before jniLibs are merged into the APK
 afterEvaluate {
     // Ensure native libs and generated crawler assets are ready before packaging
     tasks.named("mergeDebugJniLibFolders").configure {
         dependsOn("buildTransmission")
         dependsOn("buildDhtCrawler")
+        dependsOn("buildFtpServer")
     }
     tasks.named("mergeDebugAssets").configure {
         dependsOn("copyDhtCrawlerAssets")

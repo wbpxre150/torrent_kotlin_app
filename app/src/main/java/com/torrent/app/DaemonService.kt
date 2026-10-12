@@ -20,6 +20,7 @@ import java.io.File
 import android.net.Uri
 import com.torrent.app.storage.SafStatus
 import com.torrent.app.storage.SafStorageGateway
+import com.torrent.app.storage.FtpSafIpcRequestHandler
 import com.torrent.app.storage.SafIpcRequestHandler
 import com.torrent.app.storage.SafIpcServer
 import com.torrent.app.storage.UsbPermissionManager
@@ -85,6 +86,9 @@ class DaemonService : Service() {
 
     private lateinit var safSocketFile: java.io.File
     private lateinit var safIpcServer: SafIpcServer
+    // Stage 2: second IPC server for the native FTP daemon's read-only SAF
+    // backend (filesDir/ftp-saf.sock). Shares the lifecycle of [safIpcServer].
+    private lateinit var ftpSafIpcServer: SafIpcServer
     private lateinit var transmissionConfig: TransmissionConfig
     private lateinit var configStore: com.torrent.app.config.ConfigStore
     @Volatile var lastApplyRolledBack: Boolean = false
@@ -117,6 +121,14 @@ class DaemonService : Service() {
         }
         safSocketFile = java.io.File(filesDir, "saf-bridge.sock")
         safIpcServer = SafIpcServer(safSocketFile, SafIpcRequestHandler { gateway })
+        val ftpSafSocketFile = java.io.File(filesDir, "ftp-saf.sock")
+        ftpSafIpcServer = SafIpcServer(ftpSafSocketFile, FtpSafIpcRequestHandler(
+            stat = { gateway?.readOnlyStat(it) },
+            list = { gateway?.readOnlyListDetailed(it) ?: emptyList() },
+            openRead = { gateway?.readOnlyOpenRead(it) },
+            remove = { gateway?.removeDoc(it) ?: false },
+            gatewayAvailable = { gateway != null },
+        ))
         // One-shot maintenance runner + coordinator (plan 10 step 5). The
         // runner execs the same libdhtcrawler.so the supervisor supervises;
         // the coordinator serializes actions on the crawler-control executor.
@@ -245,6 +257,7 @@ class DaemonService : Service() {
         controlServer.start()
         syncCrawlerProxy(configStore.load().crawler)
         safIpcServer.start()
+        ftpSafIpcServer.start()
         wifiGateMonitor.start()
         observeWifiForFtp()
         observeWifiForCrawler()
@@ -265,6 +278,7 @@ class DaemonService : Service() {
         ftpController?.stop()
         stopSupervisors()
         safIpcServer.stop()
+        ftpSafIpcServer.stop()
         gateway?.shutdown()
         _state.value = ServiceState.Stopping
         releaseLocks()

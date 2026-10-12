@@ -10,15 +10,9 @@ import android.os.ParcelFileDescriptor
  *
  * Status convention: 0 = ok (EXISTS uses 1/0), negative = error (native maps to errno).
  */
-class SafIpcRequestHandler(private val bridgeProvider: () -> UsbFdBridge?) {
+class SafIpcRequestHandler(private val bridgeProvider: () -> UsbFdBridge?) : SafIpcHandler {
 
-    data class Handled(
-        val status: Int,
-        val payload: ByteArray = ByteArray(0),
-        val fd: ParcelFileDescriptor? = null,
-    )
-
-    fun handle(req: SafIpcCodec.Request): Handled {
+    override fun handle(req: SafIpcCodec.Request): Handled {
         val bridge = bridgeProvider() ?: return Handled(-19) // ENODEV: USB not granted
         return when (req.op) {
             SafIpcCodec.OP_OPEN -> {

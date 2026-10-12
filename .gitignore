@@ -20,6 +20,7 @@ local.properties
 # Native daemon binaries built by Gradle (buildTransmission / buildDhtCrawler)
 app/src/main/jniLibs/arm64-v8a/libtransmissiond.so
 app/src/main/jniLibs/arm64-v8a/libdhtcrawler.so
+app/src/main/jniLibs/arm64-v8a/libftpserver.so
 .externalNativeBuild/
 .cxx/
 

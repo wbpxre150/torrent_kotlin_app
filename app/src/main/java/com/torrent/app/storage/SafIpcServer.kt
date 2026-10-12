@@ -22,7 +22,7 @@ import java.io.File
  */
 class SafIpcServer(
     private val socketFile: File,
-    private val handler: SafIpcRequestHandler,
+    private val handler: SafIpcHandler,
 ) {
     private var scope: CoroutineScope? = null
     private var serverSocket: LocalServerSocket? = null

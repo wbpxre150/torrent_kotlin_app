@@ -23,6 +23,12 @@ object SafIpcCodec {
     const val OP_AVAIL: Byte = 7
     const val OP_EXISTS: Byte = 8
 
+    // Read-only ops served to the native FTP daemon over the second IPC
+    // socket (stage 2; FtpSafIpcRequestHandler).
+    const val OP_RO_STAT: Byte = 10
+    const val OP_RO_LIST: Byte = 11
+    const val OP_RO_OPEN: Byte = 12
+
     const val MODE_R: Byte = 0
     const val MODE_RW: Byte = 1
 
@@ -55,6 +61,13 @@ object SafIpcCodec {
     }
     private fun leI32(buf: ByteBuffer): Int = buf.order(ByteOrder.LITTLE_ENDIAN).int
     private fun leI64(buf: ByteBuffer): Long = buf.order(ByteOrder.LITTLE_ENDIAN).long
+    private fun putU32(buf: ByteBuffer, v: Int) {
+        buf.order(ByteOrder.LITTLE_ENDIAN).putInt(v)
+    }
+    private fun putU64(buf: ByteBuffer, v: Long) {
+        buf.order(ByteOrder.LITTLE_ENDIAN).putLong(v)
+    }
+    private fun leU32(buf: ByteBuffer): Int = buf.order(ByteOrder.LITTLE_ENDIAN).int
 
     private fun putString(buf: ByteBuffer, s: String) {
         val b = s.toByteArray(Charsets.UTF_8)
@@ -196,5 +209,89 @@ object SafIpcCodec {
     fun availPayload(bytes: Long): ByteArray {
         val buf = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
         putI64(buf, bytes); return buf.array()
+    }
+
+    // ---- OP_RO_LIST (batched directory listing) ----
+
+    /** Payload cap for one OP_RO_LIST batch: 60 KiB, headroom under the 65535-byte frame cap. */
+    const val RO_LIST_MAX_PAYLOAD: Int = 60 * 1024
+
+    /** nextIndex value in the final OP_RO_LIST batch (all entries sent). */
+    const val RO_LIST_END: Int = 0xFFFFFFFF.toInt()
+
+    data class RoListBatch(val nextIndex: Int, val entries: List<SafStorageGateway.ChildEntry>)
+
+    /** OP_RO_LIST request payload: [string relPath][u32 startIndex LE]. */
+    fun roListRequest(relPath: String, startIndex: Int): ByteArray {
+        val buf = ByteBuffer.allocate(2 + relPath.toByteArray(Charsets.UTF_8).size + 4)
+            .order(ByteOrder.LITTLE_ENDIAN)
+        putString(buf, relPath); putU32(buf, startIndex)
+        return encodeRequest(OP_RO_LIST, buf.array())
+    }
+
+    fun parseRoListRequest(payload: ByteArray): Pair<String, Int> {
+        val bb = ByteBuffer.wrap(payload)
+        return readString(bb) to leU32(bb)
+    }
+
+    /**
+     * Splits a name-sorted [entries] list into the batch starting at
+     * [startIndex] that fits under [RO_LIST_MAX_PAYLOAD]. Always yields at
+     * least one entry while any remain, so pagination cannot stall on a
+     * pathologically long name. Returns the next startIndex ([RO_LIST_END]
+     * when the last entry was taken) and the packed entries.
+     */
+    fun packRoListBatch(entries: List<SafStorageGateway.ChildEntry>, startIndex: Int): RoListBatch {
+        if (startIndex >= entries.size) return RoListBatch(RO_LIST_END, emptyList())
+        val batch = ArrayList<SafStorageGateway.ChildEntry>()
+        var size = 6 // u32 nextIndex + u16 count
+        var i = startIndex
+        while (i < entries.size) {
+            val e = entries[i]
+            val entryBytes = 2 + e.name.toByteArray(Charsets.UTF_8).size + 1 + 8 + 8
+            if (batch.isNotEmpty() && size + entryBytes > RO_LIST_MAX_PAYLOAD) break
+            size += entryBytes
+            batch.add(e)
+            i++
+        }
+        return RoListBatch(if (i >= entries.size) RO_LIST_END else i, batch)
+    }
+
+    /**
+     * Payload-only (no frame) OP_RO_LIST success payload: [u32 nextIndex LE]
+     * [u16 count LE], then per entry [u16 nameLen LE][name utf-8][u8 isDir]
+     * [u64 size LE][i64 mtimeMs LE].
+     */
+    fun roListPayload(nextIndex: Int, entries: List<SafStorageGateway.ChildEntry>): ByteArray {
+        var size = 6
+        for (e in entries) size += 2 + e.name.toByteArray(Charsets.UTF_8).size + 1 + 8 + 8
+        val buf = ByteBuffer.allocate(size).order(ByteOrder.LITTLE_ENDIAN)
+        putU32(buf, nextIndex); putU16(buf, entries.size)
+        for (e in entries) {
+            putString(buf, e.name)
+            buf.put(if (e.isDir) 1.toByte() else 0.toByte())
+            putU64(buf, e.size)
+            putI64(buf, e.lastModified)
+        }
+        return buf.array()
+    }
+
+    fun roListResponse(nextIndex: Int, entries: List<SafStorageGateway.ChildEntry>): ByteArray =
+        encodeResponse(0, roListPayload(nextIndex, entries))
+
+    /** @return nextIndex ([RO_LIST_END] when done) and this batch's entries. */
+    fun parseRoListResponse(resp: Response): Pair<Int, List<SafStorageGateway.ChildEntry>> {
+        val bb = ByteBuffer.wrap(resp.payload).order(ByteOrder.LITTLE_ENDIAN)
+        val nextIndex = leU32(bb)
+        val count = leU16(bb)
+        val out = ArrayList<SafStorageGateway.ChildEntry>(count)
+        repeat(count) {
+            val name = readString(bb)
+            val isDir = bb.get() == 1.toByte()
+            val size = leI64(bb)
+            val mtime = leI64(bb)
+            out.add(SafStorageGateway.ChildEntry(name, isDir, size, mtime))
+        }
+        return nextIndex to out
     }
 }
