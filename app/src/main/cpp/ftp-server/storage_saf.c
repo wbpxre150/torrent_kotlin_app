@@ -181,30 +181,44 @@ static int saf_recv(int fd, int32_t *status, uint8_t *payload, size_t cap,
 static int saf_recv_with_fd(int fd, int32_t *status, int *fd_out) {
     uint8_t hdr[6];
     char cbuf[CMSG_SPACE(sizeof(int))];
-    struct iovec iov;
     struct msghdr msg;
     memset(&msg, 0, sizeof msg);
     memset(cbuf, 0, sizeof cbuf);
-    iov.iov_base = hdr;
-    iov.iov_len = sizeof hdr;
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
     msg.msg_control = cbuf;
     msg.msg_controllen = sizeof cbuf;
-    ssize_t r = recvmsg(fd, &msg, 0);
-    if (r != (ssize_t)sizeof hdr)
-        return -1;
+    /* The 6-byte header may arrive in pieces on the stream socket, so loop
+     * like read_full (EINTR continues, peer close is an error). A fd, if any,
+     * rides as SCM_RIGHTS ancillary data on the FIRST datagram, so cbuf is
+     * captured on the first recvmsg and only the remaining header bytes are
+     * read on later iterations. */
+    size_t off = 0;
+    while (off < sizeof hdr) {
+        struct iovec io;
+        io.iov_base = hdr + off;
+        io.iov_len = sizeof hdr - off;
+        msg.msg_iov = &io;
+        msg.msg_iovlen = 1;
+        ssize_t r = recvmsg(fd, &msg, 0);
+        if (r < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        if (r == 0)
+            return -1; /* peer closed mid-header */
+        off += (size_t)r;
+    }
     *status = (int32_t)le_u32_get(hdr);
     size_t len = le_u16_get(hdr + 4);
     if (len > 0) {
         /* OP_RO_OPEN carries no payload bytes; drain defensively. */
         uint8_t drain[512];
-        size_t off = 0;
-        while (off < len) {
-            size_t chunk = len - off > sizeof drain ? sizeof drain : len - off;
+        size_t doff = 0;
+        while (doff < len) {
+            size_t chunk = len - doff > sizeof drain ? sizeof drain : len - doff;
             if (read_full(fd, drain, chunk) != 0)
                 return -1;
-            off += chunk;
+            doff += chunk;
         }
     }
     *fd_out = -1;
@@ -357,6 +371,54 @@ static int saf_stat(storage_backend_t *b, const char *rel, storage_stat_t *out) 
 }
 
 /*
+ * Append the entries of one OP_RO_LIST batch payload to the realloc-grown
+ * array (*arr / *n / *caparr). Per entry: [u16 nameLen LE][name utf-8]
+ * [u8 isDir][u64 size LE][i64 mtimeMs LE]. 0 on success; -1 on a malformed
+ * batch (the array is left in a valid, freeable state).
+ */
+static int append_batch_entries(const uint8_t *payload, size_t plen,
+                                storage_entry_t **arr, size_t *n,
+                                size_t *caparr) {
+    if (plen < 6)
+        return -1;
+    uint16_t count = le_u16_get(payload + 4);
+    const uint8_t *p = payload + 6;
+    size_t rem = plen - 6;
+    for (uint16_t i = 0; i < count; i++) {
+        if (rem < 2)
+            return -1;
+        uint16_t nlen = le_u16_get(p);
+        p += 2;
+        rem -= 2;
+        if (rem < (size_t)nlen + 17)
+            return -1;
+        if (*n == *caparr) {
+            *caparr = *caparr ? *caparr * 2 : 64;
+            storage_entry_t *na = realloc(*arr, *caparr * sizeof *na);
+            if (na == NULL)
+                return -1;
+            *arr = na;
+        }
+        storage_entry_t *e = &(*arr)[*n];
+        memset(e, 0, sizeof *e);
+        size_t copy = nlen < sizeof e->name ? nlen : sizeof e->name - 1;
+        memcpy(e->name, p, copy);
+        e->name[copy] = '\0';
+        p += nlen;
+        rem -= nlen;
+        e->is_dir = *p == 1 ? 1 : 0;
+        p += 1;
+        e->size = le_u64_get(p);
+        p += 8;
+        e->mtime_ms = (long long)le_u64_get(p);
+        p += 8;
+        rem -= 17;
+        (*n)++;
+    }
+    return 0;
+}
+
+/*
  * Fetch the full sorted listing (all OP_RO_LIST batches) into a local array,
  * then hand back the window [offset, offset+cap) — the pagination contract
  * session.c consumes.
@@ -400,46 +462,9 @@ static int saf_list(storage_backend_t *b, const char *rel, int offset,
             goto done;
         }
         uint32_t next = le_u32_get(payload);
-        uint16_t count = le_u16_get(payload + 4);
-        const uint8_t *p = payload + 6;
-        size_t rem = plen - 6;
-        for (uint16_t i = 0; i < count; i++) {
-            if (rem < 2) {
-                free(payload);
-                goto done;
-            }
-            uint16_t nlen = le_u16_get(p);
-            p += 2;
-            rem -= 2;
-            if (rem < (size_t)nlen + 17) {
-                free(payload);
-                goto done;
-            }
-            p += nlen;
-            rem -= nlen;
-            if (n == caparr) {
-                caparr = caparr ? caparr * 2 : 64;
-                storage_entry_t *na = realloc(arr, caparr * sizeof *na);
-                if (na == NULL) {
-                    free(payload);
-                    goto done;
-                }
-                arr = na;
-            }
-            storage_entry_t *e = &arr[n];
-            memset(e, 0, sizeof *e);
-            size_t copy = nlen < sizeof e->name ? nlen : sizeof e->name - 1;
-            memcpy(e->name, p, copy);
-            e->name[copy] = '\0';
-            p += nlen;
-            e->is_dir = *p == 1 ? 1 : 0;
-            p += 1;
-            e->size = le_u64_get(p);
-            p += 8;
-            e->mtime_ms = (long long)le_u64_get(p);
-            p += 8;
-            rem -= 17;
-            n++;
+        if (append_batch_entries(payload, plen, &arr, &n, &caparr) != 0) {
+            free(payload);
+            goto done;
         }
         free(payload);
         if (next == SAF_RO_LIST_END)

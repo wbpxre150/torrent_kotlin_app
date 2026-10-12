@@ -9,8 +9,8 @@
  *                  --max-kibps <n> --saf-socket <path>
  *
  * Exit codes: 0 clean stop, 2 usage error, 3 bind failure, 4 storage init failure.
- * SIGTERM/SIGINT set a stop flag; the accept loop (poll, 5s timeout) notices and
- * exits within the supervisor's 5s grace. SIGPIPE is ignored globally and all
+ * SIGTERM/SIGINT set a stop flag; the accept loop (poll, 1s timeout) notices and
+ * exits well within the supervisor's 5s grace. SIGPIPE is ignored globally and all
  * sends use MSG_NOSIGNAL.
  */
 #define _GNU_SOURCE
@@ -171,7 +171,7 @@ int main(int argc, char **argv) {
         pfd.fd = listener;
         pfd.events = POLLIN;
         pfd.revents = 0;
-        int rv = poll(&pfd, 1, 5000);
+        int rv = poll(&pfd, 1, 1000);
         if (rv > 0 && (pfd.revents & (POLLIN | POLLHUP))) {
             for (;;) {
                 int cfd = accept(listener, NULL, NULL);

@@ -39,3 +39,10 @@ add_executable(ftpserver-host ${FTPD_SOURCES})
 target_compile_options(ftpserver-host PRIVATE -O2 -Wall -Wextra)
 target_compile_definitions(ftpserver-host PRIVATE ${FTPD_BACKEND_DEF})
 target_link_libraries(ftpserver-host PRIVATE pthread)
+
+# Host-only unit test for the SAF OP_RO_LIST batch parser. Includes
+# storage_saf.c directly (with `static` lifted), so it is independent of
+# FTPD_BACKEND and never part of the Android build.
+add_executable(saf-parser-unit saf_parser_unit.c)
+target_compile_options(saf-parser-unit PRIVATE -O2 -Wall -Wextra)
+target_compile_definitions(saf-parser-unit PRIVATE FTPD_SAF_PARSER_UNIT)

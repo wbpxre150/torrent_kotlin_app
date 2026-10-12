@@ -416,16 +416,18 @@ class DaemonService : Service() {
      * Registers (without starting) the single ftp_server supervisor for bind
      * [ip] and returns it. The supervisor stays registered for the whole
      * service lifetime — listed in the daemons table (STOPPED) even while the
-     * gate is closed — and is replaced only when the bind IP or settings
-     * change its CLI args ([ftpBindIp]): supervisor args are immutable, so a
-     * new supervisor is built and the old one is stopped first (never two at
-     * once). The stop blocks for the SIGTERM grace, so this must run on the
-     * ftp-control executor, except the no-op onCreate registration.
+     * gate is closed — and is replaced when the bind IP differs or [force] is
+     * set (a settings apply changed its CLI args, e.g. port/root/rate limit/
+     * credentials while the wifi IP stayed the same): supervisor args are
+     * immutable, so a new supervisor is built and the old one is stopped
+     * first (never two at once). The stop blocks for the SIGTERM grace, so
+     * this must run on the ftp-control executor, except the no-op onCreate
+     * registration.
      */
-    private fun registerFtpSupervisor(ip: String): ProcessSupervisor {
+    private fun registerFtpSupervisor(ip: String, force: Boolean = false): ProcessSupervisor {
         synchronized(ftpRegistrationLock) {
             val previous = ftpSupervisor
-            if (previous != null && ftpBindIp == ip) return previous
+            if (previous != null && ftpBindIp == ip && !force) return previous
             val sup = buildFtpSupervisor(ip)
             if (previous != null) {
                 try {
@@ -442,12 +444,18 @@ class DaemonService : Service() {
         }
     }
 
-    /** Runs on the ftp-control thread; starts the daemon bound to [ip]. */
-    private fun startFtpSupervisorOnIo(ip: String) {
+    /**
+     * Runs on the ftp-control thread; starts the daemon bound to [ip].
+     * [force] rebuilds the supervisor from the current settings even when
+     * the bind IP is unchanged (settings apply); gate/maybe-start callers
+     * keep the default false so an unchanged IP reuses the existing
+     * supervisor.
+     */
+    private fun startFtpSupervisorOnIo(ip: String, force: Boolean = false) {
         if (!configStore.load().wizardCompleted) return
         killStaleFtpProcesses()
         try {
-            registerFtpSupervisor(ip).start()
+            registerFtpSupervisor(ip, force).start()
         } catch (e: Exception) {
             android.util.Log.w("DaemonService", "ftp start failed: ${e.message}")
         }
@@ -461,7 +469,7 @@ class DaemonService : Service() {
      * applyTransmissionSettings, and the hang watchdog ([FtpHangWatchdog],
      * which passes the probe failure reason for logging).
      */
-    private fun rebuildFtpSupervisor(reason: String = "") {
+    private fun rebuildFtpSupervisor(reason: String = "", force: Boolean = true) {
         if (reason.isNotEmpty()) android.util.Log.i("DaemonService", "rebuilding ftp supervisor: $reason")
         val ws = wifiGateMonitor.state.value
         val gateIp = if (configStore.load().wizardCompleted && ws.wifi) ws.ip else null
@@ -474,7 +482,7 @@ class DaemonService : Service() {
                     android.util.Log.w("DaemonService", "ftp stop failed: ${e.message}")
                 }
             }
-            if (gateIp != null) startFtpSupervisorOnIo(gateIp)
+            if (gateIp != null) startFtpSupervisorOnIo(gateIp, force)
         }
     }
 
@@ -525,16 +533,21 @@ class DaemonService : Service() {
      * service instance: same-UID processes with the binary in
      * /proc/\<pid\>/cmdline get SIGKILL'd. The daemon's getppid orphan guard
      * normally exits it when the app process dies, but a wedged instance
-     * would keep the port bound.
+     * would keep the port bound. Skipped entirely while the supervised child
+     * is alive — a redundant start (USB re-grant, wizard completion,
+     * dashboard start click) must never SIGKILL the running daemon — and
+     * the child pid is excluded from the sweep in addition to our own.
      */
     private fun killStaleFtpProcesses() {
+        val liveChildPid = ftpSupervisor?.status?.value?.pid
+        if (liveChildPid != null) return
         val myPid = android.os.Process.myPid()
         val myUid = android.os.Process.myUid().toString()
         val entries = File("/proc").list() ?: return
         for (pidName in entries) {
             if (!pidName.all { it.isDigit() }) continue
             val pid = pidName.toIntOrNull() ?: continue
-            if (pid == myPid) continue
+            if (pid == myPid || pid == liveChildPid) continue
             try {
                 val cmdline = File("/proc/$pidName/cmdline").readText()
                 if (!cmdline.contains("libftpserver.so")) continue
