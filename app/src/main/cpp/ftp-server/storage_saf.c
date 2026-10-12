@@ -4,7 +4,8 @@
  * Architecture derived from sunaku/simple-ftp (https://github.com/sunaku/simple-ftp);
  * protocol and storage reimplemented.
  *
- * Serves the app's SAF USB tree to the FTP daemon through the Kotlin
+ * Serves the app's SAF USB tree to the FTP daemon (through the relpath prefix
+ * stored from --root) via the Kotlin
  * SafIpcServer's read-only path (stage 2). Speaks the shared IPC wire
  * protocol (SafIpcCodec) over the filesystem Unix socket named by
  * --saf-socket (g_config.saf_socket):
@@ -52,6 +53,9 @@
 
 typedef struct {
     char socket[4096];
+    /* Normalized --root value as a relpath prefix under the SAF tree root;
+     * empty string = serve the SAF tree root itself. */
+    char root_prefix[4096];
 } saf_impl_t;
 
 /* ---- little-endian (de)serialization, host-endianness independent ---- */
@@ -251,10 +255,48 @@ static size_t build_string_payload(uint8_t *out, size_t cap, const char *s) {
     return 2 + len;
 }
 
+/* ---- root prefix ---- */
+
+/*
+ * Normalize --root into a relpath PREFIX under the SAF tree root: strip
+ * leading/trailing '/' and collapse '//' runs. Empty input (or all slashes)
+ * yields "" = serve the SAF tree root. 0 on success, -1 on overflow.
+ */
+static int normalize_prefix(const char *in, char *out, size_t outsz) {
+    size_t n = 0;
+    const char *p = in;
+    while (*p == '/')
+        p++;
+    while (*p != '\0') {
+        if (*p == '/') {
+            p++;
+            while (*p == '/')
+                p++; /* a trailing run is simply dropped */
+        } else {
+            if (n + 1 >= outsz)
+                return -1;
+            out[n++] = *p++;
+        }
+    }
+    out[n] = '\0';
+    return 0;
+}
+
+/* Join the root prefix with a normalized relpath into `out`:
+ * "<prefix>/<rel>" (rel non-empty), "<prefix>" (rel empty), no trailing '/'. */
+static int saf_join(const saf_impl_t *impl, const char *rel, char *out, size_t outsz) {
+    int n;
+    if (impl->root_prefix[0] == '\0')
+        n = snprintf(out, outsz, "%s", rel);
+    else if (rel[0] == '\0')
+        n = snprintf(out, outsz, "%s", impl->root_prefix);
+    else
+        n = snprintf(out, outsz, "%s/%s", impl->root_prefix, rel);
+    return (n < 0 || (size_t)n >= outsz) ? -1 : 0;
+}
 /* ---- backend vtable ---- */
 
 static int saf_init(storage_backend_t *b, const char *root) {
-    (void)root; /* the served tree IS the SAF root; relpaths are relative to it */
     if (g_config.saf_socket[0] == '\0')
         return -1;
     saf_impl_t *impl = calloc(1, sizeof *impl);
@@ -262,6 +304,12 @@ static int saf_init(storage_backend_t *b, const char *root) {
         return -1;
     if (snprintf(impl->socket, sizeof impl->socket, "%s", g_config.saf_socket)
         >= (int)sizeof impl->socket) {
+        free(impl);
+        return -1;
+    }
+    /* The app's FTP root is a relpath under the SAF tree root (the shared data
+     * dir, e.g. "torrent_data"); "" serves the tree root itself. */
+    if (normalize_prefix(root, impl->root_prefix, sizeof impl->root_prefix) != 0) {
         free(impl);
         return -1;
     }
@@ -281,8 +329,11 @@ static int saf_stat(storage_backend_t *b, const char *rel, storage_stat_t *out) 
     out->size = 0;
     out->mtime_ms = 0;
 
+    char path[4096 + 512];
+    if (saf_join(impl, rel, path, sizeof path) != 0)
+        return -1;
     uint8_t req[SAF_REQ_MAX];
-    size_t reqlen = build_string_payload(req, sizeof req, rel);
+    size_t reqlen = build_string_payload(req, sizeof req, path);
     if (reqlen == 0)
         return -1;
     int32_t status = 0;
@@ -320,14 +371,17 @@ static int saf_list(storage_backend_t *b, const char *rel, int offset,
     if (total != NULL)
         *total = 0;
 
-    size_t rellen = strlen(rel);
+    char path[4096 + 512];
+    if (saf_join(impl, rel, path, sizeof path) != 0)
+        return -1;
+    size_t rellen = strlen(path);
     if (2 + rellen + 4 > SAF_REQ_MAX)
         return -1;
     uint8_t *req = malloc(SAF_REQ_MAX);
     if (req == NULL)
         return -1;
     le_u16(req, (uint16_t)rellen);
-    memcpy(req + 2, rel, rellen);
+    memcpy(req + 2, path, rellen);
 
     storage_entry_t *arr = NULL;
     size_t n = 0, caparr = 0;
@@ -409,8 +463,11 @@ done:
 static int saf_open_read(storage_backend_t *b, const char *rel, int *fd_out) {
     const saf_impl_t *impl = b->impl;
     *fd_out = -1;
+    char path[4096 + 512];
+    if (saf_join(impl, rel, path, sizeof path) != 0)
+        return -1;
     uint8_t req[SAF_REQ_MAX];
-    size_t reqlen = build_string_payload(req, sizeof req, rel);
+    size_t reqlen = build_string_payload(req, sizeof req, path);
     if (reqlen == 0)
         return -1;
     int fd = saf_connect(impl);
@@ -436,8 +493,11 @@ static int saf_open_read(storage_backend_t *b, const char *rel, int *fd_out) {
 
 static int saf_remove(storage_backend_t *b, const char *rel) {
     const saf_impl_t *impl = b->impl;
+    char path[4096 + 512];
+    if (saf_join(impl, rel, path, sizeof path) != 0)
+        return -1;
     uint8_t req[SAF_REQ_MAX];
-    size_t reqlen = build_string_payload(req, sizeof req, rel);
+    size_t reqlen = build_string_payload(req, sizeof req, path);
     if (reqlen == 0)
         return -1;
     int32_t status = 0;

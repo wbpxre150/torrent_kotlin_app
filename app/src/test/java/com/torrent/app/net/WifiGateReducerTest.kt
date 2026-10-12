@@ -1,4 +1,4 @@
-package com.torrent.app.ftp
+package com.torrent.app.net
 
 import android.net.NetworkCapabilities
 import org.junit.Assert.*

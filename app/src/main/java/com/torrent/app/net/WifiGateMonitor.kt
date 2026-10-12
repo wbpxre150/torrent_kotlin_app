@@ -1,4 +1,4 @@
-package com.torrent.app.ftp
+package com.torrent.app.net
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
@@ -39,6 +39,7 @@ class WifiGateMonitor(private val context: Context) {
                     _state.value = State(false, null)
                 }
             }
+
             override fun onLost(network: Network) { _state.value = State(false, null) }
         }
         cm!!.registerDefaultNetworkCallback(cb)

@@ -25,10 +25,8 @@ import com.torrent.app.storage.SafIpcRequestHandler
 import com.torrent.app.storage.SafIpcServer
 import com.torrent.app.storage.UsbPermissionManager
 import com.torrent.app.ftp.FtpCredentials
-import com.torrent.app.ftp.FtpServerController
-import com.torrent.app.ftp.FtpState
 import com.torrent.app.ftp.FtpStatus
-import com.torrent.app.ftp.WifiGateMonitor
+import com.torrent.app.net.WifiGateMonitor
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.launch
@@ -75,11 +73,21 @@ class DaemonService : Service() {
     private val crawlerRegistrationLock = Any()
     private lateinit var usbPermissionManager: UsbPermissionManager
     @Volatile private var gateway: SafStorageGateway? = null
-    @Volatile private var ftpController: FtpServerController? = null
+    // The single ftp_server supervisor (stage 3): registered in onCreate so
+    // ftp_server is ALWAYS listed in the daemons table — and therefore
+    // startable/restartable from the dashboard — even while the wifi gate is
+    // closed. It is replaced (stop old + build new) whenever the bind IP or
+    // settings change its CLI args; see [registerFtpSupervisor].
+    @Volatile private var ftpSupervisor: ProcessSupervisor? = null
+    // The bind IP [ftpSupervisor] was built with (supervisor args are immutable).
+    @Volatile private var ftpBindIp: String? = null
+    // Serializes [registerFtpSupervisor] between the main thread (onCreate)
+    // and the ftp-control executor (gate/apply/dashboard lifecycle ops).
+    private val ftpRegistrationLock = Any()
     private lateinit var wifiGateMonitor: WifiGateMonitor
     private var ftpObservingJob: Job? = null
-    // Plan 07 §2.6: FTP start/stop/rebind (socket bind, MINA dispose) run on a
-    // dedicated single-thread executor, never on the service main thread.
+    // Plan 07 §2.6: FTP supervisor stop/start/rebuild run on a dedicated
+    // single-thread executor, never on the service main thread.
     private val ftpControlExecutor = Executors.newSingleThreadExecutor(ThreadFactory {
         Thread(it, "ftp-control").apply { isDaemon = true }
     })
@@ -88,6 +96,7 @@ class DaemonService : Service() {
     private lateinit var safIpcServer: SafIpcServer
     // Stage 2: second IPC server for the native FTP daemon's read-only SAF
     // backend (filesDir/ftp-saf.sock). Shares the lifecycle of [safIpcServer].
+    private lateinit var ftpSafSocketFile: java.io.File
     private lateinit var ftpSafIpcServer: SafIpcServer
     private lateinit var transmissionConfig: TransmissionConfig
     private lateinit var configStore: com.torrent.app.config.ConfigStore
@@ -117,11 +126,10 @@ class DaemonService : Service() {
         usbPermissionManager = UsbPermissionManager(this)
         usbPermissionManager.treeUri()?.let { uri ->
             gateway = SafStorageGateway(this, uri)
-            ftpController = newFtpController(gateway!!)
         }
         safSocketFile = java.io.File(filesDir, "saf-bridge.sock")
         safIpcServer = SafIpcServer(safSocketFile, SafIpcRequestHandler { gateway })
-        val ftpSafSocketFile = java.io.File(filesDir, "ftp-saf.sock")
+        ftpSafSocketFile = java.io.File(filesDir, "ftp-saf.sock")
         ftpSafIpcServer = SafIpcServer(ftpSafSocketFile, FtpSafIpcRequestHandler(
             stat = { gateway?.readOnlyStat(it) },
             list = { gateway?.readOnlyListDetailed(it) ?: emptyList() },
@@ -177,6 +185,10 @@ class DaemonService : Service() {
         // it), even when it is disabled or wifi-paused. Registration is pure —
         // no layout work happens until a start is requested.
         registerCrawlerSupervisor(emptyList())
+        // Stage 3: register the ftp_server supervisor up-front (bound to
+        // loopback as a placeholder) so it is always listed in the daemons
+        // table; the wifi gate rebinds it to the real IP before any start.
+        registerFtpSupervisor("127.0.0.1")
         controlServer = ControlServer(
             tokenManager = tokenManager,
             serviceState = _state,
@@ -211,11 +223,7 @@ class DaemonService : Service() {
     private fun ensureUsbGateway() {
         if (gateway != null) return
         usbPermissionManager.treeUri()?.let { uri ->
-            val g = SafStorageGateway(this, uri)
-            gateway = g
-            val old = ftpController
-            runOnFtpControl { old?.stop() }
-            ftpController = newFtpController(g)
+            gateway = SafStorageGateway(this, uri)
         }
     }
 
@@ -273,9 +281,9 @@ class DaemonService : Service() {
         ftpObservingJob?.cancel()
         crawlerObservingJob?.cancel()
         ftpControlExecutor.shutdownNow()
-        // Stop FTP before the transmission supervisors and the gateway shutdown
-        // (plan 07 §2.6); no IPC locks are held here.
-        ftpController?.stop()
+        // The ftp_server supervisor stops inside stopSupervisors() (it is
+        // registered in [supervisors]) — BEFORE the IPC servers below, since
+        // the daemon needs ftp-saf.sock alive while it shuts down.
         stopSupervisors()
         safIpcServer.stop()
         ftpSafIpcServer.stop()
@@ -299,19 +307,14 @@ class DaemonService : Service() {
 
     fun setUsbTree(uri: Uri) {
         usbPermissionManager.grant(uri)
-        val g = SafStorageGateway(this, uri)
-        gateway = g
-        val old = ftpController
-        runOnFtpControl { old?.stop() }
-        ftpController = newFtpController(g)
+        gateway = SafStorageGateway(this, uri)
         maybeStartFtp()
     }
 
     fun clearUsbTree() {
         usbPermissionManager.clear()
-        val old = ftpController
-        runOnFtpControl { old?.stop() }
-        ftpController = null
+        // The FTP daemon keeps running (its storage calls answer EAGAIN until
+        // a tree is granted again).
         gateway = null
     }
 
@@ -353,81 +356,190 @@ class DaemonService : Service() {
         val statusAtApply = sup?.status?.value ?: ProcessStatus("transmission", ProcessState.STOPPED)
         launchRollbackWatcher(sup, statusAtApply, before)
         // Shared data dir (Stage 11): the FTP root follows dataSubpath, so a data-dir
-        // change rebuilds/restarts the FTP controller exactly like applyFtpSettings does.
+        // change rebuilds/restarts the FTP daemon exactly like applyFtpSettings does.
         if (before.dataSubpath != cfg.dataSubpath) {
-            val old = ftpController
-            runOnFtpControl { old?.stop() }
-            val g = gateway
-            if (g != null) {
-                ftpController = FtpServerController(
-                    g, FtpCredentials(configStore),
-                    port = cfg.ftp.port, rootRelPath = cfg.dataSubpath,
-                    maxDownloadKiBps = cfg.ftp.maxDownloadKiBps,
-                )
-                maybeStartFtp()
-            }
+            rebuildFtpSupervisor()
         }
         return com.torrent.app.config.ApplyResult(true, "applied; restarting transmission", false)
     }
 
     // ── FTP (plan 07) ───────────────────────────────────────────────────────
 
-    private fun newFtpController(g: SafStorageGateway): FtpServerController {
+    /** Builds (does not start) the ftp_server supervisor bound to [ip]. */
+    private fun buildFtpSupervisor(ip: String): ProcessSupervisor {
         val cfg = configStore.load()
-        return FtpServerController(
-            g, FtpCredentials(configStore),
-            port = cfg.ftp.port, rootRelPath = cfg.dataSubpath,
-            maxDownloadKiBps = cfg.ftp.maxDownloadKiBps,
+        val creds = FtpCredentials(configStore)
+        return ProcessSupervisor(
+            label = FTP_LABEL, binaryName = "libftpserver.so",
+            args = listOf(
+                "--bind", ip,
+                "--port", cfg.ftp.port.toString(),
+                "--root", cfg.dataSubpath,
+                "--pasv", "30000-30009",
+                "--max-kibps", cfg.ftp.maxDownloadKiBps.toString(),
+                "--saf-socket", ftpSafSocketFile.absolutePath),
+            nativeLibraryDir = applicationInfo.nativeLibraryDir,
+            workDir = File(filesDir, "ftp").apply { mkdirs() },
+            logDir = File(filesDir, "logs"),
+            extraEnv = mapOf(
+                "FTP_USERNAME" to creds.username(),
+                "FTP_PASSWORD" to creds.password(),
+                "TMPDIR" to File(filesDir, "tmp").apply { mkdirs() }.absolutePath),
+            selfLogging = false,
+            graceMs = 5000L,
         )
     }
 
+    /**
+     * Registers (without starting) the single ftp_server supervisor for bind
+     * [ip] and returns it. The supervisor stays registered for the whole
+     * service lifetime — listed in the daemons table (STOPPED) even while the
+     * gate is closed — and is replaced only when the bind IP or settings
+     * change its CLI args ([ftpBindIp]): supervisor args are immutable, so a
+     * new supervisor is built and the old one is stopped first (never two at
+     * once). The stop blocks for the SIGTERM grace, so this must run on the
+     * ftp-control executor, except the no-op onCreate registration.
+     */
+    private fun registerFtpSupervisor(ip: String): ProcessSupervisor {
+        synchronized(ftpRegistrationLock) {
+            val previous = ftpSupervisor
+            if (previous != null && ftpBindIp == ip) return previous
+            val sup = buildFtpSupervisor(ip)
+            if (previous != null) {
+                try {
+                    previous.stop()
+                } catch (e: Exception) {
+                    android.util.Log.w("DaemonService", "ftp stop before rebuild failed: ${e.message}")
+                }
+                supervisors.remove(previous)
+            }
+            ftpSupervisor = sup
+            ftpBindIp = ip
+            supervisors.add(sup)
+            return sup
+        }
+    }
+
+    /** Runs on the ftp-control thread; starts the daemon bound to [ip]. */
+    private fun startFtpSupervisorOnIo(ip: String) {
+        if (!configStore.load().wizardCompleted) return
+        killStaleFtpProcesses()
+        try {
+            registerFtpSupervisor(ip).start()
+        } catch (e: Exception) {
+            android.util.Log.w("DaemonService", "ftp start failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Stops the running FTP supervisor and, when the wifi gate allows, starts
+     * a new one built from the current settings. The work runs on the
+     * ftp-control executor, which serializes it with the gate/dashboard
+     * lifecycle ops. Used by applyFtpSettings and the data-dir change in
+     * applyTransmissionSettings.
+     */
+    private fun rebuildFtpSupervisor() {
+        val ws = wifiGateMonitor.state.value
+        val gateIp = if (configStore.load().wizardCompleted && ws.wifi) ws.ip else null
+        runOnFtpControl {
+            val old = ftpSupervisor
+            if (old != null) {
+                try {
+                    old.stop()
+                } catch (e: Exception) {
+                    android.util.Log.w("DaemonService", "ftp stop failed: ${e.message}")
+                }
+            }
+            if (gateIp != null) startFtpSupervisorOnIo(gateIp)
+        }
+    }
+
+    /**
+     * Drives FTP start/stop from the wifi gate (plan 07 §2.6): wifi up + IP
+     * known → ensure the supervisor is running bound to that IP (rebuild on
+     * IP change); wifi down + wifiOnly → stop. Both run on the ftp-control
+     * executor.
+     */
     private fun observeWifiForFtp() {
         ftpObservingJob?.cancel()
         ftpObservingJob = MainScope().launch {
             wifiGateMonitor.state.collect { ws ->
                 val ftp = configStore.load().ftp
                 if (ws.wifi && ws.ip != null) {
-                    runOnFtpControl { startFtpOnIo(ws.ip) }
+                    val ip = ws.ip
+                    runOnFtpControl { startFtpSupervisorOnIo(ip) }
                 } else if (ftp.wifiOnly) {
-                    runOnFtpControl { ftpController?.stop() }
+                    runOnFtpControl {
+                        ftpSupervisor?.let { sup ->
+                            try {
+                                sup.stop()
+                            } catch (e: Exception) {
+                                android.util.Log.w("DaemonService", "ftp stop failed: ${e.message}")
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 
-    private fun maybeStartFtp(ip: String? = null) {
-        runOnFtpControl { startFtpOnIo(ip) }
+    private fun maybeStartFtp() {
+        val ws = wifiGateMonitor.state.value
+        if (!configStore.load().wizardCompleted || !ws.wifi || ws.ip == null) return
+        val ip = ws.ip
+        runOnFtpControl { startFtpSupervisorOnIo(ip) }
     }
 
     /** Runs on the dedicated ftp-control thread; never on the service main thread. */
-    private fun startFtpOnIo(ip: String?) {
-        if (!configStore.load().wizardCompleted) return
-        val ctrl = ftpController ?: return
-        val ws = wifiGateMonitor.state.value
-        val useIp = ip ?: ws.ip
-        if (ws.wifi && useIp != null) {
-            try { ctrl.rebind(useIp) }
-            catch (e: Exception) { android.util.Log.w("DaemonService", "ftp start failed: ${e.message}") }
-        }
-    }
-
     private fun runOnFtpControl(block: () -> Unit) {
         try { ftpControlExecutor.execute { block() } }
         catch (e: RejectedExecutionException) { /* service shutting down */ }
     }
 
+    /**
+     * Best-effort kill of leftover libftpserver.so daemons from a previous
+     * service instance: same-UID processes with the binary in
+     * /proc/\<pid\>/cmdline get SIGKILL'd. The daemon's getppid orphan guard
+     * normally exits it when the app process dies, but a wedged instance
+     * would keep the port bound.
+     */
+    private fun killStaleFtpProcesses() {
+        val myPid = android.os.Process.myPid()
+        val myUid = android.os.Process.myUid().toString()
+        val entries = File("/proc").list() ?: return
+        for (pidName in entries) {
+            if (!pidName.all { it.isDigit() }) continue
+            val pid = pidName.toIntOrNull() ?: continue
+            if (pid == myPid) continue
+            try {
+                val cmdline = File("/proc/$pidName/cmdline").readText()
+                if (!cmdline.contains("libftpserver.so")) continue
+                val uidLine = File("/proc/$pidName/status").readText()
+                    .lineSequence().firstOrNull { it.startsWith("Uid:") } ?: continue
+                if (uidLine.substringAfter("Uid:").trim().split(Regex("\\s+")).firstOrNull() != myUid)
+                    continue
+                Runtime.getRuntime().exec(arrayOf("kill", "-9", pidName)).waitFor()
+                android.util.Log.w("DaemonService", "killed stale ftp daemon pid $pidName")
+            } catch (_: Exception) { /* process vanished — fine */ }
+        }
+    }
+
     fun getFtpStatus(): FtpStatus {
-        val ctrl = ftpController
+        val st = ftpSupervisor?.status?.value
         val ws = wifiGateMonitor.state.value
         val creds = FtpCredentials(configStore)
+        val running = st?.state == ProcessState.RUNNING
         return FtpStatus(
-            running = ctrl?.state == FtpState.RUNNING,
-            state = (ctrl?.state ?: FtpState.STOPPED).name,
-            ip = ctrl?.ip,
+            running = running,
+            state = st?.state?.name ?: ProcessState.STOPPED.name,
+            pid = st?.pid,
+            restartCount = st?.restartCount ?: 0,
+            ip = if (running) ftpBindIp else null,
             port = configStore.load().ftp.port,
             username = creds.username(),
-            password = if (ctrl?.state == FtpState.RUNNING) creds.password() else null,
+            password = if (running) creds.password() else null,
             wifiUp = ws.wifi,
+            logLines = st?.lastLogLines ?: emptyList(),
         )
     }
 
@@ -435,20 +547,16 @@ class DaemonService : Service() {
         val vr = com.torrent.app.config.ConfigValidator.validateFtp(s)
         if (!vr.ok) return com.torrent.app.config.ApplyResult(false, vr.errors.joinToString("; "), false)
         configStore.saveFtp(s)
-        val old = ftpController
-        runOnFtpControl { old?.stop() }
-        val g = gateway
-        if (g != null) {
-            ftpController = FtpServerController(
-                g, FtpCredentials(configStore),
-                port = s.port, rootRelPath = configStore.load().dataSubpath,
-                maxDownloadKiBps = s.maxDownloadKiBps,
-            )
-            maybeStartFtp()
-        }
+        val ws = wifiGateMonitor.state.value
+        val gateAllows = configStore.load().wizardCompleted && ws.wifi && ws.ip != null
+        rebuildFtpSupervisor()
         return com.torrent.app.config.ApplyResult(
             true,
-            if (g != null) "applied" else "applied; FTP starts when USB granted",
+            when {
+                gateAllows && gateway != null -> "applied"
+                gateway == null -> "applied; FTP starts when USB granted"
+                else -> "applied; waiting for wifi"
+            },
             false)
     }
 
@@ -708,6 +816,31 @@ class DaemonService : Service() {
                 }
             }
         }
+        if (label == FTP_LABEL) {
+            // The FTP daemon is always registered (see registerFtpSupervisor),
+            // but a restart is gated like a manual start — restarting while
+            // the wifi gate is closed is refused — and the stop+start is
+            // serialized on the ftp-control executor with every other FTP
+            // lifecycle op (apply/gate), not the per-label daemon-action executor.
+            val ws = wifiGateMonitor.state.value
+            if (!configStore.load().wizardCompleted || !ws.wifi || ws.ip == null) {
+                return false
+            }
+            val ip = ws.ip
+            return try {
+                ftpControlExecutor.execute {
+                    try {
+                        ftpSupervisor?.stop()
+                        registerFtpSupervisor(ip).start()
+                    } catch (e: Exception) {
+                        android.util.Log.e("DaemonService", "restart $label failed", e)
+                    }
+                }
+                true
+            } catch (e: RejectedExecutionException) {
+                false
+            }
+        }
         val sup = supervisors.firstOrNull { it.status.value.label == label } ?: return false
         return runDaemonAction(label, "restart") { sup.restart() }
     }
@@ -726,6 +859,18 @@ class DaemonService : Service() {
                 return false
             }
             startCrawlerSupervisor()
+            return true
+        }
+        if (label == FTP_LABEL) {
+            // A manual start is gated on the wifi gate (wizard completed, wifi
+            // up, IP known) — the daemon binds to the gate's IP; a stop is
+            // always allowed (generic branch below).
+            val ws = wifiGateMonitor.state.value
+            if (!configStore.load().wizardCompleted || !ws.wifi || ws.ip == null) {
+                return false
+            }
+            val ip = ws.ip
+            runOnFtpControl { startFtpSupervisorOnIo(ip) }
             return true
         }
         val sup = supervisors.firstOrNull { it.status.value.label == label } ?: return false
@@ -876,10 +1021,10 @@ class DaemonService : Service() {
     }
 
     private fun startSupervisors() {
-        // No blanket supervisor guard here: the crawler supervisor is
-        // registered in onCreate (so it is always listed), and each start
-        // below is idempotent on its own label — repeated onStartCommand
-        // deliveries are harmless.
+        // No blanket supervisor guard here: the crawler and ftp_server
+        // supervisors are registered in onCreate (so they are always listed),
+        // and each start below is idempotent on its own label — repeated
+        // onStartCommand deliveries are harmless.
         transmissionConfig = TransmissionConfig(this, configStore)
         if (configStore.load().wizardCompleted) startTransmissionSupervisor()
         // The crawler does not need the wizard/SAF (plan 09 §5): its supervisor
@@ -1045,6 +1190,8 @@ class DaemonService : Service() {
         // It looks the crawler up when it runs (not now), so a start that is still
         // queued on the executor is registered first and then stopped here too.
         crawlerControlExecutor.execute { stopCrawlerSupervisors() }
+        // Includes ftp_server (stage 3): it stops while ftp-saf.sock is still
+        // alive (the IPC servers stop after this in onDestroy).
         val others = supervisors.filter { it.status.value.label != CRAWLER_LABEL }
         for (s in others) s.stop()
         supervisors.removeAll(others.toSet())
@@ -1070,6 +1217,7 @@ class DaemonService : Service() {
         const val CHANNEL_ID = "daemon_service"
         const val NOTIFICATION_ID = 1
         const val CRAWLER_LABEL = "dht_crawler"
+        const val FTP_LABEL = "ftp_server"
         const val CRAWLER_GRACE_MS = 60_000L
 
         // The apply job watches the restarted crawler for a crash loop for

@@ -139,6 +139,8 @@ class ControlServer(
                         val json = buildString {
                             append("{\"running\":").append(f.running)
                             append(",\"state\":").append(jsonStr(f.state))
+                            append(",\"pid\":").append(f.pid ?: "null")
+                            append(",\"restartCount\":").append(f.restartCount)
                             append(",\"ip\":").append(jsonStr(f.ip))
                             append(",\"port\":").append(f.port)
                             append(",\"username\":").append(jsonStr(f.username))
@@ -436,7 +438,7 @@ class ControlServer(
             append(",\"rolledBack\":").append(lastApplyRolledBack())
             append(",\"usb\":{\"granted\":").append(s.granted).append(",\"freeBytes\":").append(usb ?: "null").append("}")
             append(",\"wifiUp\":").append(f.wifiUp)
-            append(",\"ftp\":{").append("\"running\":").append(f.running).append(",\"port\":").append(f.port).append("}")
+            append(",\"ftp\":{").append("\"running\":").append(f.running).append(",\"state\":").append(jsonStr(f.state)).append(",\"port\":").append(f.port).append("}")
             append(",\"crawler\":{\"state\":\"").append(crawler?.state?.name ?: "STOPPED")
                 .append("\",\"pausedNoWifi\":").append(crawlerPausedNoWifi()).append("}")
             append(",\"daemons\":[")
@@ -454,7 +456,8 @@ class ControlServer(
             "ftp://${f.username}:${f.password}@${f.ip}:${f.port}/" else "—"
         return """
             <p class="meta">State: <span class="state ${f.state}">${f.state}</span>
-               &nbsp; wifi: <strong>${if (f.wifiUp) "up" else "down"}</strong></p>
+               &nbsp; wifi: <strong>${if (f.wifiUp) "up" else "down"}</strong>
+               &nbsp; restarts: <strong>${f.restartCount}</strong></p>
             <p>URL: <code>$url</code></p>
         """.trimIndent()
     }

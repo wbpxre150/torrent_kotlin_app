@@ -15,7 +15,7 @@ import java.util.concurrent.TimeUnit
  * FTP/transmission isolation of commit 75a40d5.
  *
  * Every gateway call runs under a fair [Semaphore] with a 30 s timeout — the
- * same throttle budget the in-process FTP server uses (FtpSafThrottle) — so
+ * same throttle budget the native FTP daemon's storage calls get — so
  * the daemon cannot wedge the SAF provider. Timeout -> -11 (EAGAIN; the daemon
  * answers 450), no gateway -> -19 (ENODEV).
  *
