@@ -6,8 +6,8 @@
  *
  * Per-session state, line reader, command dispatch, and handlers for:
  * USER PASS QUIT SYST TYPE NOOP FEAT OPTS PWD CWD CDUP PASV EPSV LIST NLST
- * SIZE MDTM REST RETR ABOR DELE RMD.
- * PORT/EPRT/STOR/APPE/MKD/RNFR/RNTO/MLSD reply 502; unknown commands 500.
+ * SIZE MDTM MLST MLSD REST RETR ABOR DELE RMD.
+ * PORT/EPRT/STOR/APPE/MKD/RNFR/RNTO reply 502; unknown commands 500.
  *
  * Paths: the argument is one raw byte string after the verb (spaces matter).
  * Everything is normalized inside the virtual root; login lands in the root.
@@ -44,6 +44,7 @@ typedef struct session {
     char user[256];
     int have_user;
     int authenticated;
+    unsigned mlst_mask; /* RFC 3659 facts enabled for MLST/MLSD (OPTS MLST) */
     long long rest; /* -1 = none; applies to the next RETR only */
     int data_listen_fd; /* -1 = no pending PASV/EPSV listener */
     int closed;
@@ -359,16 +360,40 @@ static void cmd_type(session_t *s, const char *arg) {
 }
 
 static void cmd_feat(session_t *s) {
-    const char *msg = "211-Features:\r\n"
-                      "UTF8\r\n"
-                      "SIZE\r\n"
-                      "MDTM\r\n"
-                      "REST STREAM\r\n"
-                      "211 End\r\n";
-    send_all(s->fd, msg, strlen(msg));
+    char mlst[64];
+    if (format_mlst_feat(mlst, sizeof mlst, s->mlst_mask) != 0)
+        return;
+    char msg[512];
+    int n = snprintf(msg, sizeof msg, "211-Features:\r\n"
+                                 "%s\r\n"
+                                 "MLSD\r\n"
+                                 "UTF8\r\n"
+                                 "SIZE\r\n"
+                                 "MDTM\r\n"
+                                 "REST STREAM\r\n"
+                                 "211 End\r\n",
+                     mlst);
+    if (n < 0)
+        return;
+    send_all(s->fd, msg, (size_t)n);
 }
 
 static void cmd_opts(session_t *s, const char *arg) {
+    if (arg != NULL && strncasecmp(arg, "MLST", 4) == 0) {
+        const char *facts = arg + 4;
+        if (facts[0] != '\0' && facts[0] != ' ' && facts[0] != '\t') {
+            reply(s, "502", "Command not implemented.");
+            return;
+        }
+        while (*facts == ' ' || *facts == '\t')
+            facts++;
+        s->mlst_mask = parse_mlst_opts(facts);
+        char list[32];
+        if (format_mlst_opts_list(list, sizeof list, s->mlst_mask) != 0)
+            list[0] = '\0';
+        reply(s, "200", "MLST OPTS %s", list);
+        return;
+    }
     if (arg != NULL && strncasecmp(arg, "UTF8", 4) == 0)
         reply(s, "200", "UTF8 enabled");
     else
@@ -618,6 +643,113 @@ static void cmd_mdtm(session_t *s, const char *arg) {
     reply(s, "213", "%s", tb);
 }
 
+/*
+ * MLST: facts for a single path. The argument is a literal path (spaces and
+ * glob characters included, never glob-interpreted); empty means the cwd.
+ * Entry line is " SP facts SP pathname CRLF"; with mask 0 the facts string is
+ * empty, so the line begins with two spaces before the name.
+ */
+static void cmd_mlst(session_t *s, const char *arg) {
+    char path[1024];
+    if (arg != NULL && arg[0] != '\0') {
+        if (join_relpath(s->cwd, arg, path, sizeof path) != 0) {
+            reply(s, "550", "Path too long.");
+            return;
+        }
+    } else {
+        snprintf(path, sizeof path, "%s", s->cwd);
+    }
+    storage_stat_t st;
+    if (g_storage.ops->stat(&g_storage, path, &st) != 0 || !st.exists) {
+        reply(s, "550", "No such file or directory.");
+        return;
+    }
+    char facts[80];
+    if (format_mlsx_facts(facts, sizeof facts, st.is_dir, st.size, st.mtime_ms,
+                          s->mlst_mask) != 0) {
+        reply(s, "550", "Internal error.");
+        return;
+    }
+    char disp[1200];
+    display_path(path, disp, sizeof disp);
+    char line[2048];
+    int m = snprintf(line, sizeof line, "250-Listing %s\r\n %s %s\r\n250 End\r\n",
+                     disp, facts, disp);
+    if (m < 0)
+        return;
+    send_all(s->fd, line, (size_t)m);
+}
+
+/* MLSD: MLST-format listing of a directory; the argument is a literal path. */
+static void cmd_mlsd(session_t *s, const char *arg) {
+    if (s->data_listen_fd < 0) {
+        reply(s, "425", "Use PASV or EPSV first.");
+        return;
+    }
+    s->rest = -1; /* REST is cleared by MLSD */
+    char path[1024];
+    if (arg != NULL && arg[0] != '\0') {
+        if (join_relpath(s->cwd, arg, path, sizeof path) != 0) {
+            reply(s, "550", "Path too long.");
+            return;
+        }
+    } else {
+        snprintf(path, sizeof path, "%s", s->cwd);
+    }
+    storage_stat_t st;
+    if (g_storage.ops->stat(&g_storage, path, &st) != 0 || !st.exists) {
+        reply(s, "550", "No such file or directory.");
+        return;
+    }
+    if (!st.is_dir) {
+        reply(s, "550", "Not a directory.");
+        return;
+    }
+    reply(s, "150", "Opening BINARY mode data connection for MLSD listing.");
+    int dfd = -1;
+    if (data_accept(s, &dfd) != 0)
+        return;
+    int result = 0;
+    int offset = 0;
+    for (;;) {
+        storage_entry_t batch[LIST_BATCH];
+        int total = 0;
+        int n = g_storage.ops->list(&g_storage, path, offset, batch, LIST_BATCH,
+                                    &total);
+        if (n < 0) {
+            result = 2;
+            break;
+        }
+        for (int i = 0; i < n; i++) {
+            char facts[80];
+            if (format_mlsx_facts(facts, sizeof facts, batch[i].is_dir,
+                                  batch[i].size, batch[i].mtime_ms,
+                                  s->mlst_mask) != 0) {
+                result = 2;
+                break;
+            }
+            char line[2048];
+            int m = snprintf(line, sizeof line, "%s %s\r\n", facts,
+                             batch[i].name);
+            if (m < 0) {
+                result = 2;
+                break;
+            }
+            int rv = data_send_chunk(s, dfd, line, (size_t)m);
+            if (rv != 0) {
+                result = rv;
+                break;
+            }
+        }
+        if (result != 0)
+            break;
+        offset += n;
+        if (n == 0 || offset >= total)
+            break;
+    }
+    finish_data(s, dfd, result);
+}
+
 static void cmd_rest(session_t *s, const char *arg) {
     if (arg == NULL || arg[0] == '\0') {
         reply(s, "501", "REST requires an offset.");
@@ -802,7 +934,7 @@ static void dispatch(session_t *s, const char *verb, const char *arg) {
     if (strcmp(verb, "PORT") == 0 || strcmp(verb, "EPRT") == 0 ||
         strcmp(verb, "STOR") == 0 || strcmp(verb, "APPE") == 0 ||
         strcmp(verb, "MKD") == 0 || strcmp(verb, "RNFR") == 0 ||
-        strcmp(verb, "RNTO") == 0 || strcmp(verb, "MLSD") == 0) {
+        strcmp(verb, "RNTO") == 0) {
         reply(s, "502", "Command not implemented.");
         return;
     }
@@ -844,6 +976,14 @@ static void dispatch(session_t *s, const char *verb, const char *arg) {
     }
     if (strcmp(verb, "MDTM") == 0) {
         cmd_mdtm(s, arg);
+        return;
+    }
+    if (strcmp(verb, "MLST") == 0) {
+        cmd_mlst(s, arg);
+        return;
+    }
+    if (strcmp(verb, "MLSD") == 0) {
+        cmd_mlsd(s, arg);
         return;
     }
     if (strcmp(verb, "REST") == 0) {
@@ -930,6 +1070,7 @@ void session_start(int fd, int id) {
     s->fd = fd;
     s->id = id;
     s->rest = -1;
+    s->mlst_mask = MLSX_FACT_ALL;
     s->data_listen_fd = -1;
     net_set_nodelay(fd);
     atomic_fetch_add(&g_active_sessions, 1);
