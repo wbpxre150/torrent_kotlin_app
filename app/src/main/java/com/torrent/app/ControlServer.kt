@@ -391,12 +391,13 @@ class ControlServer(
             <style>
               body{font-family:system-ui,sans-serif;max-width:820px;margin:2em auto;padding:0 1em;background:#f5f5f5}
               h1{margin-bottom:.25em} h2{margin-top:1.5em}
-              .state{padding:2px 8px;border-radius:4px;font-size:.85em;font-weight:600}
+              .state{padding:2px 8px;border-radius:4px;font-size:.85em;font-weight:600;white-space:nowrap}
               .RUNNING{background:#d4edda;color:#155724}.STARTING{background:#fff3cd;color:#856404}
               .STOPPING{background:#f8d7da;color:#721c24}.STOPPED{background:#e2e3e5;color:#383d41}
               table{width:100%;border-collapse:collapse;margin:1em 0;background:#fff;border-radius:6px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.1)}
               th{background:#eee;padding:8px 12px;text-align:left;font-size:.85em;text-transform:uppercase;letter-spacing:.05em}
               td{padding:8px 12px;border-top:1px solid #eee;vertical-align:top}
+              th,td,code{overflow-wrap:anywhere}
               pre.loglines{margin:4px 0 0 0;padding:8px;background:#fafafa;border-radius:4px;font-size:.8em;max-height:200px;overflow-y:auto;white-space:pre-wrap;word-break:break-all}
               .meta{color:#666;font-size:.9em}.warn{background:#f8d7da;color:#721c24;padding:.6em;border-radius:4px;margin:1em 0}
               .actions form{display:inline;margin:0}.actions button{padding:0 6px;margin:0 2px}
