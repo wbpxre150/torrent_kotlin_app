@@ -78,7 +78,11 @@ int format_mlst_opts_list(char *out, size_t cap, unsigned mask);
  */
 int normalize_relpath(const char *in, char *out, size_t outsz);
 
-/* Join a cwd with a raw argument and normalize. 0 on success, -1 if too long. */
+/*
+ * Join a cwd with a raw argument and normalize. An argument starting with '/'
+ * is absolute: cwd is ignored and the argument is normalized alone. 0 on
+ * success, -1 if too long.
+ */
 int join_relpath(const char *cwd, const char *arg, char *out, size_t outsz);
 
 /*

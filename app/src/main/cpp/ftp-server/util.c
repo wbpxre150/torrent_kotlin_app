@@ -122,20 +122,36 @@ int format_mlsx_facts(char *out, size_t cap, int is_dir, uint64_t size,
                       int64_t mtime_ms, unsigned mask) {
     char buf[80];
     size_t off = 0;
-    if (mask & MLSX_FACT_TYPE)
-        off += (size_t)snprintf(buf + off, sizeof buf - off, "%s",
-                                is_dir ? "type=dir;" : "type=file;");
-    if ((mask & MLSX_FACT_SIZE) != 0 && !is_dir)
-        off += (size_t)snprintf(buf + off, sizeof buf - off, "size=%llu;",
-                                (unsigned long long)size);
+    int n;
+    if (mask & MLSX_FACT_TYPE) {
+        n = snprintf(buf + off, sizeof buf - off, "%s",
+                     is_dir ? "type=dir;" : "type=file;");
+        if (n < 0 || (size_t)n >= sizeof buf - off)
+            return -1; /* segment would overflow buf; guard keeps off < sizeof buf */
+        off += (size_t)n;
+    }
+    if ((mask & MLSX_FACT_SIZE) != 0 && !is_dir) {
+        n = snprintf(buf + off, sizeof buf - off, "size=%llu;",
+                     (unsigned long long)size);
+        if (n < 0 || (size_t)n >= sizeof buf - off)
+            return -1;
+        off += (size_t)n;
+    }
     if (mask & MLSX_FACT_MODIFY) {
         char ts[24];
         format_mdtm_utc((time_t)(mtime_ms / 1000LL), ts, sizeof ts);
-        off += (size_t)snprintf(buf + off, sizeof buf - off, "modify=%s;", ts);
+        n = snprintf(buf + off, sizeof buf - off, "modify=%s;", ts);
+        if (n < 0 || (size_t)n >= sizeof buf - off)
+            return -1;
+        off += (size_t)n;
     }
-    if (mask & MLSX_FACT_PERM)
-        off += (size_t)snprintf(buf + off, sizeof buf - off, "perm=%s;",
-                                is_dir ? "elpd" : "rd");
+    if (mask & MLSX_FACT_PERM) {
+        n = snprintf(buf + off, sizeof buf - off, "perm=%s;",
+                     is_dir ? "elpd" : "rd");
+        if (n < 0 || (size_t)n >= sizeof buf - off)
+            return -1;
+        off += (size_t)n;
+    }
     if (off + 1 > cap)
         return -1;
     memcpy(out, buf, off);
@@ -263,6 +279,8 @@ int join_relpath(const char *cwd, const char *arg, char *out, size_t outsz) {
             return -1;
         return 0; /* cwd is already normalized */
     }
+    if (arg[0] == '/')
+        return normalize_relpath(arg, out, outsz); /* absolute: ignore cwd */
     char tmp[4096];
     int n;
     if (cwd != NULL && cwd[0] != '\0')

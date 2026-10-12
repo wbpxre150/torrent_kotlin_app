@@ -111,12 +111,19 @@ static int run(void) {
 
     /* 7. join_relpath: cwd/arg edge cases. */
     check_join("", "x", 0, "x");
-    check_join("a", "/b", 0, "a/b");
     check_join("a", "", 0, "a");
     check_join(NULL, "x", 0, "x");
     check_join("a", NULL, 0, "a");
     check_join("a/b", "../c", 0, "a/c");
     check_join("a", "b//./c", 0, "a/b/c");
+
+    /* Absolute arguments ignore cwd and are normalized alone. */
+    check_join("a", "/b", 0, "b");
+    check_join("a/b", "/", 0, "");
+    check_join("a/b", "/x/y", 0, "x/y");
+    check_join("a", "b", 0, "a/b");
+    check_join("a", "../c", 0, "c");
+    check_join("", "/[x] y", 0, "[x] y");
 
     /* 8. join_relpath: overflow is rejected. */
     {

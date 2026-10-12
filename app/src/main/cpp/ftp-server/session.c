@@ -365,12 +365,12 @@ static void cmd_feat(session_t *s) {
         return;
     char msg[512];
     int n = snprintf(msg, sizeof msg, "211-Features:\r\n"
-                                 "%s\r\n"
-                                 "MLSD\r\n"
-                                 "UTF8\r\n"
-                                 "SIZE\r\n"
-                                 "MDTM\r\n"
-                                 "REST STREAM\r\n"
+                                 " %s\r\n"
+                                 " MLSD\r\n"
+                                 " UTF8\r\n"
+                                 " SIZE\r\n"
+                                 " MDTM\r\n"
+                                 " REST STREAM\r\n"
                                  "211 End\r\n",
                      mlst);
     if (n < 0)
@@ -391,7 +391,10 @@ static void cmd_opts(session_t *s, const char *arg) {
         char list[32];
         if (format_mlst_opts_list(list, sizeof list, s->mlst_mask) != 0)
             list[0] = '\0';
-        reply(s, "200", "MLST OPTS %s", list);
+        if (list[0] == '\0')
+            reply(s, "200", "MLST OPTS");
+        else
+            reply(s, "200", "MLST OPTS %s", list);
         return;
     }
     if (arg != NULL && strncasecmp(arg, "UTF8", 4) == 0)
@@ -672,11 +675,15 @@ static void cmd_mlst(session_t *s, const char *arg) {
     }
     char disp[1200];
     display_path(path, disp, sizeof disp);
-    char line[2048];
+    /* disp appears twice plus facts and the fixed 250 framing: size the
+     * buffer for that worst case so the reply can never be truncated. */
+    char line[sizeof disp * 2 + sizeof facts + 64];
     int m = snprintf(line, sizeof line, "250-Listing %s\r\n %s %s\r\n250 End\r\n",
                      disp, facts, disp);
-    if (m < 0)
+    if (m < 0 || (size_t)m >= sizeof line) {
+        reply(s, "550", "Path too long.");
         return;
+    }
     send_all(s->fd, line, (size_t)m);
 }
 
