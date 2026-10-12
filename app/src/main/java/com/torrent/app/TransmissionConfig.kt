@@ -5,6 +5,7 @@ import java.io.File
 import java.security.MessageDigest
 import java.security.SecureRandom
 import com.torrent.app.config.ConfigStore
+import org.json.JSONObject
 
 /**
  * Owns transmission-daemon's config dir under internal storage and generates settings.json
@@ -31,17 +32,53 @@ class TransmissionConfig(context: Context, private val store: ConfigStore) {
         val s = cfg.transmission
         val downloadDir = if (cfg.dataSubpath.isEmpty()) USB_DOWNLOAD_DIR
                           else "$USB_DOWNLOAD_DIR/${cfg.dataSubpath}"
-        settingsFile.writeText(
-            buildSettingsJson(
-                s.username, ssha1Hash(s.password), downloadDir,
-                s.peerPort, s.speedLimitDown, s.speedLimitUp, s.altSpeedDown, s.altSpeedUp,
-            )
+        val managedJson = buildSettingsJson(
+            s.username, ssha1Hash(s.password), downloadDir,
+            s.peerPort, s.speedLimitDown, s.speedLimitUp, s.altSpeedDown, s.altSpeedUp,
         )
+        val existingText = if (settingsFile.exists()) settingsFile.readText() else null
+        settingsFile.writeText(mergeSettingsJson(existingText, managedJson))
     }
 
     companion object {
         /** Sentinel download root recognized by the SAF file-backend fork. */
         const val USB_DOWNLOAD_DIR = "/saf/usb"
+
+        /**
+         * Merge the on-disk settings.json with the managed settings this app emits.
+         *
+         * The app owns the keys [buildSettingsJson] emits; the daemon owns everything else
+         * (session state set via the WebUI/RPC, e.g. alt-speed-enabled, download-queue-size,
+         * ratio-limit). A full overwrite on every start would drop the daemon's keys and
+         * re-default them, so we start from the existing object and only overwrite the
+         * managed keys onto it (existing unmanaged keys are preserved verbatim, managed keys win).
+         *
+         * [existingText] is the current on-disk text (null if the file is absent). If it is
+         * null/blank or does not parse as a JSON object, we fall back to fresh generation and
+         * return [managedJson] unchanged.
+         *
+         * Returns the merged object with 2-space indentation (matching [buildSettingsJson]).
+         */
+        fun mergeSettingsJson(existingText: String?, managedJson: String): String {
+            val existing = parseJsonObject(existingText) ?: return managedJson
+            val managed = JSONObject(managedJson)
+            val keys = managed.keys()
+            while (keys.hasNext()) {
+                val key = keys.next()
+                existing.put(key, managed.get(key))
+            }
+            return existing.toString(2)
+        }
+
+        private fun parseJsonObject(text: String?): JSONObject? {
+            val trimmed = text?.trim()
+            if (trimmed.isNullOrEmpty()) return null
+            return try {
+                JSONObject(trimmed)
+            } catch (e: Exception) {
+                null
+            }
+        }
 
         /**
          * Compute transmission's SSHA1 password hash: "{" + SHA1_hex(password + salt) + salt.
