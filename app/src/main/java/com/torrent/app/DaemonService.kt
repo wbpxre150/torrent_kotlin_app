@@ -26,6 +26,7 @@ import com.torrent.app.storage.SafIpcServer
 import com.torrent.app.storage.UsbPermissionManager
 import com.torrent.app.ftp.FtpCredentials
 import com.torrent.app.ftp.FtpStatus
+import com.torrent.app.net.FtpHangWatchdog
 import com.torrent.app.net.WifiGateMonitor
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
@@ -86,6 +87,13 @@ class DaemonService : Service() {
     private val ftpRegistrationLock = Any()
     private lateinit var wifiGateMonitor: WifiGateMonitor
     private var ftpObservingJob: Job? = null
+    // Stage 4: TCP hang watchdog for the ftp daemon (plain-JVM class in
+    // com.torrent.app.net): probes the control port for the daemon's 220
+    // greeting and triggers the same serialized rebuild path as the gate and
+    // apply ops when it stops answering. Created in onCreate, started in
+    // onStartCommand, stopped in onDestroy BEFORE the supervisor stops so a
+    // restart never races the destroy.
+    private lateinit var ftpHangWatchdog: FtpHangWatchdog
     // Plan 07 §2.6: FTP supervisor stop/start/rebuild run on a dedicated
     // single-thread executor, never on the service main thread.
     private val ftpControlExecutor = Executors.newSingleThreadExecutor(ThreadFactory {
@@ -218,6 +226,15 @@ class DaemonService : Service() {
             crawlerMigrationStatus = { crawlerMigration.status },
 )
         wifiGateMonitor = WifiGateMonitor(this)
+        ftpHangWatchdog = FtpHangWatchdog(
+            scope = MainScope(),
+            hostProvider = { ftpBindIp },
+            portProvider = { configStore.load().ftp.port },
+            isRunningProvider = { ftpSupervisor?.status?.value?.state == ProcessState.RUNNING },
+            // rebuildFtpSupervisor() already serializes on the ftp-control
+            // executor (runOnFtpControl), the same path as gate/apply ops.
+            restartAction = { reason -> rebuildFtpSupervisor(reason) },
+        )
     }
 
     private fun ensureUsbGateway() {
@@ -266,6 +283,7 @@ class DaemonService : Service() {
         syncCrawlerProxy(configStore.load().crawler)
         safIpcServer.start()
         ftpSafIpcServer.start()
+        ftpHangWatchdog.start()
         wifiGateMonitor.start()
         observeWifiForFtp()
         observeWifiForCrawler()
@@ -279,6 +297,10 @@ class DaemonService : Service() {
         crawlerProxy?.stop()
         crawlerProxy = null
         ftpObservingJob?.cancel()
+        // Stage 4: stop the hang watchdog before the supervisor below so a
+        // pending restart cannot race the destroy (runOnFtpControl also drops
+        // work once ftpControlExecutor shuts down).
+        ftpHangWatchdog.stop()
         crawlerObservingJob?.cancel()
         ftpControlExecutor.shutdownNow()
         // The ftp_server supervisor stops inside stopSupervisors() (it is
@@ -435,10 +457,12 @@ class DaemonService : Service() {
      * Stops the running FTP supervisor and, when the wifi gate allows, starts
      * a new one built from the current settings. The work runs on the
      * ftp-control executor, which serializes it with the gate/dashboard
-     * lifecycle ops. Used by applyFtpSettings and the data-dir change in
-     * applyTransmissionSettings.
+     * lifecycle ops. Used by applyFtpSettings, the data-dir change in
+     * applyTransmissionSettings, and the hang watchdog ([FtpHangWatchdog],
+     * which passes the probe failure reason for logging).
      */
-    private fun rebuildFtpSupervisor() {
+    private fun rebuildFtpSupervisor(reason: String = "") {
+        if (reason.isNotEmpty()) android.util.Log.i("DaemonService", "rebuilding ftp supervisor: $reason")
         val ws = wifiGateMonitor.state.value
         val gateIp = if (configStore.load().wizardCompleted && ws.wifi) ws.ip else null
         runOnFtpControl {
