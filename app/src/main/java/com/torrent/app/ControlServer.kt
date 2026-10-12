@@ -367,7 +367,7 @@ class ControlServer(
             "<p class=\"meta\">Transmission RPC not reachable.</p>"
         } else {
             buildString {
-                append("<table><tr><th>Name</th><th>Done</th><th>Down</th><th>Up</th><th>Size</th></tr>")
+                append("<table class=\"tx\"><tr><th>Name</th><th>Done</th><th>Down</th><th>Up</th><th>Size</th></tr>")
                 if (rpc.torrents.isEmpty()) append("<tr><td colspan=\"5\"><em>No torrents.</em></td></tr>")
                 for (t in rpc.torrents) {
                     append("<tr><td>").append(esc(t.name)).append("</td>")
@@ -398,6 +398,7 @@ class ControlServer(
               th{background:#eee;padding:8px 12px;text-align:left;font-size:.85em;text-transform:uppercase;letter-spacing:.05em}
               td{padding:8px 12px;border-top:1px solid #eee;vertical-align:top}
               th,td,code{overflow-wrap:anywhere}
+              .tx td+td{overflow-wrap:normal}
               pre.loglines{margin:4px 0 0 0;padding:8px;background:#fafafa;border-radius:4px;font-size:.8em;max-height:200px;overflow-y:auto;white-space:pre-wrap;word-break:break-all}
               .meta{color:#666;font-size:.9em}.warn{background:#f8d7da;color:#721c24;padding:.6em;border-radius:4px;margin:1em 0}
               .actions form{display:inline;margin:0}.actions button{padding:0 6px;margin:0 2px}
