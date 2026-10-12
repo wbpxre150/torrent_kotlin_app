@@ -105,6 +105,114 @@ void format_mdtm_utc(time_t mtime, char *out, size_t sz) {
              t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec);
 }
 
+static int mlsx_fact_match(const char *seg, size_t len, const char *name) {
+    if (len != strlen(name))
+        return 0;
+    for (size_t i = 0; i < len; i++) {
+        char c = seg[i];
+        if (c >= 'A' && c <= 'Z')
+            c = (char)(c + ('a' - 'A'));
+        if (c != name[i])
+            return 0;
+    }
+    return 1;
+}
+
+int format_mlsx_facts(char *out, size_t cap, int is_dir, uint64_t size,
+                      int64_t mtime_ms, unsigned mask) {
+    char buf[80];
+    size_t off = 0;
+    if (mask & MLSX_FACT_TYPE)
+        off += (size_t)snprintf(buf + off, sizeof buf - off, "%s",
+                                is_dir ? "type=dir;" : "type=file;");
+    if ((mask & MLSX_FACT_SIZE) != 0 && !is_dir)
+        off += (size_t)snprintf(buf + off, sizeof buf - off, "size=%llu;",
+                                (unsigned long long)size);
+    if (mask & MLSX_FACT_MODIFY) {
+        char ts[24];
+        format_mdtm_utc((time_t)(mtime_ms / 1000LL), ts, sizeof ts);
+        off += (size_t)snprintf(buf + off, sizeof buf - off, "modify=%s;", ts);
+    }
+    if (mask & MLSX_FACT_PERM)
+        off += (size_t)snprintf(buf + off, sizeof buf - off, "perm=%s;",
+                                is_dir ? "elpd" : "rd");
+    if (off + 1 > cap)
+        return -1;
+    memcpy(out, buf, off);
+    out[off] = '\0';
+    return 0;
+}
+
+unsigned parse_mlst_opts(const char *arg) {
+    unsigned mask = 0;
+    if (arg == NULL)
+        return 0;
+    const char *p = arg;
+    while (*p != '\0') {
+        const char *seg = p;
+        while (*p != '\0' && *p != ';')
+            p++;
+        size_t len = (size_t)(p - seg);
+        if (mlsx_fact_match(seg, len, "type"))
+            mask |= MLSX_FACT_TYPE;
+        else if (mlsx_fact_match(seg, len, "size"))
+            mask |= MLSX_FACT_SIZE;
+        else if (mlsx_fact_match(seg, len, "modify"))
+            mask |= MLSX_FACT_MODIFY;
+        else if (mlsx_fact_match(seg, len, "perm"))
+            mask |= MLSX_FACT_PERM;
+        if (*p == ';')
+            p++;
+    }
+    return mask;
+}
+
+int format_mlst_opts_list(char *out, size_t cap, unsigned mask) {
+    static const struct {
+        unsigned bit;
+        const char *name;
+    } facts[] = {
+        {MLSX_FACT_TYPE, "type"},
+        {MLSX_FACT_SIZE, "size"},
+        {MLSX_FACT_MODIFY, "modify"},
+        {MLSX_FACT_PERM, "perm"},
+    };
+    char buf[32];
+    size_t off = 0;
+    for (size_t i = 0; i < sizeof facts / sizeof facts[0]; i++) {
+        if ((mask & facts[i].bit) == 0)
+            continue;
+        off += (size_t)snprintf(buf + off, sizeof buf - off, "%s;", facts[i].name);
+    }
+    if (off + 1 > cap)
+        return -1;
+    memcpy(out, buf, off);
+    out[off] = '\0';
+    return 0;
+}
+
+int format_mlst_feat(char *out, size_t cap, unsigned mask) {
+    static const struct {
+        unsigned bit;
+        const char *name;
+    } facts[] = {
+        {MLSX_FACT_TYPE, "type"},
+        {MLSX_FACT_SIZE, "size"},
+        {MLSX_FACT_MODIFY, "modify"},
+        {MLSX_FACT_PERM, "perm"},
+    };
+    char buf[64];
+    size_t off = (size_t)snprintf(buf, sizeof buf, "MLST ");
+    for (size_t i = 0; i < sizeof facts / sizeof facts[0]; i++)
+        off += (size_t)snprintf(buf + off, sizeof buf - off, "%s%s;",
+                                facts[i].name, (mask & facts[i].bit) != 0 ? "*" : "");
+    if (off + 1 > cap)
+        return -1;
+    memcpy(out, buf, off);
+    out[off] = '\0';
+    return 0;
+}
+
 int normalize_relpath(const char *in, char *out, size_t outsz) {
     if (outsz == 0)
         return -1;

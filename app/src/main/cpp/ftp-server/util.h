@@ -33,6 +33,44 @@ void format_list_time(time_t mtime, char *out, size_t sz);
 /* "YYYYMMDDHHMMSS" in UTC. */
 void format_mdtm_utc(time_t mtime, char *out, size_t sz);
 
+/* RFC 3659 MLST/MLSD fact mask bits. */
+#define MLSX_FACT_TYPE 1
+#define MLSX_FACT_SIZE 2
+#define MLSX_FACT_MODIFY 4
+#define MLSX_FACT_PERM 8
+#define MLSX_FACT_ALL 15
+
+/*
+ * RFC 3659 MLST/MLSD facts string: type, size, modify, perm in that order,
+ * each terminated by ';', only facts set in mask (size is omitted for
+ * directories even when requested). No name and no trailing space; the
+ * caller appends " name". modify is "YYYYMMDDHHMMSS" in UTC from
+ * mtime_ms/1000. mask 0 yields "". Returns 0 on success, -1 if out is too
+ * small (in which case out is left unmodified).
+ */
+int format_mlsx_facts(char *out, size_t cap, int is_dir, uint64_t size,
+                      int64_t mtime_ms, unsigned mask);
+
+/*
+ * Parse an OPTS MLST argument (e.g. "type;size;" or "Type;Modify") into a
+ * fact mask: case-insensitive, ';' separated, unknown facts ignored.
+ * NULL or empty yields 0.
+ */
+unsigned parse_mlst_opts(const char *arg);
+
+/*
+ * RFC 3659 FEAT line content: "MLST type*;size*;modify*;perm*" where '*'
+ * marks facts currently enabled in mask. Returns 0 on success, -1 if too
+ * small.
+ */
+int format_mlst_feat(char *out, size_t cap, unsigned mask);
+
+/*
+ * Enabled-facts list ("type;size;") for OPTS MLST 200 replies. Returns 0 on
+ * success, -1 if too small.
+ */
+int format_mlst_opts_list(char *out, size_t cap, unsigned mask);
+
 /*
  * Normalize a raw path argument into a virtual-root-relative path:
  * strips leading '/', collapses '.', '..', '//' segments; '..' at the root
