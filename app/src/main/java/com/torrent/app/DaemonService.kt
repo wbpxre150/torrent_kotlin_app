@@ -327,11 +327,8 @@ class DaemonService : Service() {
         lastApplyRolledBack = false
         if (liveOnly) {
             val rpc = com.torrent.app.transmission.TransmissionRpcClient(before.transmission.username, before.transmission.password)
-            val args = JSONObject()
-                .put("speed-limit-down", s.speedLimitDown)
-                .put("speed-limit-up", s.speedLimitUp)
-                .put("alt-speed-down", s.altSpeedDown)
-                .put("alt-speed-up", s.altSpeedUp)
+            val args = com.torrent.app.transmission.TransmissionRpcClient.buildSessionSetSpeedArgs(
+                s.speedLimitDown, s.speedLimitUp, s.altSpeedDown, s.altSpeedUp)
             val ok = rpc.sessionSet(args)
             return com.torrent.app.config.ApplyResult(ok, if (ok) "applied via RPC" else "daemon not reachable; restart required", false)
         }

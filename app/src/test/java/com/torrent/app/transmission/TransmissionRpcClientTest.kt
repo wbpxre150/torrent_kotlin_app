@@ -1,6 +1,7 @@
 package com.torrent.app.transmission
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -30,5 +31,19 @@ class TransmissionRpcClientTest {
         assertEquals("magnet:?xt=urn:btih:abc", a.getString("filename"))
         assertEquals("/saf/usb/torrent_data", a.getString("download-dir"))
         assertEquals(0, a.getInt("bandwidthPriority"))
+    }
+
+    @Test fun buildSessionSetSpeedArgs_includesDerivedEnabledFlags() {
+        val args = TransmissionRpcClient.buildSessionSetSpeedArgs(666, 555, 0, 0)
+        assertEquals(666, args.getInt("speed-limit-down"))
+        assertEquals(555, args.getInt("speed-limit-up"))
+        assertTrue(args.getBoolean("speed-limit-down-enabled"))
+        assertTrue(args.getBoolean("speed-limit-up-enabled"))
+    }
+
+    @Test fun buildSessionSetSpeedArgs_zeroLimitsDisableFlags() {
+        val args = TransmissionRpcClient.buildSessionSetSpeedArgs(0, 0, 0, 0)
+        assertFalse(args.getBoolean("speed-limit-down-enabled"))
+        assertFalse(args.getBoolean("speed-limit-up-enabled"))
     }
 }

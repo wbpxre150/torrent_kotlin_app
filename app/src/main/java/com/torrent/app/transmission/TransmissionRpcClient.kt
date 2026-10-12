@@ -128,6 +128,23 @@ class TransmissionRpcClient(
                 .put("filename", filename)
                 .put("download-dir", downloadDir)
                 .put("bandwidthPriority", 0)
+
+        /**
+         * Pure argument builder for `session-set` of the app's speed form. The `-enabled`
+         * flags are derived from the limit values: non-zero enables enforcement, 0 means
+         * unlimited (disabled), matching the form legend "KB/s, 0 = unlimited".
+         */
+        fun buildSessionSetSpeedArgs(
+            speedLimitDown: Int, speedLimitUp: Int,
+            altSpeedDown: Int, altSpeedUp: Int,
+        ): JSONObject =
+            JSONObject()
+                .put("speed-limit-down", speedLimitDown)
+                .put("speed-limit-up", speedLimitUp)
+                .put("alt-speed-down", altSpeedDown)
+                .put("alt-speed-up", altSpeedUp)
+                .put("speed-limit-down-enabled", speedLimitDown > 0)
+                .put("speed-limit-up-enabled", speedLimitUp > 0)
         fun buildRequestBody(method: String, arguments: JSONObject?): String {
             val o = JSONObject().put("method", method)
             if (arguments != null) o.put("arguments", arguments)

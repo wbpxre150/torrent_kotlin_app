@@ -103,6 +103,10 @@ class TransmissionConfig(context: Context, private val store: ConfigStore) {
          * rpc-password should be pre-hashed via [ssha1Hash] before calling; transmission detects the
          * "{" prefix and uses the hash directly without re-hashing or rewriting the file.
          * preallocation: 0=off, 1=fast/sparse (default on; uses fallocate), 2=full.
+         * speed-limit-{down,up}-enabled are derived from the limit values (non-zero = enabled,
+         * 0 = unlimited = disabled, matching the WebUI form legend). alt-speed-enabled is
+         * intentionally not emitted: it is daemon-side session state preserved by
+         * [mergeSettingsJson].
          */
         fun buildSettingsJson(
             username: String,
@@ -128,7 +132,9 @@ class TransmissionConfig(context: Context, private val store: ConfigStore) {
             append("  \"rename-partial-files\": false,\n")
             append("  \"watch-dir-enabled\": false,\n")
             append("  \"speed-limit-down\": ").append(speedLimitDown).append(",\n")
+            append("  \"speed-limit-down-enabled\": ").append(speedLimitDown > 0).append(",\n")
             append("  \"speed-limit-up\": ").append(speedLimitUp).append(",\n")
+            append("  \"speed-limit-up-enabled\": ").append(speedLimitUp > 0).append(",\n")
             append("  \"alt-speed-down\": ").append(altSpeedDown).append(",\n")
             append("  \"alt-speed-up\": ").append(altSpeedUp).append(",\n")
             append("  \"message-level\": 3,\n")

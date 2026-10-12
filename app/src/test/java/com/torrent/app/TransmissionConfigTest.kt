@@ -26,6 +26,19 @@ class TransmissionConfigTest {
         assertTrue(json.contains("\"preallocation\": 1"))
     }
 
+    @Test fun buildSettingsJson_derivesEnabledFlagsFromNonZeroLimits() {
+        val json = TransmissionConfig.buildSettingsJson(
+            "u", "p", "/d", speedLimitDown = 666, speedLimitUp = 555)
+        assertTrue(json.contains("\"speed-limit-down-enabled\": true"))
+        assertTrue(json.contains("\"speed-limit-up-enabled\": true"))
+    }
+
+    @Test fun buildSettingsJson_disabledFlagsWhenLimitsAreZero() {
+        val json = TransmissionConfig.buildSettingsJson("u", "p", "/d")
+        assertTrue(json.contains("\"speed-limit-down-enabled\": false"))
+        assertTrue(json.contains("\"speed-limit-up-enabled\": false"))
+    }
+
     @Test fun buildSettingsJson_escapesQuotesAndBackslashes() {
         val json = TransmissionConfig.buildSettingsJson("user", "pa\"ss\\word", "/dir")
         // Escaped form must appear verbatim in the output.
