@@ -50,12 +50,22 @@
 #define SAF_RO_LIST_END 0xFFFFFFFFu
 #define SAF_CONN_RETRIES 5
 #define SAF_CONN_RETRY_US 200000
+/* IPC round-trip deadline (seconds), applied as SO_RCVTIMEO/SO_SNDTIMEO on
+ * every per-call connection. Must exceed the Kotlin responder
+ * (FtpSafIpcRequestHandler)'s 30s gateway semaphore cap so normal slow SAF
+ * queries never trip it; a trip means the responder is genuinely stalled
+ * or dead, in which case the call maps to -1 and the session answers
+ * 450/550 — the correct FTP degradation instead of a hung session thread.
+ * Overridable at runtime via the FTPD_SAF_IO_TIMEOUT_S env var (parsed in
+ * saf_init) so tests can exercise a stalled responder in seconds. */
+#define SAF_IO_TIMEOUT_S 35
 
 typedef struct {
     char socket[4096];
     /* Normalized --root value as a relpath prefix under the SAF tree root;
      * empty string = serve the SAF tree root itself. */
     char root_prefix[4096];
+    int io_timeout_s;
 } saf_impl_t;
 
 /* ---- little-endian (de)serialization, host-endianness independent ---- */
@@ -126,6 +136,19 @@ static int saf_connect(const saf_impl_t *impl) {
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0)
         return -1;
+    /* Bound the round trip: a stalled/dead responder must degrade to a
+     * transport error (the next read/write fails, saf_call maps it to -1,
+     * the session answers 450/550), never hang the session thread. The
+     * deadline sits above the responder's 30s gateway cap, so a healthy
+     * but slow SAF query can never trip it (see SAF_IO_TIMEOUT_S). */
+    struct timeval tv;
+    tv.tv_sec = impl->io_timeout_s;
+    tv.tv_usec = 0;
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv) != 0 ||
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv) != 0) {
+        close(fd);
+        return -1;
+    }
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof addr);
     addr.sun_family = AF_UNIX;
@@ -316,6 +339,17 @@ static int saf_init(storage_backend_t *b, const char *root) {
     saf_impl_t *impl = calloc(1, sizeof *impl);
     if (impl == NULL)
         return -1;
+    /* IPC deadline: SAF_IO_TIMEOUT_S default, overridable via the
+     * FTPD_SAF_IO_TIMEOUT_S env var so tests can exercise a stalled
+     * responder in seconds (1..3600; invalid values keep the default). */
+    impl->io_timeout_s = SAF_IO_TIMEOUT_S;
+    const char *ovr = getenv("FTPD_SAF_IO_TIMEOUT_S");
+    if (ovr != NULL) {
+        char *end = NULL;
+        long v = strtol(ovr, &end, 10);
+        if (end != ovr && *end == '\0' && v >= 1 && v <= 3600)
+            impl->io_timeout_s = (int)v;
+    }
     if (snprintf(impl->socket, sizeof impl->socket, "%s", g_config.saf_socket)
         >= (int)sizeof impl->socket) {
         free(impl);

@@ -5,9 +5,10 @@
 # Builds with cmake into build/ftp-host, creates a test root with tricky file
 # names (spaces, brackets, UTF-8), starts the daemon on 127.0.0.1:22121 with
 # PASV range 31000-31019 and FTP_USERNAME=kodi / FTP_PASSWORD=testtest, then
-# runs 14 curl-based assertions, then a SAF-backend pass (15-19) against a
-# python3 mock of the SafIpcServer wire protocol (skipped cleanly if python3
-# is missing). Exits non-zero on any failure and always kills the daemons.
+# runs 14 curl-based assertions, then a SAF-backend pass (15-20) against a
+# python3 mock of the SafIpcServer wire protocol, including a stalled
+# responder that never replies (assertion 20). Skipped cleanly if python3
+# is missing. Exits non-zero on any failure and always kills the daemons.
 
 set -u
 export LC_ALL=C
@@ -27,6 +28,12 @@ SAF_PASV_HI=31039
 SAF_BIN=build/ftp-host-saf/ftpserver-host
 SAF_DAEMON_PID=""
 MOCK_PID=""
+STALL_PORT=22123
+STALL_PASV_LO=31040
+STALL_PASV_HI=31059
+STALL_SOCK=""
+STALL_DAEMON_PID=""
+STALL_MOCK_PID=""
 
 BIN=build/ftp-host/ftpserver-host
 FTPURL="ftp://$HOST:$PORT"
@@ -50,6 +57,14 @@ cleanup() {
   if [ -n "$MOCK_PID" ] && kill -0 "$MOCK_PID" 2>/dev/null; then
     kill "$MOCK_PID" 2>/dev/null
     wait "$MOCK_PID" 2>/dev/null
+  fi
+  if [ -n "$STALL_DAEMON_PID" ] && kill -0 "$STALL_DAEMON_PID" 2>/dev/null; then
+    kill "$STALL_DAEMON_PID" 2>/dev/null
+    wait "$STALL_DAEMON_PID" 2>/dev/null
+  fi
+  if [ -n "$STALL_MOCK_PID" ] && kill -0 "$STALL_MOCK_PID" 2>/dev/null; then
+    kill "$STALL_MOCK_PID" 2>/dev/null
+    wait "$STALL_MOCK_PID" 2>/dev/null
   fi
   if [ -n "$DAEMON_PID" ] && kill -0 "$DAEMON_PID" 2>/dev/null; then
     kill "$DAEMON_PID" 2>/dev/null
@@ -558,6 +573,138 @@ PYEOF
   else
     fail "19 mock log has nested RO_STAT"
     sed 's/^/    | /' "$WORK/mock.log" 2>/dev/null
+  fi
+
+  echo "=== 20: STALLED RESPONDER -> bounded 4xx/5xx, session recovers ==="
+  # Mock variant that accepts, reads the request, and never replies (holds
+  # the connection open). The daemon runs with FTPD_SAF_IO_TIMEOUT_S=3
+  # (overriding the 35s default) so the stalled round trip degrades to an
+  # FTP error in seconds. The control connection must get a 4xx/5xx reply
+  # within a bounded wall time, then the session thread must be back in its
+  # read loop (NOOP -> 200 on the same connection) and the daemon must
+  # still accept a NEW control connection (main loop alive, no hang/busy-loop).
+  STALL_SOCK="$WORK/saf-stall.sock"
+  cat > "$WORK/mock_saf_stall.py" <<'PYEOF'
+#!/usr/bin/env python3
+"""Stalled-responder variant of the SafIpcServer mock: accepts a
+connection, reads the request frame, and then never replies (the
+connection is held open). Simulates a dead/hung responder."""
+import os
+import socket
+import struct
+import sys
+import time
+
+sock_path = sys.argv[1]
+srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+if os.path.exists(sock_path):
+    os.unlink(sock_path)
+srv.bind(sock_path)
+srv.listen(32)
+
+while True:
+    conn, _ = srv.accept()
+    try:
+        hdr = b""
+        while len(hdr) < 3:
+            chunk = conn.recv(3 - len(hdr))
+            if not chunk:
+                break
+            hdr += chunk
+        if len(hdr) == 3:
+            plen = struct.unpack("<H", hdr[1:3])[0]
+            buf = b""
+            while len(buf) < plen:
+                chunk = conn.recv(plen - len(buf))
+                if not chunk:
+                    break
+                buf += chunk
+        # Deliberately stall: hold the connection, never reply.
+        time.sleep(600)
+    except Exception:
+        pass
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+PYEOF
+  python3 "$WORK/mock_saf_stall.py" "$STALL_SOCK" &
+  STALL_MOCK_PID=$!
+  up=0
+  for _ in $(seq 1 100); do
+    if [ -S "$STALL_SOCK" ]; then
+      up=1
+      break
+    fi
+    if ! kill -0 "$STALL_MOCK_PID" 2>/dev/null; then
+      break
+    fi
+    sleep 0.1
+  done
+  if [ "$up" -ne 1 ]; then
+    echo "FAIL: stalled mock socket not ready"
+    exit 1
+  fi
+
+  FTP_USERNAME="$USER" FTP_PASSWORD="$PASS" FTPD_SAF_IO_TIMEOUT_S=3 "$SAF_BIN" \
+    --bind "$HOST" --port "$STALL_PORT" --root "" \
+    --pasv "$STALL_PASV_LO-$STALL_PASV_HI" --max-kibps 0 --saf-socket "$STALL_SOCK" \
+    > "$WORK/saf-stall-daemon.log" 2>&1 &
+  STALL_DAEMON_PID=$!
+  up=0
+  for _ in $(seq 1 100); do
+    if (exec 3<>/dev/tcp/$HOST/$STALL_PORT) 2>/dev/null; then
+      up=1
+      break
+    fi
+    if ! kill -0 "$STALL_DAEMON_PID" 2>/dev/null; then
+      break
+    fi
+    sleep 0.1
+  done
+  if [ "$up" -ne 1 ]; then
+    echo "FAIL: stalled-responder daemon not listening"
+    cat "$WORK/saf-stall-daemon.log"
+    exit 1
+  fi
+  echo "stalled-responder daemon listening (pid $STALL_DAEMON_PID)"
+
+  stall_test() {
+    exec 3<>/dev/tcp/$HOST/$STALL_PORT || return 1
+    local l
+    read -t 5 -u 3 l || return 1                    # 220
+    printf 'USER %s\r\n' "$USER" >&3
+    read -t 5 -u 3 l || return 1
+    printf 'PASS %s\r\n' "$PASS" >&3
+    read -t 5 -u 3 l || return 1
+    printf 'SIZE dir/file.avi\r\n' >&3
+    read -t 15 -u 3 l || return 1                   # bounded: must not hang
+    printf '%s' "$l" | tr -d '\r' > "$WORK/stall-reply.txt"
+    [ "${l:0:1}" = "4" ] || [ "${l:0:1}" = "5" ] || return 1
+    printf 'NOOP\r\n' >&3
+    read -t 5 -u 3 l || return 1
+    [ "${l:0:3}" = "200" ] || return 1              # session back in read loop
+    printf 'QUIT\r\n' >&3
+    read -t 5 -u 3 l 2>/dev/null
+    exec 3<&- 3>&-
+    return 0
+  }
+  t0=$(date +%s.%N)
+  stall_test
+  stall_rc=$?
+  t1=$(date +%s.%N)
+  elapsed=$(awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.1f", b - a }')
+  daemon_alive=0
+  if (exec 3<>/dev/tcp/$HOST/$STALL_PORT) 2>/dev/null; then
+    daemon_alive=1
+  fi
+  stall_reply=$(cat "$WORK/stall-reply.txt" 2>/dev/null)
+  if [ $stall_rc -eq 0 ] && [ $daemon_alive -eq 1 ] \
+    && awk -v e="$elapsed" 'BEGIN { exit !(e < 15) }'; then
+    pass "20 stalled responder: '$(printf '%s' "$stall_reply" | cut -d' ' -f1)' in ${elapsed}s, session recovered"
+  else
+    fail "20 stalled responder (rc=$stall_rc alive=$daemon_alive elapsed=${elapsed}s reply='$stall_reply')"
   fi
 fi
 
