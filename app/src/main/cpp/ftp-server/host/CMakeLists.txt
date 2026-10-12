@@ -46,3 +46,11 @@ target_link_libraries(ftpserver-host PRIVATE pthread)
 add_executable(saf-parser-unit saf_parser_unit.c)
 target_compile_options(saf-parser-unit PRIVATE -O2 -Wall -Wextra)
 target_compile_definitions(saf-parser-unit PRIVATE FTPD_SAF_PARSER_UNIT)
+
+# Host-only unit test for the relpath helpers in util.c. Includes util.c
+# directly (with `static` lifted), so it is independent of FTPD_BACKEND and
+# never part of the Android build.
+add_executable(util-unit util_unit.c)
+target_compile_options(util-unit PRIVATE -O2 -Wall -Wextra)
+target_compile_definitions(util-unit PRIVATE FTPD_UTIL_UNIT)
+target_link_libraries(util-unit PRIVATE pthread)

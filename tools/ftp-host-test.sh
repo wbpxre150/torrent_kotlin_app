@@ -5,8 +5,9 @@
 # Builds with cmake into build/ftp-host, creates a test root with tricky file
 # names (spaces, brackets, UTF-8), starts the daemon on 127.0.0.1:22121 with
 # PASV range 31000-31019 and FTP_USERNAME=kodi / FTP_PASSWORD=testtest, then
-# runs 14 curl-based assertions. Exits non-zero on any failure and always
-# kills the daemon.
+# runs 14 curl-based assertions, then a SAF-backend pass (15-19) against a
+# python3 mock of the SafIpcServer wire protocol (skipped cleanly if python3
+# is missing). Exits non-zero on any failure and always kills the daemons.
 
 set -u
 export LC_ALL=C
@@ -19,6 +20,13 @@ USER=kodi
 PASS=testtest
 PASV_LO=31000
 PASV_HI=31019
+
+SAF_PORT=22122
+SAF_PASV_LO=31020
+SAF_PASV_HI=31039
+SAF_BIN=build/ftp-host-saf/ftpserver-host
+SAF_DAEMON_PID=""
+MOCK_PID=""
 
 BIN=build/ftp-host/ftpserver-host
 FTPURL="ftp://$HOST:$PORT"
@@ -35,6 +43,14 @@ pass() { echo "PASS: $1"; PASS_COUNT=$((PASS_COUNT + 1)); }
 fail() { echo "FAIL: $1"; FAIL_COUNT=$((FAIL_COUNT + 1)); }
 
 cleanup() {
+  if [ -n "$SAF_DAEMON_PID" ] && kill -0 "$SAF_DAEMON_PID" 2>/dev/null; then
+    kill "$SAF_DAEMON_PID" 2>/dev/null
+    wait "$SAF_DAEMON_PID" 2>/dev/null
+  fi
+  if [ -n "$MOCK_PID" ] && kill -0 "$MOCK_PID" 2>/dev/null; then
+    kill "$MOCK_PID" 2>/dev/null
+    wait "$MOCK_PID" 2>/dev/null
+  fi
   if [ -n "$DAEMON_PID" ] && kill -0 "$DAEMON_PID" 2>/dev/null; then
     kill "$DAEMON_PID" 2>/dev/null
     wait "$DAEMON_PID" 2>/dev/null
@@ -312,6 +328,237 @@ if port_test; then
   pass "14 PORT gets 502"
 else
   fail "14 PORT gets 502"
+fi
+
+echo
+echo "=== SAF-backend pass (mock SafIpcServer) ==="
+if ! command -v python3 > /dev/null 2>&1; then
+  echo "SKIP: python3 not found; skipping SAF-backend pass"
+else
+  SAF_URL="ftp://$HOST:$SAF_PORT"
+
+  echo "=== saf: build ==="
+  if ! cmake -S app/src/main/cpp/ftp-server/host -B build/ftp-host-saf \
+       -DFTPD_BACKEND=saf > "$WORK/cmake-saf.log" 2>&1 \
+    || ! cmake --build build/ftp-host-saf > "$WORK/build-saf.log" 2>&1; then
+    echo "FAIL: saf build"; cat "$WORK/cmake-saf.log" "$WORK/build-saf.log"; exit 1
+  fi
+  echo "saf build ok"
+
+  head -c 4096 /dev/urandom > "$WORK/saf-data.bin"
+  cat > "$WORK/mock_saf.py" <<'PYEOF'
+#!/usr/bin/env python3
+"""Mock of the Kotlin SafIpcServer read-only wire protocol.
+
+  request:  [u8 op][u16 LE payloadLen][payload]
+  response: [i32 LE status][u16 LE payloadLen][payload]
+  strings:  [u16 LE len][utf-8 bytes]
+
+Ops: 10 RO_STAT -> 0 + [u8 isDir][u64 LE size][u64 LE mtimeMs] (-2 unknown)
+     11 RO_LIST -> 0 + [u32 0xFFFFFFFF][u16 0]  (END, zero entries)
+     12 RO_OPEN -> 0 + no payload, plus one read fd via SCM_RIGHTS (sendmsg)
+     5  REMOVE  -> 0
+
+Each received op is logged as: op=<n> path=<path>
+"""
+import os
+import socket
+import struct
+import sys
+
+sock_path, data_file, log_path = sys.argv[1], sys.argv[2], sys.argv[3]
+MTIME_MS = 1700000000000
+DIRS = {"", "dir"}
+FILES = {"dir/file.avi": (os.path.getsize(data_file), MTIME_MS)}
+
+
+def recv_exact(conn, n):
+    buf = b""
+    while len(buf) < n:
+        chunk = conn.recv(n - len(buf))
+        if not chunk:
+            raise EOFError
+        buf += chunk
+    return buf
+
+
+def send_with_fd(conn, fd, data):
+    """Send `data` plus `fd` via SCM_RIGHTS in one datagram.
+    socket.send_fds() was removed in Python 3.14; sendmsg() with an
+    SCM_RIGHTS ancillary message is the same mechanism on all versions."""
+    if hasattr(conn, "send_fds"):
+        conn.send_fds([fd], data)
+    else:
+        conn.sendmsg([data], [(1, 1, struct.pack("<i", fd))])  # SOL_SOCKET, SCM_RIGHTS
+
+
+logf = open(log_path, "w")
+srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+if os.path.exists(sock_path):
+    os.unlink(sock_path)
+srv.bind(sock_path)
+srv.listen(32)
+
+while True:
+    conn, _ = srv.accept()
+    try:
+        hdr = recv_exact(conn, 3)
+        op = hdr[0]
+        plen = struct.unpack("<H", hdr[1:3])[0]
+        payload = recv_exact(conn, plen) if plen else b""
+        path = ""
+        if len(payload) >= 2:
+            n = struct.unpack("<H", payload[:2])[0]
+            path = payload[2:2 + n].decode("utf-8", "replace")
+        logf.write("op=%d path=%s\n" % (op, path))
+        logf.flush()
+        if op == 10:  # RO_STAT
+            if path in DIRS:
+                body = struct.pack("<BQQ", 1, 0, MTIME_MS)
+            elif path in FILES:
+                size, mtime = FILES[path]
+                body = struct.pack("<BQQ", 0, size, mtime)
+            else:
+                conn.sendall(struct.pack("<iH", -2, 0))
+                continue
+            conn.sendall(struct.pack("<iH", 0, len(body)) + body)
+        elif op == 11:  # RO_LIST
+            conn.sendall(struct.pack("<iHIH", 0, 6, 0xFFFFFFFF, 0))
+        elif op == 12:  # RO_OPEN
+            fd = os.open(data_file, os.O_RDONLY)
+            try:
+                send_with_fd(conn, fd, struct.pack("<iH", 0, 0))
+            finally:
+                os.close(fd)
+        elif op == 5:  # REMOVE
+            conn.sendall(struct.pack("<iH", 0, 0))
+        else:
+            conn.sendall(struct.pack("<iH", -11, 0))
+    except Exception:
+        pass
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+PYEOF
+
+  python3 "$WORK/mock_saf.py" "$WORK/saf.sock" "$WORK/saf-data.bin" "$WORK/mock.log" &
+  MOCK_PID=$!
+  up=0
+  for _ in $(seq 1 100); do
+    if [ -S "$WORK/saf.sock" ]; then
+      up=1
+      break
+    fi
+    if ! kill -0 "$MOCK_PID" 2>/dev/null; then
+      break
+    fi
+    sleep 0.1
+  done
+  if [ "$up" -ne 1 ]; then
+    echo "FAIL: mock socket not ready"
+    exit 1
+  fi
+
+  echo "=== saf: start daemon ==="
+  FTP_USERNAME="$USER" FTP_PASSWORD="$PASS" "$SAF_BIN" \
+    --bind "$HOST" --port "$SAF_PORT" --root "" \
+    --pasv "$SAF_PASV_LO-$SAF_PASV_HI" --max-kibps 0 --saf-socket "$WORK/saf.sock" \
+    > "$WORK/saf-daemon.log" 2>&1 &
+  SAF_DAEMON_PID=$!
+
+  up=0
+  for _ in $(seq 1 100); do
+    if (exec 3<>/dev/tcp/$HOST/$SAF_PORT) 2>/dev/null; then
+      up=1
+      break
+    fi
+    if ! kill -0 "$SAF_DAEMON_PID" 2>/dev/null; then
+      break
+    fi
+    sleep 0.1
+  done
+  if [ "$up" -ne 1 ]; then
+    echo "FAIL: saf daemon not listening"
+    cat "$WORK/saf-daemon.log"
+    exit 1
+  fi
+  echo "saf daemon listening (pid $SAF_DAEMON_PID)"
+
+  echo "=== 15: SAF LIST root works (mock returns zero entries) ==="
+  saf_list=$(curl -s --max-time 10 -u "$USER:$PASS" "$SAF_URL/" | tr -d '\r')
+  rc=$?
+  if [ $rc -eq 0 ]; then
+    pass "15 SAF LIST root"
+  else
+    fail "15 SAF LIST root (curl exit $rc)"
+  fi
+
+  echo "=== 16: SAF SIZE nested path (depth 2, raw control) ==="
+  saf_size_test() {
+    exec 3<>/dev/tcp/$HOST/$SAF_PORT || return 1
+    local l
+    read -t 5 -u 3 l || return 1                    # 220
+    printf 'USER %s\r\n' "$USER" >&3
+    read -t 5 -u 3 l || return 1
+    printf 'PASS %s\r\n' "$PASS" >&3
+    read -t 5 -u 3 l || return 1
+    printf 'SIZE dir/file.avi\r\n' >&3
+    read -t 5 -u 3 l || return 1
+    printf '%s' "${l#213 }" | tr -d '\r' > "$WORK/saf-size-out"   # 213 payload, no CR
+    printf 'QUIT\r\n' >&3
+    exec 3<&- 3>&-
+    return 0
+  }
+  exp_saf_sz=$(stat -c %s "$WORK/saf-data.bin")
+  if saf_size_test && [ "$(cat "$WORK/saf-size-out")" = "$exp_saf_sz" ]; then
+    pass "16 SAF SIZE nested (213 $exp_saf_sz)"
+  else
+    fail "16 SAF SIZE nested (got '$(cat "$WORK/saf-size-out" 2>/dev/null)', want '$exp_saf_sz')"
+  fi
+
+  echo "=== 17: SAF RETR nested file byte-matches (fd via SCM_RIGHTS) ==="
+  if curl -s --max-time 30 -u "$USER:$PASS" -o "$WORK/saf-retr" "$SAF_URL/dir/file.avi" \
+    && cmp -s "$WORK/saf-retr" "$WORK/saf-data.bin"; then
+    pass "17 SAF RETR nested byte-match"
+  else
+    fail "17 SAF RETR nested byte-match"
+  fi
+
+  echo "=== 18: SAF CWD into nested dir + relative SIZE (raw control) ==="
+  saf_cwd_test() {
+    exec 3<>/dev/tcp/$HOST/$SAF_PORT || return 1
+    local l
+    read -t 5 -u 3 l || return 1                    # 220
+    printf 'USER %s\r\n' "$USER" >&3
+    read -t 5 -u 3 l || return 1                    # 331
+    printf 'PASS %s\r\n' "$PASS" >&3
+    read -t 5 -u 3 l || return 1                    # 230
+    printf 'CWD dir\r\n' >&3
+    read -t 5 -u 3 l || return 1
+    [ "${l:0:3}" = "250" ] || return 1
+    printf 'SIZE file.avi\r\n' >&3                  # relative: cwd join
+    read -t 5 -u 3 l || return 1
+    [ "${l:0:3}" = "213" ] || return 1
+    printf '%s' "${l#213 }" | tr -d '\r' > "$WORK/saf-size-rel-out"
+    printf 'QUIT\r\n' >&3
+    exec 3<&- 3>&-
+    return 0
+  }
+  if saf_cwd_test && [ "$(cat "$WORK/saf-size-rel-out")" = "$exp_saf_sz" ]; then
+    pass "18 SAF CWD nested (250) + relative SIZE ($exp_saf_sz)"
+  else
+    fail "18 SAF CWD nested (got '$(cat "$WORK/saf-size-rel-out" 2>/dev/null)', want '$exp_saf_sz')"
+  fi
+
+  echo "=== 19: mock log shows the nested stat arrived ==="
+  if grep -Fq "op=10 path=dir/file.avi" "$WORK/mock.log"; then
+    pass "19 mock log has nested RO_STAT"
+  else
+    fail "19 mock log has nested RO_STAT"
+    sed 's/^/    | /' "$WORK/mock.log" 2>/dev/null
+  fi
 fi
 
 echo

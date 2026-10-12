@@ -120,8 +120,11 @@ int normalize_relpath(const char *in, char *out, size_t outsz) {
         while (*p != '\0' && *p != '/')
             p++;
         size_t len = (size_t)(p - seg);
-        if (len == 0)
-            continue; /* "a//b" */
+        if (len == 0) {
+            while (*p == '/')
+                p++; /* "a//b": skip the separator run before the next segment */
+            continue;
+        }
         if (len == 1 && seg[0] == '.')
             continue;
         if (len == 2 && seg[0] == '.' && seg[1] == '.') {
@@ -129,7 +132,7 @@ int normalize_relpath(const char *in, char *out, size_t outsz) {
                 size_t i = n;
                 while (i > 0 && out[i - 1] != '/')
                     i--;
-                n = i;
+                n = (i > 0) ? i - 1 : 0; /* drop the '/' too */
             }
             continue; /* '..' at root clamps to root */
         }
