@@ -463,7 +463,11 @@ class DaemonService : Service() {
 
     /**
      * Stops the running FTP supervisor and, when the wifi gate allows, starts
-     * a new one built from the current settings. The work runs on the
+     * a new one built from the current settings; when the gate is closed it
+     * swaps in a fresh stopped loopback placeholder so the registered
+     * supervisor keeps the current settings (a later same-IP wifi-up start
+     * then rebuilds from them instead of launching stale args). The work runs
+     * on the
      * ftp-control executor, which serializes it with the gate/dashboard
      * lifecycle ops. Used by applyFtpSettings, the data-dir change in
      * applyTransmissionSettings, and the hang watchdog ([FtpHangWatchdog],
@@ -482,7 +486,20 @@ class DaemonService : Service() {
                     android.util.Log.w("DaemonService", "ftp stop failed: ${e.message}")
                 }
             }
-            if (gateIp != null) startFtpSupervisorOnIo(gateIp, force)
+            if (gateIp != null) {
+                startFtpSupervisorOnIo(gateIp, force)
+            } else {
+                // Gate closed: the just-stopped supervisor is still registered
+                // with its pre-rebuild CLI args/env. Swap in a fresh stopped
+                // loopback placeholder (same pattern as the onCreate
+                // registration) so the registered supervisor always holds the
+                // current settings. When wifi returns, the real bind IP
+                // differs from the placeholder's 127.0.0.1, so
+                // registerFtpSupervisor's IP mismatch forces a rebuild from
+                // current settings even with force=false — a stale-args start
+                // is impossible.
+                registerFtpSupervisor("127.0.0.1", force = true)
+            }
         }
     }
 
