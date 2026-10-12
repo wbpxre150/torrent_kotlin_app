@@ -65,6 +65,7 @@ class TransmissionConfig(context: Context, private val store: ConfigStore) {
          * Pure builder for transmission's settings.json. Exposed for unit testing (no Android deps).
          * rpc-password should be pre-hashed via [ssha1Hash] before calling; transmission detects the
          * "{" prefix and uses the hash directly without re-hashing or rewriting the file.
+         * preallocation: 0=off, 1=fast/sparse (default on; uses fallocate), 2=full.
          */
         fun buildSettingsJson(
             username: String,
@@ -94,7 +95,7 @@ class TransmissionConfig(context: Context, private val store: ConfigStore) {
             append("  \"alt-speed-down\": ").append(altSpeedDown).append(",\n")
             append("  \"alt-speed-up\": ").append(altSpeedUp).append(",\n")
             append("  \"message-level\": 3,\n")
-            append("  \"preallocation\": 0\n")
+            append("  \"preallocation\": 1\n") // 0=off, 1=fast/sparse (fallocate, default on), 2=full
             append("}\n")
         }
 

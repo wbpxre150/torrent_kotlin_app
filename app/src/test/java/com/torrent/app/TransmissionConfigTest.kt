@@ -23,7 +23,7 @@ class TransmissionConfigTest {
         assertTrue(json.contains("\"rename-partial-files\": false"))
         assertFalse(json.contains("\"incomplete-dir\""))
         assertTrue(json.contains("\"watch-dir-enabled\": false"))
-        assertTrue(json.contains("\"preallocation\": 0"))
+        assertTrue(json.contains("\"preallocation\": 1"))
     }
 
     @Test fun buildSettingsJson_escapesQuotesAndBackslashes() {
@@ -36,7 +36,7 @@ class TransmissionConfigTest {
         val json = TransmissionConfig.buildSettingsJson("u", "p", "/d")
         assertTrue(json.trimStart().startsWith("{"))
         assertTrue(json.trimEnd().endsWith("}"))
-        assertTrue(json.contains("\"preallocation\": 0\n}"))
+        assertTrue(json.contains("\"preallocation\": 1\n}"))
     }
     @Test fun usbDownloadDir_isSentinel() {
         assertEquals("/saf/usb", TransmissionConfig.USB_DOWNLOAD_DIR)
