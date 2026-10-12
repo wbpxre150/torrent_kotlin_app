@@ -143,6 +143,19 @@ class TransmissionConfig(context: Context, private val store: ConfigStore) {
         }
 
         private fun jsonStr(s: String): String =
-            "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+            "\"" + buildString {
+                for (c in s) {
+                    when (c) {
+                        '\\' -> append("\\\\")
+                        '"' -> append("\\\"")
+                        '\n' -> append("\\n")
+                        '\r' -> append("\\r")
+                        '\t' -> append("\\t")
+                        '\b' -> append("\\b")
+                        '\u000c' -> append("\\f")
+                        else -> if (c < ' ') append("\\u%04x".format(c.code)) else append(c)
+                    }
+                }
+            } + "\""
     }
 }

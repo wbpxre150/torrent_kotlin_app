@@ -1,10 +1,14 @@
 package com.torrent.app
 
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
 
+@RunWith(RobolectricTestRunner::class)
 class TransmissionConfigTest {
 
     @Test fun buildSettingsJson_hasRequiredRpcAndDownloadFields() {
@@ -57,5 +61,28 @@ class TransmissionConfigTest {
     @Test fun buildSettingsJson_usesUsbSentinelForDownloadDir() {
         val json = TransmissionConfig.buildSettingsJson("u", "p", TransmissionConfig.USB_DOWNLOAD_DIR)
         assertTrue(json.contains("\"download-dir\": \"/saf/usb\""))
+    }
+
+    @Test fun buildSettingsJson_escapesControlCharacters() {
+        val json = TransmissionConfig.buildSettingsJson("u\nx", "pa\tss", "/di\r\nr")
+        // Raw text must contain literal escape sequences, not raw control characters.
+        assertTrue(json.contains("\"rpc-username\": \"u\\nx\""))
+        assertTrue(json.contains("\"rpc-password\": \"pa\\tss\""))
+        assertTrue(json.contains("\"download-dir\": \"/di\\r\\nr\""))
+    }
+
+    @Test fun buildSettingsJson_unnamedControlCharsEscapeAsUnicode() {
+        val json = TransmissionConfig.buildSettingsJson("u\u0001x", "p", "/d\u0001")
+        assertTrue(json.contains("\"rpc-username\": \"u\\u0001x\""))
+        assertTrue(json.contains("\"download-dir\": \"/d\\u0001\""))
+    }
+
+    @Test fun buildSettingsJson_controlCharFieldsRoundTripThroughJsonParser() {
+        val username = "u\nx\t\"q\"\\y"
+        val dir = "/d\ri\tf\u0008u"
+        val json = TransmissionConfig.buildSettingsJson(username, "p", dir)
+        val parsed = JSONObject(json)
+        assertEquals(username, parsed.getString("rpc-username"))
+        assertEquals(dir, parsed.getString("download-dir"))
     }
 }
