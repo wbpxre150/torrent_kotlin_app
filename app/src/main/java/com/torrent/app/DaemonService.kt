@@ -41,6 +41,8 @@ import com.torrent.app.backup.Bep51BootstrapDownloader
 import com.torrent.app.backup.BootstrapResult
 import com.torrent.app.backup.CrawlerDbDumper
 import com.torrent.app.backup.DbBackupManager
+import com.torrent.app.backup.DbRestoreManager
+import com.torrent.app.backup.S3DbRestorer
 
 sealed class ServiceState {
     data object Starting : ServiceState()
@@ -133,6 +135,12 @@ class DaemonService : Service() {
     // mirror the crawler lifecycle ops. The bookmark file (filesDir/backup)
     // advances only after a successful upload (upload-first ordering).
     private lateinit var dbBackup: DbBackupManager
+    // DB restore (plan 2, Stage 4): an explicit, dashboard-triggered one-shot
+    // that replays the R2 dump chain into a fresh torrents.db (stops the
+    // crawler, downloads + gunzips the chain, runs --restore-database, resets
+    // the bookmark only on success). Runs on the crawler-control executor;
+    // the busy predicates of maintenance/backup include its running state.
+    private lateinit var dbRestore: DbRestoreManager
     // Stage 5: in-memory rate limit for failed BEP51 bootstrap attempts —
     // a failure is not retried (on a later start) for at least one hour.
     @Volatile private var bep51BootstrapFailureAt: Long? = null
@@ -172,7 +180,10 @@ class DaemonService : Service() {
             freeSpace = ::internalFreeSpace,
             stopCrawler = { stopCrawlerSupervisors() },
             startCrawlerIfEnabled = ::startCrawlerIfEnabled,
-            busy = { crawlerApplyStatus.phase.isActive },
+            busy = {
+                crawlerApplyStatus.phase.isActive ||
+                    dbRestore.status.running
+            },
         )
         // BEP51 cache backup (Stage 4): the cache file lives in the crawler's
         // data dir; a running maintenance job counts as busy (its status is
@@ -184,7 +195,8 @@ class DaemonService : Service() {
             loadSettings = { configStore.load().backup },
             isBusy = {
                 crawlerApplyStatus.phase.isActive ||
-                    crawlerMaintenance.status.running
+                    crawlerMaintenance.status.running ||
+                    dbRestore.status.running
             },
             isWifi = { wifiGateMonitor.state.value.wifi },
             clientFactory = { s ->
@@ -210,7 +222,8 @@ class DaemonService : Service() {
             loadSettings = { configStore.load().backup },
             isBusy = {
                 crawlerApplyStatus.phase.isActive ||
-                    crawlerMaintenance.status.running
+                    crawlerMaintenance.status.running ||
+                    dbRestore.status.running
             },
             isWifi = { wifiGateMonitor.state.value.wifi },
             clientFactory = { s ->
@@ -227,6 +240,37 @@ class DaemonService : Service() {
             bookmarkFile = { File(filesDir, "backup/db_bookmark.txt") },
             readLastSuccessDate = { configStore.lastDbBackupSuccessDate() },
             writeLastSuccessDate = { configStore.setDbBackupSuccessDate(it) },
+        )
+        // DB restore (plan 2, Stage 4): one-shot, no scheduler. Reuses the
+        // crawler-control executor (the 60 s stop + the one-shot must not run
+        // on a request thread) and the same bookmark file as the backup.
+        dbRestore = DbRestoreManager(
+            loadSettings = { configStore.load().backup },
+            isBusy = {
+                crawlerApplyStatus.phase.isActive ||
+                    crawlerMaintenance.status.running ||
+                    bep51Backup.status.state == com.torrent.app.backup.BackupState.RUNNING ||
+                    dbBackup.status.state == com.torrent.app.backup.DbBackupState.RUNNING
+            },
+            clientFactory = { s ->
+                val client = com.torrent.app.s3.S3Client(
+                    endpoint = s.r2Endpoint,
+                    bucket = s.r2DbBucket,
+                    accessKeyId = s.r2AccessKeyId,
+                    secretAccessKey = s.r2SecretAccessKey,
+                )
+                object : S3DbRestorer {
+                    override fun list(prefix: String): com.torrent.app.s3.S3ListResult = client.list(prefix)
+                    override fun get(objectKey: String): com.torrent.app.s3.S3GetResult = client.get(objectKey)
+                }
+            },
+            oneShot = { args, dir, onLine -> oneShotRunner.run(args, dir, onLine) },
+            workDir = { File(filesDir, "crawler") },
+            tmpDir = { File(filesDir, "tmp") },
+            bookmarkFile = { File(filesDir, "backup/db_bookmark.txt") },
+            stopCrawler = { stopCrawlerSupervisors() },
+            startCrawlerIfEnabled = ::startCrawlerIfEnabled,
+            executor = crawlerControlExecutor,
         )
         // Plan 10 §4: register the crawler supervisor up-front so dht_crawler
         // is always listed in the daemons table (STOPPED until something starts
@@ -267,6 +311,8 @@ class DaemonService : Service() {
             crawlerBackupStatus = { bep51Backup.status },
             crawlerBackupDbUpload = { dbBackup.uploadNow(manual = true).message },
             crawlerBackupDbStatus = { dbBackup.status },
+            crawlerRestoreDb = { dbRestore.restoreNow().message },
+            crawlerRestoreDbStatus = { dbRestore.status },
 )
         wifiGateMonitor = WifiGateMonitor(this)
         ftpHangWatchdog = FtpHangWatchdog(
@@ -340,6 +386,7 @@ class DaemonService : Service() {
         controlServer.stop()
         bep51Backup.stop()
         dbBackup.stop()
+        dbRestore.stop()
         crawlerProxy?.stop()
         crawlerProxy = null
         ftpObservingJob?.cancel()

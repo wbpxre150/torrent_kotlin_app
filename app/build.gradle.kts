@@ -383,7 +383,7 @@ tasks.register("fetchSqlite") {
     }
 }
 tasks.register("prepareDhtCrawlerSrc") {
-    description = "Copy dht_crawler sources to build/native/src/dht_crawler and apply the 3 patches"
+    description = "Copy dht_crawler sources to build/native/src/dht_crawler and apply the patches"
 
     val crawlerSrc = providers.gradleProperty("dhtCrawlerSrc").orNull?.let { file(it).absoluteFile }
         ?: file("src/main/cpp/dht_crawler")
@@ -414,12 +414,13 @@ tasks.register("prepareDhtCrawlerSrc") {
             // also trips the daemon JVM's non-UTF-8 filename encoding on this host
             exclude("lib/civetweb/test")
         }
-        // 3. Apply the three upstream patches (same order as the upstream Makefile)
+        // 3. Apply the upstream patches in the fixed order below (new patches go LAST)
         for (patchName in listOf(
             "bencode-cap-fix.patch",
             "bencode-init-fix.patch",
             "civetweb-stop-flag-atomic.patch",
-            "bep51-periodic-cache-save.patch"
+            "bep51-periodic-cache-save.patch",
+            "restore-database.patch"
         )) {
             project.exec {
                 commandLine("patch", "-p1", "-d", destDir.absolutePath, "-i", file("$destDir/patches/$patchName").absolutePath)

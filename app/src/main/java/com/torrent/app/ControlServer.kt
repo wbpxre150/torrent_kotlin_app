@@ -62,6 +62,12 @@ class ControlServer(
     private val crawlerBackupDbUpload: () -> String = { "DB backup is not wired" },
     private val crawlerBackupDbStatus: () -> com.torrent.app.backup.DbBackupStatus =
         { com.torrent.app.backup.DbBackupStatus() },
+    // DB restore (plan 2, Stage 4): the POST route queues an explicit
+    // restore of the crawler DB from the R2 dump chain; the GET route
+    // polls the manager's status (no secrets).
+    private val crawlerRestoreDb: () -> String = { "DB restore is not wired" },
+    private val crawlerRestoreDbStatus: () -> com.torrent.app.backup.DbRestoreStatus =
+        { com.torrent.app.backup.DbRestoreStatus() },
     private val port: Int = 8090,
 ) {
     @Volatile private var server: EmbeddedServer<*, *>? = null
@@ -318,6 +324,24 @@ class ControlServer(
                     // DB backup status JSON for the crawler panel poller.
                     get("api/crawler/backup/db") {
                         call.respondText(dbBackupStatusJson(crawlerBackupDbStatus()), ContentType.Application.Json)
+                    }
+
+                    // DB restore (plan 2, Stage 4): queue an explicit restore
+                    // of the crawler DB from the R2 dump chain (stops the
+                    // crawler, downloads + gunzips the whole chain, runs
+                    // `--restore-database`, resets the bookmark on success);
+                    // the page polls /api/crawler/restore for the result.
+                    post("crawler/restore/db") {
+                        val msg = crawlerRestoreDb()
+                        val ok = !msg.startsWith("refused")
+                        val token = parseCookieToken(call.request.headers["Cookie"])
+                            ?: call.request.queryParameters["token"] ?: ""
+                        call.respondRedirect("/settings/crawler?msg=${urlEnc(msg)}&ok=$ok&token=$token")
+                    }
+
+                    // DB restore status JSON for the crawler panel poller.
+                    get("api/crawler/restore") {
+                        call.respondText(restoreStatusJson(crawlerRestoreDbStatus()), ContentType.Application.Json)
                     }
                 }
             }
@@ -747,6 +771,16 @@ class ControlServer(
                 }).catch(function () {});
               }
               setInterval(pollDbBackup, 5000); pollDbBackup();
+              function pollDbRestore() {
+                fetch('/api/crawler/restore').then(function (r) { return r.json(); }).then(function (st) {
+                  var box = document.getElementById('db-restore-status');
+                  var text = 'DB restore: ' + st.state + (st.message ? ' \u2014 ' + st.message : '');
+                  if (st.objectCount != null) text += ' (' + st.objectCount + ' objects)';
+                  if (st.lastSuccess != null) text += ' (last success ' + new Date(st.lastSuccess).toLocaleString() + ')';
+                  box.textContent = text;
+                }).catch(function () {});
+              }
+              setInterval(pollDbRestore, 5000); pollDbRestore();
             })();
             </script>
             </body></html>
@@ -794,9 +828,10 @@ class ControlServer(
         """.trimIndent()
     }
 
-    /** The DB dump backup section on the crawler panel (plan 2, Stage 3). */
+    /** The DB dump backup + restore section on the crawler panel (plan 2, Stage 3+4). */
     private fun buildDbBackupSection(): String {
         val st = crawlerBackupDbStatus()
+        val rst = crawlerRestoreDbStatus()
         val enabledNote = if (st.uploadEnabled) "" else
             "<p class=\"warn\">DB dump upload is disabled — tick <em>Enable daily DB dump upload</em> above and apply first.</p>"
         return """
@@ -811,6 +846,17 @@ class ControlServer(
                     onsubmit="return confirm('Upload the crawler DB dump to R2 now?')">
               <button type="submit">Upload now</button></form>
               <div id="db-backup-status" class="meta">DB backup: ${st.state.name}</div>
+            </fieldset>
+            <fieldset><legend>DB restore (replay the R2 dump chain into a fresh database)</legend>
+              <p class="meta">Stops the crawler, downloads + gunzips every dump object in the DB bucket
+              (in chain order), and runs <code>libdhtcrawler.so --restore-database</code> to replay them into a
+              fresh <code>torrents.db</code>, swapped in atomically. On success the upload bookmark resets to
+              first run. The crawler is restarted afterwards in all outcomes. Needs the R2 endpoint/keys
+              and the DB bucket configured (the upload toggle is not required).</p>
+              <form method="post" action="/crawler/restore/db"
+                    onsubmit="return confirm('Restore the crawler DB from R2 now? This replaces torrents.db and the crawler is stopped while it runs.')">
+              <button type="submit">Restore now</button></form>
+              <div id="db-restore-status" class="meta">DB restore: ${rst.state.name}</div>
             </fieldset>
         """.trimIndent()
     }
@@ -952,6 +998,29 @@ class ControlServer(
             append(",\"statementCount\":").append(st.statementCount?.toString() ?: "null")
             append(",\"objectKey\":").append(jsonStr(st.objectKey))
             append(",\"uploadEnabled\":").append(st.uploadEnabled)
+            append(",\"configured\":").append(st.configured).append("}")
+        }
+
+        /**
+         * The /api/crawler/restore response body (plan 2, Stage 4): state,
+         * running, message, last attempt/success epoch millis, the last
+         * restore's object count + keys, the one-shot exit code and the
+         * output tail. Secrets never appear here.
+         */
+        internal fun restoreStatusJson(st: com.torrent.app.backup.DbRestoreStatus): String = buildString {
+            append("{\"state\":\"").append(st.state.name).append("\"")
+            append(",\"running\":").append(st.running)
+            append(",\"message\":").append(jsonStr(st.message))
+            append(",\"lastAttempt\":").append(st.lastAttempt?.toString() ?: "null")
+            append(",\"lastSuccess\":").append(st.lastSuccess?.toString() ?: "null")
+            append(",\"objectCount\":").append(st.objectCount?.toString() ?: "null")
+            append(",\"objectKeys\":[").append(
+                st.objectKeys.joinToString(",") { jsonStr(it) }).append("]")
+            append(",\"exitCode\":").append(st.exitCode?.toString() ?: "null")
+            append(",\"lines\":[").append(
+                st.lines.joinToString(",") { jsonStr(it) }).append("]")
+            append(",\"startedAt\":").append(st.startedAt?.toString() ?: "null")
+            append(",\"finishedAt\":").append(st.finishedAt?.toString() ?: "null")
             append(",\"configured\":").append(st.configured).append("}")
         }
 
