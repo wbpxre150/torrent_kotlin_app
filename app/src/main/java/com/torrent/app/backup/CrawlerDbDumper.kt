@@ -37,6 +37,36 @@ class CrawlerDbDumper(
     }
 
     /**
+     * [DbDumper.maxCursors] implementation: opens the DB read-only and reads
+     * `SELECT MAX(id)` from the two base tables inside ONE read transaction.
+     * An empty table (MAX is NULL) maps to the [DbBookmark.FIRST_RUN] value
+     * (`-1`). No row data is ever read, so this stays cheap on a huge DB.
+     */
+    override fun maxCursors(dbFile: File): DbBookmark {
+        require(dbFile.isFile) { "crawler DB not found: ${dbFile.path}" }
+        val db = SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
+        try {
+            db.beginTransactionNonExclusive()
+            try {
+                return DbBookmark(
+                    maxIdOrNull(db, TABLE_TORRENTS),
+                    maxIdOrNull(db, TABLE_PATH_PREFIXES))
+            } finally {
+                db.endTransaction()
+            }
+        } finally {
+            db.close()
+        }
+    }
+
+    /** `SELECT MAX(id)` — empty table (NULL) → -1 (the [DbBookmark.FIRST_RUN] sentinel). */
+    private fun maxIdOrNull(db: SQLiteDatabase, table: String): Long {
+        db.rawQuery("SELECT MAX(id) FROM $table", null).use { c ->
+            return if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else -1L
+        }
+    }
+
+    /**
      * [CrawlerDbSource] over one open [SQLiteDatabase]. The caller holds
      * the read transaction for the whole [snapshot] call.
      */

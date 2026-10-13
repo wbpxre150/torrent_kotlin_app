@@ -305,4 +305,19 @@ class CrawlerDbDumperTest {
             fresh.close()
         }
     }
+
+    @Test
+    fun maxCursorsReturnsCurrentMaxIds() {
+        // The fixture DB has 3 torrents and 2 path_prefixes.
+        assertEquals(DbBookmark(3, 2), dumper.maxCursors(dbFile))
+    }
+
+    @Test
+    fun maxCursorsOnEmptyDbReturnsFirstRunSentinel() {
+        val emptyFile = File(dbFile.parentFile, "empty-max.db")
+        emptyFile.delete()
+        createDb(emptyFile).use { }
+        // Both tables empty -> MAX(id) is NULL -> FIRST_RUN (-1, -1).
+        assertEquals(DbBookmark.FIRST_RUN, dumper.maxCursors(emptyFile))
+    }
 }

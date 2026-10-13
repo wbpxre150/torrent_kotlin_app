@@ -433,7 +433,7 @@ class DbRestoreManagerTest {
         assertEquals(0, flags.stopCount)
     }
 
-    @Test fun chainMissingBaseline_failsRestartsCrawlerAndKeepsBookmark() {
+    @Test fun chainStartingAtNonZeroId_succeedsAndSurfacesChainStart() {
         val restorer = FakeRestorer()
         val runner = FakeRunner()
         val bookmarkFile = File(tmp.root, "db_bookmark.txt")
@@ -448,17 +448,42 @@ class DbRestoreManagerTest {
 
         val st = m.runRestore()
 
-        assertEquals(DbRestoreState.FAILED, st.state)
-        assertTrue(st.message, st.message.contains("missing its baseline"))
-        assertTrue(st.message, st.message.contains("id 5"))
-        // The incomplete chain must not be downloaded or replayed.
-        assertEquals(0, restorer.getOrder.size)
-        assertEquals(0, runner.calls)
-        // Crawler restarted, temp file cleaned, bookmark untouched.
+        // With seeded baselines the chain legitimately starts at ANY id: a
+        // single object starting at id 5 is a valid chain, so it restores.
+        assertEquals(DbRestoreState.SUCCESS, st.state)
+        assertTrue(st.message, st.message.contains("chain starts at torrent id 5"))
+        assertTrue(st.message, st.message.contains("pre-baseline history is not in the bucket"))
+        // The (truncated-but-valid) chain IS downloaded and replayed.
+        assertEquals(listOf("db/incremental_20231114_5-10.sql.gz"), restorer.getOrder)
+        assertEquals(1, runner.calls)
+        // Crawler restarted, temp file cleaned; a zero exit resets the
+        // bookmark to first run.
         assertEquals(1, flags.stopCount)
         assertEquals(1, flags.startCount)
-        assertEquals(DbBookmark(5, 1), DbBookmark.read(bookmarkFile))
+        assertEquals(DbBookmark.FIRST_RUN, DbBookmark.read(bookmarkFile))
         assertTrue(tempFiles(File(tmp.root, "tmp")).isEmpty())
+    }
+
+    @Test fun chainStartingAtNonZeroContiguous_succeeds() {
+        val restorer = FakeRestorer()
+        val runner = FakeRunner()
+        val (m, _, _) = newManager(
+            restorer, runner,
+            objects = listOf(
+                "db/incremental_20231114_10-20.sql.gz" to "A",
+                "db/incremental_20231115_21-30.sql.gz" to "B",
+            ),
+        )
+
+        val st = m.runRestore()
+
+        // Two contiguous objects starting at id 10 (10-20, 21-30): valid.
+        assertEquals(DbRestoreState.SUCCESS, st.state)
+        assertTrue(st.message, st.message.contains("chain starts at torrent id 10"))
+        assertEquals(
+            listOf("db/incremental_20231114_10-20.sql.gz", "db/incremental_20231115_21-30.sql.gz"),
+            restorer.getOrder)
+        assertEquals(2, st.objectCount)
     }
 
     @Test fun chainWithGap_failsWithGapMessage() {

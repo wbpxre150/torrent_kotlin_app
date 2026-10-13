@@ -221,17 +221,13 @@ class DbRestoreManager(
                 throw IllegalStateException("nothing to restore: no parseable dump objects " +
                     "under ${prefixDir(settings)}")
             }
-            // Chain coherence (the plan 2 invariant: nothing in the chain
-            // can ever be safely deleted): a missing baseline or a gap
-            // between consecutive objects means the bucket is incomplete,
-            // and restoring a truncated chain would silently drop rows.
-            // Fail in both cases — do not warn and proceed.
+            // Chain coherence: with seeded baselines the chain legitimately
+            // starts at ANY id — the first object's start defines the chain
+            // start (pre-baseline history is deliberately not in the bucket) —
+            // so there is no "missing baseline" failure. A GAP between
+            // consecutive objects, however, means the bucket is incomplete and
+            // restoring it would silently drop rows — fail that case.
             val first = chain.first().second
-            if (first.start != 0L) {
-                throw IllegalStateException(
-                    "backup chain is missing its baseline (earliest object starts at id " +
-                        "${first.start}, expected 0)")
-            }
             for (i in 0 until chain.size - 1) {
                 val (keyA, a) = chain[i]
                 val (keyB, b) = chain[i + 1]
@@ -275,7 +271,9 @@ class DbRestoreManager(
                 DbBookmark.write(bookmarkFile(), DbBookmark.FIRST_RUN)
                 finish(
                     DbRestoreState.SUCCESS,
-                    "restored ${keys.size} object(s); bookmark reset to first run",
+                    "restored ${keys.size} object(s); chain starts at torrent id " +
+                        "${first.start} (pre-baseline history is not in the " +
+                        "bucket); bookmark reset to first run",
                     exitCode = exitCode,
                     lastSuccess = clock(),
                 )

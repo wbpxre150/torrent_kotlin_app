@@ -64,14 +64,25 @@ class DbBackupManagerTest {
     }
 
     /** Scripted [DbDumper]; records the bookmark it was given. */
-    private class FakeDumper(var outcome: DbDumpOutcome = testDumpOutcome()) : DbDumper {
+    private class FakeDumper(
+        var outcome: DbDumpOutcome = testDumpOutcome(),
+        var maxCursorsResult: DbBookmark = DbBookmark(-1, -1),
+    ) : DbDumper {
         var calls = 0
+        var maxCalls = 0
         var lastBookmark: DbBookmark? = null
+        var lastMaxFile: File? = null
 
         override fun dump(dbFile: File, bookmark: DbBookmark): DbDumpOutcome {
             calls++
             lastBookmark = bookmark
             return outcome
+        }
+
+        override fun maxCursors(dbFile: File): DbBookmark {
+            maxCalls++
+            lastMaxFile = dbFile
+            return maxCursorsResult
         }
     }
 
@@ -215,8 +226,12 @@ class DbBackupManagerTest {
         val throwing = object : DbDumper {
             override fun dump(dbFile: File, bookmark: DbBookmark): DbDumpOutcome =
                 throw IOException("database is locked")
+            override fun maxCursors(dbFile: File): DbBookmark = DbBookmark(-1, -1)
         }
         val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        // A valid bookmark file makes the check take the dump path (the
+        // throwing dumper), not the new missing-bookmark seed path.
+        DbBookmark.write(bookmarkFile, DbBookmark.FIRST_RUN)
         val m = DbBackupManager(
             dbFile = { dbFile() },
             dumperFactory = { throwing },
@@ -238,6 +253,7 @@ class DbBackupManagerTest {
         val up = FakeUploader()
         val d = FakeDumper()
         val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        DbBookmark.write(bookmarkFile, DbBookmark.FIRST_RUN)
         var stored: String? = null
         val m = newManager(
             dbFile(), d, up,
@@ -270,6 +286,7 @@ class DbBackupManagerTest {
         val up = FakeUploader().apply { result = S3PutResult.ClientError(403, "Forbidden") }
         val d = FakeDumper()
         val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        DbBookmark.write(bookmarkFile, DbBookmark.FIRST_RUN)
         val m = newManager(dbFile(), d, up, bookmarkFile = bookmarkFile)
         val st = m.runCheck(manual = true)
         assertEquals(DbBackupState.FAILED, st.state)
@@ -299,6 +316,7 @@ class DbBackupManagerTest {
         }
         val d = FakeDumper()
         val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        DbBookmark.write(bookmarkFile, DbBookmark.FIRST_RUN)
         val m = newManager(dbFile(), d, up, bookmarkFile = bookmarkFile)
         val st = m.runCheck(manual = true)
         assertEquals(DbBackupState.FAILED, st.state)
@@ -310,6 +328,7 @@ class DbBackupManagerTest {
         val up = FakeUploader().apply { result = S3PutResult.Failure(IOException("no route to host")) }
         val d = FakeDumper()
         val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        DbBookmark.write(bookmarkFile, DbBookmark.FIRST_RUN)
         val m = newManager(
             dbFile(), d, up,
             bookmarkFile = bookmarkFile,
@@ -332,9 +351,12 @@ class DbBackupManagerTest {
         val d = FakeDumper()
         var stored: String? = null
         var now = DAY1
+        val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        DbBookmark.write(bookmarkFile, DbBookmark.FIRST_RUN)
         val m = newManager(
             dbFile(), d, up,
             clock = { now },
+            bookmarkFile = bookmarkFile,
             lastSuccessDate = { stored },
             writeLastSuccessDate = { stored = it },
         )
@@ -355,8 +377,11 @@ class DbBackupManagerTest {
         val up = FakeUploader()
         val d = FakeDumper()
         var stored: String? = null
+        val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        DbBookmark.write(bookmarkFile, DbBookmark.FIRST_RUN)
         val m = newManager(
             dbFile(), d, up,
+            bookmarkFile = bookmarkFile,
             lastSuccessDate = { stored },
             writeLastSuccessDate = { stored = it },
         )
@@ -380,7 +405,9 @@ class DbBackupManagerTest {
     @Test fun uploadNowQueuesThenRunsCheck() {
         val up = FakeUploader()
         val noop = NoopScheduledExecutorService()
-        val m = newManager(dbFile(), FakeDumper(), up, executor = noop)
+        val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        DbBookmark.write(bookmarkFile, DbBookmark.FIRST_RUN)
+        val m = newManager(dbFile(), FakeDumper(), up, bookmarkFile = bookmarkFile, executor = noop)
         val first = m.uploadNow(manual = true)
         // Acceptance no longer flips the state to RUNNING: it only carries a
         // "queued" message until the check writes a real outcome.
@@ -435,9 +462,12 @@ class DbBackupManagerTest {
         val d = FakeDumper()
         var stored: String? = null
         var now = DAY1
+        val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        DbBookmark.write(bookmarkFile, DbBookmark.FIRST_RUN)
         val m = newManager(
             dbFile(), d, up,
             clock = { now },
+            bookmarkFile = bookmarkFile,
             lastSuccessDate = { stored },
             writeLastSuccessDate = { stored = it },
         )
@@ -459,6 +489,9 @@ class DbBackupManagerTest {
         val up = FakeUploader()
         val noop = NoopScheduledExecutorService()
         val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        // A valid bookmark file makes the check take the dump path (where
+        // [duringDump] is sampled), not the new missing-bookmark seed path.
+        DbBookmark.write(bookmarkFile, DbBookmark.FIRST_RUN)
         lateinit var m: DbBackupManager
         var duringDump = false
         val d = object : DbDumper {
@@ -466,6 +499,7 @@ class DbBackupManagerTest {
                 duringDump = m.inFlight
                 return testDumpOutcome()
             }
+            override fun maxCursors(dbFile: File): DbBookmark = DbBookmark(-1, -1)
         }
         m = DbBackupManager(
             dbFile = { dbFile() },
@@ -490,5 +524,90 @@ class DbBackupManagerTest {
         // In flight while the check ran; cleared once it completed.
         assertTrue(duringDump)
         assertFalse(m.inFlight)
+    }
+
+    @Test fun missingBookmarkSeedsBaselineAndUploadsNothing() {
+        val up = FakeUploader()
+        val d = FakeDumper(maxCursorsResult = DbBookmark(100, 5))
+        val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        var stored: String? = null
+        val m = newManager(
+            dbFile(), d, up,
+            bookmarkFile = bookmarkFile,
+            lastSuccessDate = { stored },
+            writeLastSuccessDate = { stored = it },
+        )
+        val st = m.runCheck(manual = true)
+        assertEquals(DbBackupState.SEEDED, st.state)
+        assertTrue(st.message, st.message.contains("baseline seeded at torrent id 100"))
+        assertTrue(st.message, st.message.contains("prefix id 5"))
+        assertTrue(st.message, st.message.contains("history before the baseline is not uploaded"))
+        // The baseline bookmark was written to the peeked max ids.
+        assertEquals(DbBookmark(100, 5), DbBookmark.read(bookmarkFile))
+        // No upload happened and nothing counts as a success.
+        assertEquals(0, up.calls)
+        assertNull(st.lastSuccess)
+        assertNotNull(st.lastAttempt)
+        // The cheap peek ran once; the dump path never ran.
+        assertEquals(1, d.maxCalls)
+        assertEquals(0, d.calls)
+        // The daily date is NOT persisted: the next periodic check the same
+        // day proceeds to the normal incremental path.
+        assertNull(stored)
+    }
+
+    @Test fun missingBookmarkThenNextRunUsesIncrementalPath() {
+        val up = FakeUploader()
+        val d = FakeDumper(
+            outcome = testDumpOutcome(
+                cursor = DbBookmark(101, 6),
+                objectKey = "db/incremental_20231114_101-101.sql.gz"),
+            maxCursorsResult = DbBookmark(100, 5))
+        val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        val m = newManager(dbFile(), d, up, bookmarkFile = bookmarkFile)
+        // First run: no bookmark -> seed the baseline, upload nothing.
+        val first = m.runCheck(manual = true)
+        assertEquals(DbBackupState.SEEDED, first.state)
+        assertEquals(DbBookmark(100, 5), DbBookmark.read(bookmarkFile))
+        assertEquals(0, up.calls)
+        // Second run: the bookmark now exists -> the normal incremental path.
+        val second = m.runCheck(manual = true)
+        assertEquals(DbBackupState.SUCCESS, second.state)
+        assertEquals(1, d.calls)
+        assertEquals(DbBookmark(100, 5), d.lastBookmark)
+        assertEquals(1, up.calls)
+    }
+
+    @Test fun missingBookmarkEmptyDbSeedsFirstRunSentinel() {
+        val up = FakeUploader()
+        // Empty tables -> MAX(id) is NULL -> FIRST_RUN (-1, -1).
+        val d = FakeDumper(maxCursorsResult = DbBookmark(-1, -1))
+        val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        val m = newManager(dbFile(), d, up, bookmarkFile = bookmarkFile)
+        val st = m.runCheck(manual = true)
+        assertEquals(DbBackupState.SEEDED, st.state)
+        assertEquals(DbBookmark.FIRST_RUN, DbBookmark.read(bookmarkFile))
+        assertEquals(0, up.calls)
+        // A later run now has a FIRST_RUN bookmark -> dumps everything as before.
+        d.outcome = testDumpOutcome()
+        val second = m.runCheck(manual = true)
+        assertEquals(DbBackupState.SUCCESS, second.state)
+        assertEquals(DbBookmark.FIRST_RUN, d.lastBookmark)
+        assertEquals(1, up.calls)
+    }
+
+    @Test fun existingBookmarkDoesNotSeed() {
+        val up = FakeUploader()
+        // A valid (FIRST_RUN) bookmark file exists -> the normal dump path; the
+        // expensive MAX() peek must NOT run.
+        val d = FakeDumper(maxCursorsResult = DbBookmark(999, 999))
+        val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        DbBookmark.write(bookmarkFile, DbBookmark.FIRST_RUN)
+        val m = newManager(dbFile(), d, up, bookmarkFile = bookmarkFile)
+        val st = m.runCheck(manual = true)
+        assertEquals(DbBackupState.SUCCESS, st.state)
+        assertEquals(0, d.maxCalls)
+        assertEquals(1, d.calls)
+        assertEquals(DbBookmark.FIRST_RUN, d.lastBookmark)
     }
 }

@@ -31,12 +31,26 @@ data class DbBookmark(val lastTorrentId: Long, val lastPrefixId: Long) {
          * Reads the bookmark from [file]. Missing file, unreadable file,
          * missing line, non-integer value, or any value < 0 → [FIRST_RUN].
          */
-        fun read(file: File): DbBookmark {
-            if (!file.isFile) return FIRST_RUN
+        fun read(file: File): DbBookmark = readOrNull(file) ?: FIRST_RUN
+
+        /**
+         * Reads the bookmark from [file], returning `null` only when no valid
+         * bookmark file exists (file missing, unreadable, missing a line, a
+         * non-integer value, or a negative value other than the [FIRST_RUN]
+         * sentinel). A valid file — including one that holds [FIRST_RUN]
+         * (`-1`, `-1`) — returns its parsed [DbBookmark].
+         *
+         * Used by [DbBackupManager] to tell "first-ever run against a
+         * pre-existing DB" (null → seed the baseline) apart from "a bookmark
+         * already exists" (non-null → the normal incremental path, which for a
+         * freshly restored/installed small DB dumps everything and is small).
+         */
+        fun readOrNull(file: File): DbBookmark? {
+            if (!file.isFile) return null
             val text = try {
                 file.readText()
             } catch (e: IOException) {
-                return FIRST_RUN
+                return null
             }
             var torrentId: Long? = null
             var prefixId: Long? = null
@@ -50,9 +64,10 @@ data class DbBookmark(val lastTorrentId: Long, val lastPrefixId: Long) {
                         prefixId = line.removePrefix(PREFIX_KEY).toLongOrNull()
                 }
             }
-            val t = torrentId ?: return FIRST_RUN
-            val p = prefixId ?: return FIRST_RUN
-            if (t < 0L || p < 0L) return FIRST_RUN
+            val t = torrentId ?: return null
+            val p = prefixId ?: return null
+            if (t == -1L && p == -1L) return FIRST_RUN
+            if (t < 0L || p < 0L) return null
             return DbBookmark(t, p)
         }
 

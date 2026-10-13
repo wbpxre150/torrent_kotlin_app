@@ -26,9 +26,22 @@ fun interface S3DbUploader {
  * One incremental dump of the crawler database (plan 2, Stage 1+2). The
  * production adapter is [CrawlerDbDumper]; unit tests of
  * [DbBackupManager] fake this seam.
+ *
+ * [maxCursors] peeks the current max ids WITHOUT dumping any rows (a cheap
+ * `SELECT MAX(id)` per base table) so the manager can seed the baseline
+ * bookmark on a first-ever run against a pre-existing (potentially huge) DB
+ * without materializing its history in RAM.
  */
-fun interface DbDumper {
+interface DbDumper {
     fun dump(dbFile: File, bookmark: DbBookmark): DbDumpOutcome
+
+    /**
+     * The DB's current max ids as a [DbBookmark] (an empty table maps to its
+     * [DbBookmark.FIRST_RUN] value, i.e. `-1`). Reads no row data — a
+     * `SELECT MAX(id)` per base table inside one read transaction — so it
+     * stays cheap even on a multi-ten-GB database.
+     */
+    fun maxCursors(dbFile: File): DbBookmark
 }
 
 /** Outcome states of the last DB dump upload check. */
@@ -36,6 +49,7 @@ enum class DbBackupState {
     IDLE,
     RUNNING,
     SUCCESS,
+    SEEDED,
     FAILED,
     SKIPPED_BUSY,
     SKIPPED_NO_WIFI,
@@ -82,8 +96,11 @@ data class DbBackupStatus(
  * [DbBackupState.NOT_CONFIGURED]; [isBusy] →
  * [DbBackupState.SKIPPED_BUSY]; no Wi-Fi → [DbBackupState.SKIPPED_NO_WIFI];
  * daily gate; DB file missing → [DbBackupState.SKIPPED_NO_DB];
- * [DbDumper] skips (empty range) → [DbBackupState.SKIPPED_EMPTY]; otherwise
- * PUT the gzip dump → [DbBackupState.SUCCESS] / [DbBackupState.FAILED].
+ * bookmark missing (first-ever run against a pre-existing DB) →
+ * [DbBackupState.SEEDED] (seed the baseline via [DbDumper.maxCursors],
+ * upload nothing); [DbDumper] skips (empty range) →
+ * [DbBackupState.SKIPPED_EMPTY]; otherwise PUT the gzip dump →
+ * [DbBackupState.SUCCESS] / [DbBackupState.FAILED].
  *
  * Upload-first ordering (the critical invariant): the [DbBookmark] is
  * advanced to the dump's [DbDumpOutcome.Dump.newCursor] ONLY after a
@@ -223,7 +240,42 @@ class DbBackupManager(
             return finish(DbBackupState.SKIPPED_NO_DB, "skipped: crawler DB is missing",
                 uploadEnabled = true, configured = true)
         }
-        val bookmark = DbBookmark.read(bookmarkFile())
+        val bookmark = DbBookmark.readOrNull(bookmarkFile())
+        if (bookmark == null) {
+            // First-ever run against a pre-existing DB: there is no baseline
+            // bookmark yet, and the existing history is deliberately NOT
+            // uploaded — it can be tens of GB (a full dump would OOM on the
+            // 402 MB heap and exceed S3's 5 GB single-PUT limit). Seed the
+            // baseline at the current max ids via a cheap MAX() peek (never a
+            // row dump) and upload nothing. lastAttempt is set (it is an
+            // attempt) but lastSuccess is NOT (nothing was uploaded). The
+            // daily date is deliberately NOT persisted, so the next periodic
+            // check the same day proceeds to the normal incremental path and
+            // uploads any rows discovered after the baseline.
+            val dumper = dumperFactory(settings)
+            val seeded = try {
+                dumper.maxCursors(file)
+            } catch (e: Exception) {
+                return finish(
+                    DbBackupState.FAILED,
+                    "baseline seed failed: ${e.message ?: e.javaClass.simpleName}",
+                    uploadEnabled = true, configured = true)
+            }
+            try {
+                DbBookmark.write(bookmarkFile(), seeded)
+            } catch (e: Exception) {
+                return finish(
+                    DbBackupState.FAILED,
+                    "baseline seed write failed: ${e.message ?: e.javaClass.simpleName}",
+                    uploadEnabled = true, configured = true)
+            }
+            return finish(
+                DbBackupState.SEEDED,
+                "baseline seeded at torrent id ${seeded.lastTorrentId}, " +
+                    "prefix id ${seeded.lastPrefixId}; history before the " +
+                    "baseline is not uploaded",
+                uploadEnabled = true, configured = true)
+        }
         val outcome = try {
             dumperFactory(settings).dump(file, bookmark)
         } catch (e: Exception) {
