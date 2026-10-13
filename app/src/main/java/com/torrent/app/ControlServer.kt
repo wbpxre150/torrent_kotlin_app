@@ -15,6 +15,7 @@ import java.util.concurrent.TimeUnit
 import com.torrent.app.config.TransmissionApplyMode
 import com.torrent.app.config.CrawlerKeys
 import com.torrent.app.config.CrawlerSettings
+import com.torrent.app.config.BackupSettings
 import com.torrent.app.migration.MigrationPhase
 import com.torrent.app.migration.MigrationStatus
 
@@ -38,6 +39,10 @@ class ControlServer(
     // Crawler (plan 10 step 2): wired by DaemonService; the UI arrives in step 3.
     private val applyCrawler: (com.torrent.app.config.CrawlerSettings) -> com.torrent.app.config.ApplyResult =
         { com.torrent.app.config.ApplyResult(false, "crawler apply is not wired", false) },
+    // App-side backup/bootstrap settings (Stage 2): carried by the crawler
+    // panel form; the save is a plain store write (no daemon is touched).
+    private val saveBackup: (com.torrent.app.config.BackupSettings) -> com.torrent.app.config.ApplyResult =
+        { com.torrent.app.config.ApplyResult(false, "backup settings are not wired", false) },
     private val crawlerApplyStatus: () -> CrawlerApplyStatus = { CrawlerApplyStatus() },
     private val crawlerPausedNoWifi: () -> Boolean = { false },
     private val crawlerHttpPort: () -> Int = { 8081 },
@@ -211,15 +216,19 @@ class ControlServer(
                     }
                     post("settings/crawler") {
                         val form = parseForm(call.receiveText())
-                        val current = loadConfig().crawler
+                        val currentCfg = loadConfig()
+                        val current = currentCfg.crawler
                         val s = crawlerSettingsFromForm(form, current)
+                        val backup = backupSettingsFromForm(form, currentCfg.backup)
                         val bloomChanged = current.bloomCapacity != s.bloomCapacity ||
                             current.failureBloomCapacity != s.failureBloomCapacity ||
                             current.bloomErrorRate != s.bloomErrorRate
                         val r = applyCrawler(s)
+                        val rb = saveBackup(backup)
                         val token = parseCookieToken(call.request.headers["Cookie"]) ?: call.request.queryParameters["token"] ?: ""
+                        val msg = if (r.ok && rb.ok) r.message else "${r.message} / backup: ${rb.message}"
                         val rebuild = if (bloomChanged) "&rebuildBloom=true" else ""
-                        call.respondRedirect("/settings/crawler?msg=${urlEnc(r.message)}&ok=${r.ok}&token=$token$rebuild")
+                        call.respondRedirect("/settings/crawler?msg=${urlEnc(msg)}&ok=${r.ok && rb.ok}&token=$token$rebuild")
                     }
                     get("api/crawler/apply-status") {
                         val st = crawlerApplyStatus()
@@ -558,6 +567,7 @@ class ControlServer(
 
     private fun buildCrawlerPanel(msg: String?, ok: Boolean, rebuildBloom: Boolean): String {
         val s = loadConfig().crawler
+        val sBackup = loadConfig().backup
         val banner = if (msg != null)
             """<div class="${if (ok) "ok" else "err"}">${esc(msg)}</div>""" else ""
         val checked = { b: Boolean -> if (b) "checked" else "" }
@@ -621,6 +631,16 @@ class ControlServer(
                 <label>Proxy port (LAN, authenticated)<input name="proxyPort" value="${s.proxyPort}"></label>
                 <label>Crawler HTTP port (loopback)<input name="crawlerHttpPort" value="${s.crawlerHttpPort}"></label>
                 <label class="row"><input type="checkbox" name="lanDirect" ${checked(s.lanDirect)}> LAN direct (bind 0.0.0.0, no proxy, no auth)</label>
+              </fieldset>
+              <fieldset><legend>Backup &amp; Bootstrap (app-side only; not written to the crawler config)</legend>
+                <label class="row"><input type="checkbox" name="uploadEnabled" ${checked(sBackup.uploadEnabled)}> Enable R2 upload</label>
+                <label>R2 endpoint (https://…)<input name="r2Endpoint" value="${esc(sBackup.r2Endpoint)}"></label>
+                <label>R2 bucket<input name="r2Bucket" value="${esc(sBackup.r2Bucket)}"></label>
+                <label>R2 object key<input name="r2ObjectKey" value="${esc(sBackup.r2ObjectKey)}"></label>
+                <label>R2 access key ID<input name="r2AccessKeyId" value="${esc(sBackup.r2AccessKeyId)}"></label>
+                <label>R2 secret access key (leave blank to keep)<input type="password" name="r2SecretAccessKey" placeholder="unchanged"></label>
+                <label class="row"><input type="checkbox" name="bootstrapEnabled" ${checked(sBackup.bootstrapEnabled)}> Enable bootstrap download</label>
+                <label>Bootstrap URL (https://…)<input name="bootstrapUrl" value="${esc(sBackup.bootstrapUrl)}"></label>
               </fieldset>
               <button type="submit">Apply</button>
             </form>
@@ -1137,6 +1157,25 @@ class ControlServer(
             proxyPort = form["proxyPort"]?.toIntOrNull() ?: current.proxyPort,
             crawlerHttpPort = form["crawlerHttpPort"]?.toIntOrNull() ?: current.crawlerHttpPort,
             lanDirect = form.containsKey("lanDirect"),
+        )
+
+        /**
+         * Builds BackupSettings from the crawler panel form (checkbox
+         * presence = true, blank secret keeps the current value, missing
+         * values fall back to [current]). Pure and unit-testable.
+         */
+        internal fun backupSettingsFromForm(
+            form: Map<String, String>,
+            current: BackupSettings,
+        ): BackupSettings = BackupSettings(
+            r2Endpoint = form["r2Endpoint"] ?: current.r2Endpoint,
+            r2Bucket = form["r2Bucket"] ?: current.r2Bucket,
+            r2ObjectKey = form["r2ObjectKey"]?.takeIf { it.isNotEmpty() } ?: current.r2ObjectKey,
+            r2AccessKeyId = form["r2AccessKeyId"] ?: current.r2AccessKeyId,
+            r2SecretAccessKey = form["r2SecretAccessKey"]?.takeIf { it.isNotEmpty() } ?: current.r2SecretAccessKey,
+            uploadEnabled = form.containsKey("uploadEnabled"),
+            bootstrapEnabled = form.containsKey("bootstrapEnabled"),
+            bootstrapUrl = form["bootstrapUrl"] ?: current.bootstrapUrl,
         )
     }
 }

@@ -68,7 +68,37 @@ object ConfigValidator {
         return errors
     }
 
+
+    /**
+     * Validates the app-side backup/bootstrap settings (BEP51 cache backup).
+     * App-side only — nothing here reaches the crawler config.ini. When a
+     * feature is disabled its values may be empty; when enabled the R2
+     * endpoint/bucket/keys (upload) or the bootstrap URL must be present,
+     * and every URL must be `https://` with a non-empty host (plain
+     * `http://` is rejected).
+     */
+    fun validateBackup(b: BackupSettings): ValidationResult {
+        val errors = mutableListOf<String>()
+        if (b.uploadEnabled) {
+            if (b.r2Endpoint.isBlank()) errors.add("R2 endpoint must not be empty when upload is enabled")
+            else if (!validHttpsUrl(b.r2Endpoint))
+                errors.add("R2 endpoint must be an https:// URL with a host")
+            if (b.r2Bucket.isBlank()) errors.add("R2 bucket must not be empty when upload is enabled")
+            if (b.r2AccessKeyId.isBlank()) errors.add("R2 access key ID must not be empty when upload is enabled")
+            if (b.r2SecretAccessKey.isBlank()) errors.add("R2 secret access key must not be empty when upload is enabled")
+        }
+        if (b.bootstrapEnabled && !validHttpsUrl(b.bootstrapUrl))
+            errors.add("bootstrap URL must be an https:// URL with a host")
+        return ValidationResult(errors.isEmpty(), errors)
+    }
+
     private fun validPort(p: Int) = p in 1..65535
+
+    /** `https://` scheme with a non-empty host; `http://`, hostless and unparsable URLs are rejected. */
+    private fun validHttpsUrl(raw: String): Boolean {
+        val uri = try { java.net.URI(raw.trim()) } catch (e: Exception) { return false }
+        return uri.scheme?.equals("https", ignoreCase = true) == true && !uri.host.isNullOrBlank()
+    }
 
     private fun validSubpath(p: String): Boolean {
         if (p.isEmpty()) return true

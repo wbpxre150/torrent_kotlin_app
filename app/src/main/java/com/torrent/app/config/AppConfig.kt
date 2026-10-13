@@ -47,11 +47,28 @@ data class CrawlerSettings(
     val lanDirect: Boolean = false,
 )
 
+data class BackupSettings(
+    /** Cloudflare R2 S3 endpoint, e.g. `https://<accountid>.r2.cloudflarestorage.com`. */
+    val r2Endpoint: String = "",
+    val r2Bucket: String = "",
+    val r2ObjectKey: String = ConfigDefaults.BACKUP_OBJECT_KEY,
+    val r2AccessKeyId: String = "",
+    /** Plain SharedPreferences, same storage class as the control token (no encryption). */
+    val r2SecretAccessKey: String = "",
+    /** Whether the periodic/daily upload to R2 runs. */
+    val uploadEnabled: Boolean = false,
+    /** Wizard/app-start cache download toggle. */
+    val bootstrapEnabled: Boolean = false,
+    /** HTTPS URL serving the cache file for fresh installs. */
+    val bootstrapUrl: String = "",
+)
+
 data class AppConfig(
     val wizardCompleted: Boolean,
     val transmission: TransmissionSettings,
     val ftp: FtpSettings,
     val crawler: CrawlerSettings,
+    val backup: BackupSettings,
     val dataSubpath: String,
 )
 
@@ -63,6 +80,7 @@ object ConfigDefaults {
     const val PASSWORD_MIN_LEN = 6
     const val FTP_PASSWORD_LEN = 24
     const val DATA_SUBPATH = ""
+    const val BACKUP_OBJECT_KEY = "bep51/bep51_cache.dat.gz"
     private val FTP_PASSWORD_CHARS =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789".toCharArray()
 
@@ -84,7 +102,8 @@ object ConfigDefaults {
     val CRAWLER = CrawlerSettings(
         enabled = false,
     )
-    val INITIAL = AppConfig(wizardCompleted = false, transmission = TRANSMISSION, ftp = FTP, crawler = CRAWLER, dataSubpath = DATA_SUBPATH)
+    val BACKUP = BackupSettings()
+    val INITIAL = AppConfig(wizardCompleted = false, transmission = TRANSMISSION, ftp = FTP, crawler = CRAWLER, backup = BACKUP, dataSubpath = DATA_SUBPATH)
 
     fun randomPassword(len: Int = FTP_PASSWORD_LEN): String {
         val rnd = java.security.SecureRandom()

@@ -330,6 +330,14 @@ fun WizardScreen(
     var ftpPort by remember { mutableStateOf((cfg?.ftp?.port ?: 2121).toString()) }
     var ftpWifiOnly by remember { mutableStateOf(cfg?.ftp?.wifiOnly ?: true) }
     var crawlerEnabled by remember { mutableStateOf(false) }
+    var r2Endpoint by remember { mutableStateOf(cfg?.backup?.r2Endpoint ?: "") }
+    var r2Bucket by remember { mutableStateOf(cfg?.backup?.r2Bucket ?: "") }
+    var r2ObjectKey by remember { mutableStateOf(cfg?.backup?.r2ObjectKey ?: "bep51/bep51_cache.dat.gz") }
+    var r2AccessKeyId by remember { mutableStateOf(cfg?.backup?.r2AccessKeyId ?: "") }
+    var r2SecretAccessKey by remember { mutableStateOf("") }
+    var uploadEnabled by remember { mutableStateOf(cfg?.backup?.uploadEnabled ?: false) }
+    var bootstrapEnabled by remember { mutableStateOf(cfg?.backup?.bootstrapEnabled ?: false) }
+    var bootstrapUrl by remember { mutableStateOf(cfg?.backup?.bootstrapUrl ?: "") }
     var errors by remember { mutableStateOf<List<String>>(emptyList()) }
 
     Column(
@@ -363,6 +371,22 @@ fun WizardScreen(
             Switch(checked = crawlerEnabled, onCheckedChange = { crawlerEnabled = it })
             Spacer(Modifier.width(8.dp)); Text("Enable DHT crawler (default off)")
         }
+
+        Text("5. Backup & Bootstrap (optional)", style = MaterialTheme.typography.titleMedium)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Switch(checked = uploadEnabled, onCheckedChange = { uploadEnabled = it })
+            Spacer(Modifier.width(8.dp)); Text("Enable R2 upload")
+        }
+        OutlinedTextField(r2Endpoint, { r2Endpoint = it }, label = { Text("R2 endpoint (https://<accountid>.r2.cloudflarestorage.com)") })
+        OutlinedTextField(r2Bucket, { r2Bucket = it }, label = { Text("R2 bucket") })
+        OutlinedTextField(r2ObjectKey, { r2ObjectKey = it }, label = { Text("R2 object key") })
+        OutlinedTextField(r2AccessKeyId, { r2AccessKeyId = it }, label = { Text("R2 access key ID") })
+        OutlinedTextField(r2SecretAccessKey, { r2SecretAccessKey = it }, label = { Text("R2 secret access key") })
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Switch(checked = bootstrapEnabled, onCheckedChange = { bootstrapEnabled = it })
+            Spacer(Modifier.width(8.dp)); Text("Enable bootstrap download (fresh installs)")
+        }
+        OutlinedTextField(bootstrapUrl, { bootstrapUrl = it }, label = { Text("Bootstrap URL (https://…)") })
         if (errors.isNotEmpty()) {
             Column { errors.forEach { Text(it, color = MaterialTheme.colorScheme.error) } }
         }
@@ -374,6 +398,8 @@ fun WizardScreen(
                     txUser, txPass, peerPort.toIntOrNull() ?: 0, dlSubpath,
                     ftpUser, ftpPass, ftpPort.toIntOrNull() ?: 0, ftpWifiOnly,
                     crawlerEnabled,
+                    r2Endpoint, r2Bucket, r2ObjectKey, r2AccessKeyId, r2SecretAccessKey,
+                    uploadEnabled, bootstrapEnabled, bootstrapUrl,
                 )
                 val outcome = WizardSubmit.submit(form)
                 if (!outcome.ok) { errors = outcome.errors; return@Button }
@@ -382,6 +408,7 @@ fun WizardScreen(
                 val newCfg = svc.loadConfig().copy(
                     transmission = outcome.transmission!!,
                     ftp = outcome.ftp!!,
+                    backup = outcome.backup!!,
                     dataSubpath = form.dataSubpath,
                 )
                 val txR = svc.applyTransmissionSettings(newCfg, liveOnly = false)

@@ -215,6 +215,7 @@ class DaemonService : Service() {
             applyTransmission = ::applyTransmissionSettings,
             applyFtp = ::applyFtpSettings,
             applyCrawler = ::applyCrawlerSettings,
+            saveBackup = ::saveBackupSettings,
             crawlerApplyStatus = { crawlerApplyStatus },
             crawlerPausedNoWifi = { crawlerPausedNoWifi },
             crawlerHttpPort = ::crawlerHttpPort,
@@ -648,6 +649,19 @@ class DaemonService : Service() {
         }
         setCrawlerApplyStatus(CrawlerApplyPhase.STOPPING, "apply started; stopping crawler first (up to 60 s)")
         return com.torrent.app.config.ApplyResult(true, "apply started", false)
+    }
+
+    /**
+     * Persists the app-side backup/bootstrap settings (Stage 2): a plain
+     * store write — no daemon is restarted and the crawler is untouched.
+     */
+    fun saveBackupSettings(s: com.torrent.app.config.BackupSettings): com.torrent.app.config.ApplyResult {
+        val errors = com.torrent.app.config.ConfigValidator.validateBackup(s).errors
+        if (errors.isNotEmpty()) {
+            return com.torrent.app.config.ApplyResult(false, errors.joinToString("; "), false)
+        }
+        configStore.save(configStore.load().copy(backup = s))
+        return com.torrent.app.config.ApplyResult(true, "backup settings saved", false)
     }
 
     /** The port the crawler's HTTP UI listens on (the proxy port when lanDirect). */

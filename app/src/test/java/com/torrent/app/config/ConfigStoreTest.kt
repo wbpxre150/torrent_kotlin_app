@@ -98,6 +98,42 @@ class ConfigStoreTest {
         assertEquals(p, s.ftpPassword())
     }
 
+    @Test fun saveBackup_roundTripsThroughNewStore() {
+        store().saveBackup(
+            BackupSettings(
+                r2Endpoint = "https://acme.r2.cloudflarestorage.com",
+                r2Bucket = "cache",
+                r2ObjectKey = "bep51/x.dat.gz",
+                r2AccessKeyId = "AKID",
+                r2SecretAccessKey = "s3cr3t",
+                uploadEnabled = true,
+                bootstrapEnabled = true,
+                bootstrapUrl = "https://example.com/cache.dat.gz",
+            )
+        )
+        val b = store().load().backup
+        assertEquals("https://acme.r2.cloudflarestorage.com", b.r2Endpoint)
+        assertEquals("cache", b.r2Bucket)
+        assertEquals("bep51/x.dat.gz", b.r2ObjectKey)
+        assertEquals("AKID", b.r2AccessKeyId)
+        assertEquals("s3cr3t", b.r2SecretAccessKey)
+        assertTrue(b.uploadEnabled)
+        assertTrue(b.bootstrapEnabled)
+        assertEquals("https://example.com/cache.dat.gz", b.bootstrapUrl)
+    }
+
+    @Test fun backupDefaults_matchConfigDefaults() {
+        val b = store().load().backup
+        assertEquals("", b.r2Endpoint)
+        assertEquals("", b.r2Bucket)
+        assertEquals("bep51/bep51_cache.dat.gz", b.r2ObjectKey)
+        assertEquals("", b.r2AccessKeyId)
+        assertEquals("", b.r2SecretAccessKey)
+        assertFalse(b.uploadEnabled)
+        assertFalse(b.bootstrapEnabled)
+        assertEquals("", b.bootstrapUrl)
+    }
+
     @Test fun setWizardCompleted_persists() {
         val s = store()
         assertFalse(s.load().wizardCompleted)

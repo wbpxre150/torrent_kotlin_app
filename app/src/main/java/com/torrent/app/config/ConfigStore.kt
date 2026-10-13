@@ -48,6 +48,16 @@ class ConfigStore(context: Context) {
             crawlerHttpPort = prefs.getInt(KEY_CRAWLER_HTTP_PORT, ConfigDefaults.CRAWLER.crawlerHttpPort),
             lanDirect = prefs.getBoolean(KEY_CRAWLER_LAN_DIRECT, ConfigDefaults.CRAWLER.lanDirect),
         ),
+        backup = BackupSettings(
+            r2Endpoint = prefs.getString(KEY_BACKUP_R2_ENDPOINT, ConfigDefaults.BACKUP.r2Endpoint)!!,
+            r2Bucket = prefs.getString(KEY_BACKUP_R2_BUCKET, ConfigDefaults.BACKUP.r2Bucket)!!,
+            r2ObjectKey = prefs.getString(KEY_BACKUP_R2_OBJECT_KEY, ConfigDefaults.BACKUP.r2ObjectKey)!!,
+            r2AccessKeyId = prefs.getString(KEY_BACKUP_R2_ACCESS_KEY_ID, ConfigDefaults.BACKUP.r2AccessKeyId)!!,
+            r2SecretAccessKey = prefs.getString(KEY_BACKUP_R2_SECRET, ConfigDefaults.BACKUP.r2SecretAccessKey)!!,
+            uploadEnabled = prefs.getBoolean(KEY_BACKUP_UPLOAD_ENABLED, ConfigDefaults.BACKUP.uploadEnabled),
+            bootstrapEnabled = prefs.getBoolean(KEY_BACKUP_BOOTSTRAP_ENABLED, ConfigDefaults.BACKUP.bootstrapEnabled),
+            bootstrapUrl = prefs.getString(KEY_BACKUP_BOOTSTRAP_URL, ConfigDefaults.BACKUP.bootstrapUrl)!!,
+        ),
         dataSubpath = prefs.getString(KEY_DATA_SUBPATH, null)
             ?: prefs.getString(KEY_TX_SUBPATH, null)
             ?: prefs.getString(KEY_FTP_ROOT, null)
@@ -59,6 +69,7 @@ class ConfigStore(context: Context) {
         saveTransmission(s.transmission)
         saveFtp(s.ftp)
         saveCrawler(s.crawler)
+        saveBackup(s.backup)
         prefs.edit().putString(KEY_DATA_SUBPATH, s.dataSubpath).apply()
     }
 
@@ -107,6 +118,19 @@ class ConfigStore(context: Context) {
             .putInt(KEY_CRAWLER_PROXY_PORT, s.proxyPort)
             .putInt(KEY_CRAWLER_HTTP_PORT, s.crawlerHttpPort)
             .putBoolean(KEY_CRAWLER_LAN_DIRECT, s.lanDirect)
+            .apply()
+    }
+
+    fun saveBackup(s: BackupSettings) {
+        prefs.edit()
+            .putString(KEY_BACKUP_R2_ENDPOINT, s.r2Endpoint)
+            .putString(KEY_BACKUP_R2_BUCKET, s.r2Bucket)
+            .putString(KEY_BACKUP_R2_OBJECT_KEY, s.r2ObjectKey)
+            .putString(KEY_BACKUP_R2_ACCESS_KEY_ID, s.r2AccessKeyId)
+            .putString(KEY_BACKUP_R2_SECRET, s.r2SecretAccessKey)
+            .putBoolean(KEY_BACKUP_UPLOAD_ENABLED, s.uploadEnabled)
+            .putBoolean(KEY_BACKUP_BOOTSTRAP_ENABLED, s.bootstrapEnabled)
+            .putString(KEY_BACKUP_BOOTSTRAP_URL, s.bootstrapUrl)
             .apply()
     }
 
@@ -246,6 +270,14 @@ class ConfigStore(context: Context) {
         private const val KEY_CRAWLER_PROXY_PORT = "crawler_proxy_port"
         private const val KEY_CRAWLER_HTTP_PORT = "crawler_crawler_http_port"
         private const val KEY_CRAWLER_LAN_DIRECT = "crawler_lan_direct"
+        private const val KEY_BACKUP_R2_ENDPOINT = "backup_r2_endpoint"
+        private const val KEY_BACKUP_R2_BUCKET = "backup_r2_bucket"
+        private const val KEY_BACKUP_R2_OBJECT_KEY = "backup_r2_object_key"
+        private const val KEY_BACKUP_R2_ACCESS_KEY_ID = "backup_r2_access_key_id"
+        private const val KEY_BACKUP_R2_SECRET = "backup_r2_secret_access_key"
+        private const val KEY_BACKUP_UPLOAD_ENABLED = "backup_upload_enabled"
+        private const val KEY_BACKUP_BOOTSTRAP_ENABLED = "backup_bootstrap_enabled"
+        private const val KEY_BACKUP_BOOTSTRAP_URL = "backup_bootstrap_url"
         private const val KEY_LKG_CRAWLER_PRESENT = "lkg_crawler_present"
         private const val KEY_LKG_CRAWLER_ENABLED = "lkg_crawler_enabled"
         private const val KEY_LKG_CRAWLER_WIFI_ONLY = "lkg_crawler_wifi_only"

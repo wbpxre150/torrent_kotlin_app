@@ -56,6 +56,7 @@ class ConfigValidatorTest {
         transmission = validTx(),
         ftp = validFtp(),
         crawler = CrawlerSettings(),
+        backup = BackupSettings(),
         dataSubpath = "torrent_data",
     )
 
@@ -150,5 +151,54 @@ class ConfigValidatorTest {
 
     @Test fun crawlerAdvancedValid_passes() {
         assertTrue(ConfigValidator.validateCrawler(validCrawler().copy(advancedOverrides = "batch_size=750")).isEmpty())
+    }
+
+    private fun validBackup() = BackupSettings(
+        r2Endpoint = "https://acme.r2.cloudflarestorage.com",
+        r2Bucket = "cache",
+        r2AccessKeyId = "AKID",
+        r2SecretAccessKey = "s3cr3t",
+        uploadEnabled = true,
+        bootstrapEnabled = true,
+        bootstrapUrl = "https://example.com/cache.dat.gz",
+    )
+
+    @Test fun validBackup_passes() {
+        assertTrue(ConfigValidator.validateBackup(validBackup()).ok)
+    }
+
+    @Test fun backupDisabled_emptyValues_pass() {
+        assertTrue(ConfigValidator.validateBackup(BackupSettings()).ok)
+    }
+
+    @Test fun backupUploadHttpEndpoint_fails() {
+        val r = ConfigValidator.validateBackup(validBackup().copy(r2Endpoint = "http://acme.r2.cloudflarestorage.com"))
+        assertFalse(r.ok); assertTrue(r.errors.any { it.contains("R2 endpoint", true) })
+    }
+
+    @Test fun backupUploadEmptyHost_fails() {
+        val r = ConfigValidator.validateBackup(validBackup().copy(r2Endpoint = "https://"))
+        assertFalse(r.ok); assertTrue(r.errors.any { it.contains("R2 endpoint", true) })
+    }
+
+    @Test fun backupUploadMissingFields_fails() {
+        val r = ConfigValidator.validateBackup(validBackup().copy(r2Bucket = "", r2AccessKeyId = "", r2SecretAccessKey = ""))
+        assertFalse(r.ok)
+        assertTrue(r.errors.any { it.contains("bucket", true) })
+        assertTrue(r.errors.any { it.contains("access key ID", true) })
+        assertTrue(r.errors.any { it.contains("secret access key", true) })
+    }
+
+    @Test fun backupBootstrapHttpUrl_fails() {
+        val r = ConfigValidator.validateBackup(validBackup().copy(bootstrapUrl = "http://example.com/cache.dat.gz"))
+        assertFalse(r.ok); assertTrue(r.errors.any { it.contains("bootstrap", true) })
+    }
+
+    @Test fun backupBootstrapEmptyUrl_fails() {
+        assertFalse(ConfigValidator.validateBackup(validBackup().copy(bootstrapUrl = "")).ok)
+    }
+
+    @Test fun backupBootstrapDisabled_emptyUrl_passes() {
+        assertTrue(ConfigValidator.validateBackup(BackupSettings(bootstrapUrl = "")).ok)
     }
 }

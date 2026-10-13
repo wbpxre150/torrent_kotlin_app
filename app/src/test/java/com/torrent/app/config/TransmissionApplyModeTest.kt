@@ -12,6 +12,7 @@ class TransmissionApplyModeTest {
         transmission = tx(),
         ftp = FtpSettings("u", "password", 2121, true),
         crawler = CrawlerSettings(),
+        backup = BackupSettings(),
         dataSubpath = "Dl",
     )
 
