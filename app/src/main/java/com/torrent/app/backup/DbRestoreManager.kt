@@ -77,9 +77,9 @@ data class DbRestoreStatus(
  * [DbBookmark] is reset to [DbBookmark.FIRST_RUN] ONLY after the
  * one-shot exits 0 — a failed restore leaves the bookmark alone so
  * the next upload continues the chain. The crawler is restarted
- * (when enabled) after EVERY outcome that stopped it, so a failed
- * restore never leaves it dead. The temp file is deleted in a
- * `finally` on every path.
+ * (when enabled) after EVERY outcome that attempted to stop it, so a
+ * failed restore — even a throwing stopCrawler — never leaves it
+ * dead. The temp file is deleted in a `finally` on every path.
  *
  * All collaborators are constructor-injected (plain-JUnit
  * testable); [runRestore] is package-internal so tests can run it
@@ -188,11 +188,9 @@ class DbRestoreManager(
         }
         val tmpFile = File(tmpDir(), "restore-${clock()}.sql")
         tmpDir().mkdirs()
-        var stoppedCrawler = false
         try {
             status = status.copy(message = "stopping crawler (up to 60 s)")
             stopCrawler()
-            stoppedCrawler = true
 
             status = status.copy(message = "listing ${prefixDir(settings)} objects")
             val listed = when (val r = clientFactory(settings).list(prefixDir(settings))) {
@@ -219,17 +217,37 @@ class DbRestoreManager(
                 if (k.prefix != settings.r2DbObjectPrefix) return@mapNotNull null
                 o.key to k
             }.sortedWith(compareBy({ it.second.date }, { it.second.start }))
-                .map { it.first }
             if (chain.isEmpty()) {
                 throw IllegalStateException("nothing to restore: no parseable dump objects " +
                     "under ${prefixDir(settings)}")
             }
+            // Chain coherence (the plan 2 invariant: nothing in the chain
+            // can ever be safely deleted): a missing baseline or a gap
+            // between consecutive objects means the bucket is incomplete,
+            // and restoring a truncated chain would silently drop rows.
+            // Fail in both cases — do not warn and proceed.
+            val first = chain.first().second
+            if (first.start != 0L) {
+                throw IllegalStateException(
+                    "backup chain is missing its baseline (earliest object starts at id " +
+                        "${first.start}, expected 0)")
+            }
+            for (i in 0 until chain.size - 1) {
+                val (keyA, a) = chain[i]
+                val (keyB, b) = chain[i + 1]
+                if (a.end + 1L != b.start) {
+                    throw IllegalStateException(
+                        "backup chain has a gap: object $keyA ends at ${a.end} " +
+                            "but next object $keyB starts at ${b.start}")
+                }
+            }
+            val keys = chain.map { it.first }
 
-            status = status.copy(objectCount = chain.size, objectKeys = chain,
-                message = "downloading ${chain.size} object(s)")
+            status = status.copy(objectCount = keys.size, objectKeys = keys,
+                message = "downloading ${keys.size} object(s)")
             tmpFile.outputStream().use { out ->
                 val client = clientFactory(settings)
-                for (key in chain) {
+                for (key in keys) {
                     when (val g = client.get(key)) {
                         is S3GetResult.Success ->
                             out.write(gunzipBytes(g.body))
@@ -255,15 +273,13 @@ class DbRestoreManager(
                 // Only a successful restore resets the cursor: the next
                 // upload then re-dumps the whole (restored) database.
                 DbBookmark.write(bookmarkFile(), DbBookmark.FIRST_RUN)
-                if (stoppedCrawler) startCrawlerIfEnabled()
                 finish(
                     DbRestoreState.SUCCESS,
-                    "restored ${chain.size} object(s); bookmark reset to first run",
+                    "restored ${keys.size} object(s); bookmark reset to first run",
                     exitCode = exitCode,
                     lastSuccess = clock(),
                 )
             } else {
-                if (stoppedCrawler) startCrawlerIfEnabled()
                 finish(
                     DbRestoreState.FAILED,
                     "restore exited with code $exitCode (bookmark unchanged)",
@@ -271,9 +287,16 @@ class DbRestoreManager(
                 )
             }
         } catch (e: Exception) {
-            if (stoppedCrawler) startCrawlerIfEnabled()
             return finish(DbRestoreState.FAILED, "restore failed: ${e.message ?: e.javaClass.simpleName}")
         } finally {
+            // Restart the crawler if it is enabled (and the wifi gate
+            // allows) regardless of the outcome — the same ceremony as
+            // CrawlerMaintenance.runAction. The try block begins with the
+            // stopCrawler() attempt, so by here the crawler is stopped or
+            // partially stopped (stopCrawler threw) and must be brought
+            // back; the supervisor's start() is idempotent, so a redundant
+            // call is harmless.
+            startCrawlerIfEnabled()
             // The temp dump is always deleted, on success and failure.
             tmpFile.delete()
         }

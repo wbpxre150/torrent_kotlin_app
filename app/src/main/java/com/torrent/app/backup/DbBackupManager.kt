@@ -113,11 +113,22 @@ class DbBackupManager(
     var status: DbBackupStatus = DbBackupStatus()
         private set
 
+    /**
+     * Live "a check is in flight" signal for the busy predicates: true
+     * from acceptance in [uploadNow] (including the time it is queued on
+     * [executor]) until the check completes. [status.state] deliberately
+     * never becomes [DbBackupState.RUNNING] (the previous state is
+     * preserved while queued/in-flight), so this is the only way another
+     * operator can observe a running DB backup check.
+     */
+    val inFlight: Boolean
+        get() = inFlightFlag
+
     private val lock = Any()
     @Volatile
     private var started = false
     @Volatile
-    private var inFlight = false
+    private var inFlightFlag = false
 
     /**
      * Queues an upload check on [executor] and returns the resulting
@@ -127,7 +138,7 @@ class DbBackupManager(
      */
     fun uploadNow(manual: Boolean): DbBackupStatus {
         val accepted = synchronized(lock) {
-            if (inFlight) {
+            if (inFlightFlag) {
                 // Only a manual trigger surfaces the refusal; a periodic tick
                 // must not clobber the in-flight upload's status message.
                 if (manual) {
@@ -135,7 +146,7 @@ class DbBackupManager(
                 }
                 false
             } else {
-                inFlight = true
+                inFlightFlag = true
                 // No RUNNING marker here: runCheck's daily gate "preserves the
                 // previous state", which must be the last real outcome.
                 status = status.copy(message = "db backup queued")
@@ -154,11 +165,11 @@ class DbBackupManager(
                         message = "upload failed: ${e.message ?: e.javaClass.simpleName}",
                     )
                 } finally {
-                    inFlight = false
+                    inFlightFlag = false
                 }
             }
         } catch (e: RejectedExecutionException) {
-            inFlight = false
+            inFlightFlag = false
             status = status.copy(state = DbBackupState.FAILED, message = "refused: service is shutting down")
         }
         return status

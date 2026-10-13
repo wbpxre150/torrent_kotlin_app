@@ -182,7 +182,8 @@ class DaemonService : Service() {
             startCrawlerIfEnabled = ::startCrawlerIfEnabled,
             busy = {
                 crawlerApplyStatus.phase.isActive ||
-                    dbRestore.status.running
+                    dbRestore.status.running ||
+                    dbBackup.inFlight
             },
         )
         // BEP51 cache backup (Stage 4): the cache file lives in the crawler's
@@ -196,7 +197,8 @@ class DaemonService : Service() {
             isBusy = {
                 crawlerApplyStatus.phase.isActive ||
                     crawlerMaintenance.status.running ||
-                    dbRestore.status.running
+                    dbRestore.status.running ||
+                    dbBackup.inFlight
             },
             isWifi = { wifiGateMonitor.state.value.wifi },
             clientFactory = { s ->
@@ -250,7 +252,7 @@ class DaemonService : Service() {
                 crawlerApplyStatus.phase.isActive ||
                     crawlerMaintenance.status.running ||
                     bep51Backup.status.state == com.torrent.app.backup.BackupState.RUNNING ||
-                    dbBackup.status.state == com.torrent.app.backup.DbBackupState.RUNNING
+                    dbBackup.inFlight
             },
             clientFactory = { s ->
                 val client = com.torrent.app.s3.S3Client(

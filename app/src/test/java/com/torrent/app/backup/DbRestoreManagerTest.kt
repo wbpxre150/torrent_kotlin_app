@@ -19,6 +19,13 @@ import java.util.concurrent.atomic.AtomicInteger
  * Plain-JUnit tests for [DbRestoreManager]: the stop-first flow
  * (settings → stop → LIST → download/gunzip/concat → one-shot), the
  * chain ordering (sorted by date, then start id; malformed and
+ * zero-size keys skipped), the chain coherence failures (missing
+ * baseline, gap between consecutive objects), the bookmark ordering (reset to
+ * [DbBookmark.FIRST_RUN] ONLY on a zero exit — a failed restore
+ * leaves it untouched), the crawler restart on every stopped outcome
+ * (even a throwing stopCrawler), the temp-file cleanup on success AND
+ * failure, and the
+ * busy/in-flight/shutdown refusals. [DbRestoreManager.runRestore] is
  * zero-size keys skipped), the bookmark ordering (reset to
  * [DbBookmark.FIRST_RUN] ONLY on a zero exit — a failed restore
  * leaves it untouched), the crawler restart on every stopped outcome,
@@ -105,6 +112,7 @@ class DbRestoreManagerTest {
         clock: () -> Long = { T0 },
         bookmarkFile: File = File(tmp.root, "db_bookmark.txt"),
         objects: List<Pair<String, String>> = emptyList(),
+        stopThrows: Boolean = false,
     ): Triple<DbRestoreManager, FakeFlags, File> {
         val flags = FakeFlags()
         val m = DbRestoreManager(
@@ -115,7 +123,10 @@ class DbRestoreManagerTest {
             workDir = { File(tmp.root, "crawler-work") },
             tmpDir = { File(tmp.root, "tmp") },
             bookmarkFile = { bookmarkFile },
-            stopCrawler = { flags.stopCount++ },
+            stopCrawler = {
+                flags.stopCount++
+                if (stopThrows) throw IllegalStateException("stop failed")
+            },
             startCrawlerIfEnabled = { flags.startCount++ },
             executor = CapturingExecutor(),
             clock = clock,
@@ -420,6 +431,92 @@ class DbRestoreManagerTest {
         assertEquals(DbRestoreState.FAILED, st.state)
         assertTrue(st.message, st.message.contains("shutting down"))
         assertEquals(0, flags.stopCount)
+    }
+
+    @Test fun chainMissingBaseline_failsRestartsCrawlerAndKeepsBookmark() {
+        val restorer = FakeRestorer()
+        val runner = FakeRunner()
+        val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        val (m, flags, _) = newManager(
+            restorer, runner,
+            bookmarkFile = bookmarkFile,
+            objects = listOf(
+                "db/incremental_20231114_5-10.sql.gz" to "INSERT OR IGNORE INTO torrents VALUES(6);",
+            ),
+        )
+        DbBookmark.write(bookmarkFile, DbBookmark(5, 1))
+
+        val st = m.runRestore()
+
+        assertEquals(DbRestoreState.FAILED, st.state)
+        assertTrue(st.message, st.message.contains("missing its baseline"))
+        assertTrue(st.message, st.message.contains("id 5"))
+        // The incomplete chain must not be downloaded or replayed.
+        assertEquals(0, restorer.getOrder.size)
+        assertEquals(0, runner.calls)
+        // Crawler restarted, temp file cleaned, bookmark untouched.
+        assertEquals(1, flags.stopCount)
+        assertEquals(1, flags.startCount)
+        assertEquals(DbBookmark(5, 1), DbBookmark.read(bookmarkFile))
+        assertTrue(tempFiles(File(tmp.root, "tmp")).isEmpty())
+    }
+
+    @Test fun chainWithGap_failsWithGapMessage() {
+        val restorer = FakeRestorer()
+        val runner = FakeRunner()
+        val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        val (m, flags, _) = newManager(
+            restorer, runner,
+            bookmarkFile = bookmarkFile,
+            objects = listOf(
+                "db/incremental_20231114_0-10.sql.gz" to "A",
+                "db/incremental_20231115_12-20.sql.gz" to "B",
+            ),
+        )
+        DbBookmark.write(bookmarkFile, DbBookmark(10, 2))
+
+        val st = m.runRestore()
+
+        assertEquals(DbRestoreState.FAILED, st.state)
+        assertTrue(st.message, st.message.contains("has a gap"))
+        assertTrue(st.message, st.message.contains("db/incremental_20231114_0-10.sql.gz"))
+        assertTrue(st.message, st.message.contains("ends at 10"))
+        assertTrue(st.message, st.message.contains("db/incremental_20231115_12-20.sql.gz"))
+        assertTrue(st.message, st.message.contains("starts at 12"))
+        // No download, no one-shot, crawler restarted, bookmark untouched.
+        assertEquals(0, restorer.getOrder.size)
+        assertEquals(0, runner.calls)
+        assertEquals(1, flags.stopCount)
+        assertEquals(1, flags.startCount)
+        assertEquals(DbBookmark(10, 2), DbBookmark.read(bookmarkFile))
+        assertTrue(tempFiles(File(tmp.root, "tmp")).isEmpty())
+    }
+
+    @Test fun stopCrawlerThrows_failsAndStillRestartsCrawler() {
+        val restorer = FakeRestorer()
+        val runner = FakeRunner()
+        val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        val (m, flags, _) = newManager(
+            restorer, runner,
+            bookmarkFile = bookmarkFile,
+            stopThrows = true,
+            objects = listOf("db/incremental_20231114_0-10.sql.gz" to "X"),
+        )
+        DbBookmark.write(bookmarkFile, DbBookmark(5, 1))
+
+        val st = m.runRestore()
+
+        assertEquals(DbRestoreState.FAILED, st.state)
+        assertTrue(st.message, st.message.contains("restore failed"))
+        assertTrue(st.message, st.message.contains("stop failed"))
+        assertEquals(0, restorer.listCalls)
+        assertEquals(0, runner.calls)
+        // The stop may have partially completed: the crawler must be
+        // restarted even though stopCrawler threw.
+        assertEquals(1, flags.stopCount)
+        assertEquals(1, flags.startCount)
+        assertEquals(DbBookmark(5, 1), DbBookmark.read(bookmarkFile))
+        assertTrue(tempFiles(File(tmp.root, "tmp")).isEmpty())
     }
 
     @Test fun outputLinesAreStreamedIntoTheStatusTail() {

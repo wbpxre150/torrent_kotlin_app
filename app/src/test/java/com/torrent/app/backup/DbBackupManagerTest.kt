@@ -3,6 +3,7 @@ package com.torrent.app.backup
 import com.torrent.app.config.BackupSettings
 import com.torrent.app.s3.S3PutResult
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -452,5 +453,42 @@ class DbBackupManagerTest {
         // The last successful upload's details survive a daily-gate skip.
         assertEquals("db/incremental_20231114_0-10.sql.gz", second.objectKey)
         assertEquals(3, second.statementCount)
+    }
+
+    @Test fun inFlightTrueFromAcceptanceUntilCheckCompletes() {
+        val up = FakeUploader()
+        val noop = NoopScheduledExecutorService()
+        val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        lateinit var m: DbBackupManager
+        var duringDump = false
+        val d = object : DbDumper {
+            override fun dump(dbFile: File, bookmark: DbBookmark): DbDumpOutcome {
+                duringDump = m.inFlight
+                return testDumpOutcome()
+            }
+        }
+        m = DbBackupManager(
+            dbFile = { dbFile() },
+            dumperFactory = { d },
+            loadSettings = { settings() },
+            isBusy = { false },
+            isWifi = { true },
+            clientFactory = { up },
+            bookmarkFile = { bookmarkFile },
+            clock = { DAY1 },
+            zone = ZoneOffset.UTC,
+            executor = noop,
+        )
+        // No check accepted yet.
+        assertFalse(m.inFlight)
+        m.uploadNow(manual = true)
+        // Accepted and queued: in flight, while the state stays IDLE
+        // (the deliberate no-RUNNING-state design).
+        assertTrue(m.inFlight)
+        assertEquals(DbBackupState.IDLE, m.status.state)
+        noop.last!!.run()
+        // In flight while the check ran; cleared once it completed.
+        assertTrue(duringDump)
+        assertFalse(m.inFlight)
     }
 }
