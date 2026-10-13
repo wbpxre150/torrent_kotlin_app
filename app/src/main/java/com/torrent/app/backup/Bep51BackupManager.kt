@@ -96,6 +96,8 @@ class Bep51BackupManager(
     private val lock = Any()
     @Volatile
     private var started = false
+    @Volatile
+    private var inFlight = false
 
     /**
      * Queues an upload check on [executor] and returns the resulting
@@ -105,7 +107,7 @@ class Bep51BackupManager(
      */
     fun uploadNow(manual: Boolean): BackupStatus {
         val accepted = synchronized(lock) {
-            if (status.state == BackupState.RUNNING) {
+            if (inFlight) {
                 // Only a manual trigger surfaces the refusal; a periodic tick
                 // must not clobber the in-flight upload's status message.
                 if (manual) {
@@ -113,7 +115,10 @@ class Bep51BackupManager(
                 }
                 false
             } else {
-                status = status.copy(state = BackupState.RUNNING, message = "upload queued")
+                inFlight = true
+                // No RUNNING marker here: runCheck's daily gate "preserves the
+                // previous state", which must be the last real outcome.
+                status = status.copy(message = "upload queued")
                 true
             }
         }
@@ -128,9 +133,12 @@ class Bep51BackupManager(
                         state = BackupState.FAILED,
                         message = "upload failed: ${e.message ?: e.javaClass.simpleName}",
                     )
+                } finally {
+                    inFlight = false
                 }
             }
         } catch (e: RejectedExecutionException) {
+            inFlight = false
             status = status.copy(state = BackupState.FAILED, message = "refused: service is shutting down")
         }
         return status

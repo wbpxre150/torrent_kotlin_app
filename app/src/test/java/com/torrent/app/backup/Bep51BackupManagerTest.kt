@@ -4,6 +4,7 @@ import com.torrent.app.config.BackupSettings
 import com.torrent.app.s3.S3PutResult
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -279,7 +280,10 @@ class Bep51BackupManagerTest {
         val noop = NoopScheduledExecutorService()
         val m = newManager(validCacheFile(), up, executor = noop)
         val first = m.uploadNow(manual = true)
-        assertEquals(BackupState.RUNNING, first.state)
+        // Acceptance no longer flips the state to RUNNING: it only carries a
+        // "queued" message until the check writes a real outcome.
+        assertEquals(BackupState.IDLE, first.state)
+        assertEquals("upload queued", first.message)
         assertEquals(1, noop.submitted.get())
         noop.last!!.run()
         assertEquals(BackupState.SUCCESS, m.status.state)
@@ -334,14 +338,87 @@ class Bep51BackupManagerTest {
         val noop = NoopScheduledExecutorService()
         val m = newManager(validCacheFile(), up, executor = noop)
         m.uploadNow(manual = true)
-        assertEquals(BackupState.RUNNING, m.status.state)
+        assertEquals("upload queued", m.status.message)
         // A periodic tick while the manual upload is in flight is refused,
         // but must not clobber the in-flight status message.
         val tick = m.uploadNow(manual = false)
-        assertEquals(BackupState.RUNNING, tick.state)
-        assertEquals(BackupState.RUNNING, m.status.state)
+        assertEquals(BackupState.IDLE, tick.state)
+        assertEquals(BackupState.IDLE, m.status.state)
         assertEquals("upload queued", m.status.message)
         assertEquals(1, noop.submitted.get())
         assertEquals(0, up.calls)
+    }
+
+    @Test fun dailyGateSkipPreservesPriorSuccessState() {
+        val up = FakeUploader()
+        var stored: String? = null
+        var now = DAY1
+        val noop = NoopScheduledExecutorService()
+        val m = newManager(
+            validCacheFile(), up,
+            clock = { now },
+            executor = noop,
+            lastSuccessDate = { stored },
+            writeLastSuccessDate = { stored = it },
+        )
+        // Successful manual upload.
+        m.uploadNow(manual = true)
+        noop.last!!.run()
+        assertEquals(BackupState.SUCCESS, m.status.state)
+        assertEquals(1, up.calls)
+        // Periodic tick the same day: the daily gate must preserve the
+        // SUCCESS outcome, not a RUNNING marker.
+        now += 60_000
+        m.uploadNow(manual = false)
+        noop.last!!.run()
+        val st = m.status
+        assertEquals(BackupState.SUCCESS, st.state)
+        assertNotEquals(BackupState.RUNNING, st.state)
+        assertTrue(st.message, st.message.contains("already uploaded today"))
+        assertEquals(1, up.calls)
+    }
+
+    @Test fun uploadNowAcceptedAfterDailyGateSkip() {
+        val up = FakeUploader()
+        var stored: String? = null
+        var now = DAY1
+        val noop = NoopScheduledExecutorService()
+        val m = newManager(
+            validCacheFile(), up,
+            clock = { now },
+            executor = noop,
+            lastSuccessDate = { stored },
+            writeLastSuccessDate = { stored = it },
+        )
+        m.uploadNow(manual = true)
+        noop.last!!.run()
+        now += 60_000
+        m.uploadNow(manual = false)
+        noop.last!!.run()
+        // Regression: the RUNNING marker from the skipped tick used to poison
+        // the in-flight guard, refusing every later trigger until restart.
+        m.uploadNow(manual = true)
+        assertEquals(3, noop.submitted.get())
+        noop.last!!.run()
+        assertEquals(BackupState.SUCCESS, m.status.state)
+        assertEquals(2, up.calls)
+    }
+
+    @Test fun inFlightRefusalClearsAfterCheckCompletes() {
+        val up = FakeUploader()
+        val noop = NoopScheduledExecutorService()
+        val m = newManager(validCacheFile(), up, executor = noop)
+        m.uploadNow(manual = true)
+        val second = m.uploadNow(manual = true)
+        assertTrue(second.message, second.message.contains("already running"))
+        assertEquals(1, noop.submitted.get())
+        assertEquals(0, up.calls)
+        // Check completes: the in-flight guard must clear again.
+        noop.last!!.run()
+        assertEquals(BackupState.SUCCESS, m.status.state)
+        val third = m.uploadNow(manual = true)
+        assertEquals(2, noop.submitted.get())
+        noop.last!!.run()
+        assertEquals(2, up.calls)
     }
 }
