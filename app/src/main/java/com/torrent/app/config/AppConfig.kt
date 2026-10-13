@@ -57,6 +57,12 @@ data class BackupSettings(
     val r2SecretAccessKey: String = "",
     /** Whether the periodic/daily upload to R2 runs. */
     val uploadEnabled: Boolean = false,
+    /** Whether the daily incremental DB-dump upload (plan 2) runs. */
+    val dbBackupEnabled: Boolean = false,
+    /** R2 bucket for the incremental DB dumps. */
+    val r2DbBucket: String = ConfigDefaults.DB_BACKUP_BUCKET,
+    /** Object-key prefix of the DB dumps inside [r2DbBucket] (no '/'). */
+    val r2DbObjectPrefix: String = ConfigDefaults.DB_BACKUP_OBJECT_PREFIX,
     /** Wizard/app-start cache download toggle (default on: fresh installs seed the BEP51 cache). */
     val bootstrapEnabled: Boolean = true,
     /** HTTPS URL serving the cache file for fresh installs. */
@@ -82,6 +88,8 @@ object ConfigDefaults {
     const val DATA_SUBPATH = "torrent_data"
     const val BACKUP_OBJECT_KEY = "bep51/bep51_cache.dat.gz"
     const val BACKUP_BOOTSTRAP_URL = "https://unjumble.au/bep51/bep51_cache.dat.gz"
+    const val DB_BACKUP_BUCKET = "dht_backup"
+    const val DB_BACKUP_OBJECT_PREFIX = "db"
     private val FTP_PASSWORD_CHARS =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789".toCharArray()
 

@@ -92,6 +92,30 @@ object ConfigValidator {
         return ValidationResult(errors.isEmpty(), errors)
     }
 
+    /**
+     * Validates the daily incremental DB-dump upload settings (plan 2,
+     * Stage 3). Shares the R2 endpoint/bucket/keys with [validateBackup];
+     * when [BackupSettings.dbBackupEnabled] is on the endpoint must be an
+     * `https://` URL with a host and the DB bucket/keys/prefix must be
+     * present. The prefix must be non-blank and free of '/' (it is the
+     * single path segment of every dump object key, per
+     * [com.torrent.app.backup.DbObjectKey.build]).
+     */
+    fun validateDbBackup(b: BackupSettings): ValidationResult {
+        val errors = mutableListOf<String>()
+        if (b.dbBackupEnabled) {
+            if (b.r2Endpoint.isBlank()) errors.add("R2 endpoint must not be empty when DB backup is enabled")
+            else if (!validHttpsUrl(b.r2Endpoint))
+                errors.add("R2 endpoint must be an https:// URL with a host")
+            if (b.r2DbBucket.isBlank()) errors.add("R2 DB bucket must not be empty when DB backup is enabled")
+            if (b.r2AccessKeyId.isBlank()) errors.add("R2 access key ID must not be empty when DB backup is enabled")
+            if (b.r2SecretAccessKey.isBlank()) errors.add("R2 secret access key must not be empty when DB backup is enabled")
+            if (b.r2DbObjectPrefix.isBlank() || b.r2DbObjectPrefix.contains('/'))
+                errors.add("R2 DB object prefix must be non-blank and must not contain '/'")
+        }
+        return ValidationResult(errors.isEmpty(), errors)
+    }
+
     private fun validPort(p: Int) = p in 1..65535
 
     /** `https://` scheme with a non-empty host; `http://`, hostless and unparsable URLs are rejected. */

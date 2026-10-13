@@ -20,8 +20,8 @@ import java.io.File
 class CrawlerDbDumper(
     private val keyPrefix: String = DbObjectKey.DEFAULT_PREFIX,
     private val clock: () -> Long = { System.currentTimeMillis() },
-) {
-    fun dump(dbFile: File, bookmark: DbBookmark): DbDumpOutcome {
+) : DbDumper {
+    override fun dump(dbFile: File, bookmark: DbBookmark): DbDumpOutcome {
         require(dbFile.isFile) { "crawler DB not found: ${dbFile.path}" }
         val db = SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
         try {

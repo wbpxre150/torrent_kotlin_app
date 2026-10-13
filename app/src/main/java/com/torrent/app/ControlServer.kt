@@ -56,6 +56,12 @@ class ControlServer(
     private val crawlerBackupUpload: () -> String = { "backup upload is not wired" },
     private val crawlerBackupStatus: () -> com.torrent.app.backup.BackupStatus =
         { com.torrent.app.backup.BackupStatus() },
+    // DB dump backup (plan 2, Stage 3): the POST route queues a manual
+    // upload of the crawler's incremental DB dump to the R2 DB bucket;
+    // the GET route polls the manager's status.
+    private val crawlerBackupDbUpload: () -> String = { "DB backup is not wired" },
+    private val crawlerBackupDbStatus: () -> com.torrent.app.backup.DbBackupStatus =
+        { com.torrent.app.backup.DbBackupStatus() },
     private val port: Int = 8090,
 ) {
     @Volatile private var server: EmbeddedServer<*, *>? = null
@@ -295,6 +301,23 @@ class ControlServer(
                     // Backup status JSON for the crawler panel poller.
                     get("api/crawler/backup") {
                         call.respondText(backupStatusJson(crawlerBackupStatus()), ContentType.Application.Json)
+                    }
+
+                    // DB dump backup (plan 2, Stage 3): queue a manual upload
+                    // of the crawler's incremental DB dump to the R2 DB bucket
+                    // (gates apply; the daily gate is bypassed); the page
+                    // polls /api/crawler/backup/db for the result.
+                    post("crawler/backup/db") {
+                        val msg = crawlerBackupDbUpload()
+                        val ok = !msg.startsWith("refused")
+                        val token = parseCookieToken(call.request.headers["Cookie"])
+                            ?: call.request.queryParameters["token"] ?: ""
+                        call.respondRedirect("/settings/crawler?msg=${urlEnc(msg)}&ok=$ok&token=$token")
+                    }
+
+                    // DB backup status JSON for the crawler panel poller.
+                    get("api/crawler/backup/db") {
+                        call.respondText(dbBackupStatusJson(crawlerBackupDbStatus()), ContentType.Application.Json)
                     }
                 }
             }
@@ -582,6 +605,7 @@ class ControlServer(
             <button type="submit">Run --rebuild-bloom-filter</button></form></div>""" else ""
         val maintenanceSection = buildMaintenanceSection()
         val backupSection = buildBackupSection()
+        val dbBackupSection = buildDbBackupSection()
         return """
             <!DOCTYPE html><html><head><title>DHT crawler settings</title>
             <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -639,6 +663,9 @@ class ControlServer(
                 <label>R2 object key<input name="r2ObjectKey" value="${esc(sBackup.r2ObjectKey)}"></label>
                 <label>R2 access key ID<input name="r2AccessKeyId" value="${esc(sBackup.r2AccessKeyId)}"></label>
                 <label>R2 secret access key (leave blank to keep)<input type="password" name="r2SecretAccessKey" placeholder="unchanged"></label>
+                <label class="row"><input type="checkbox" name="dbBackupEnabled" ${checked(sBackup.dbBackupEnabled)}> Enable daily DB dump upload (uses the R2 credentials above)</label>
+                <label>R2 DB bucket<input name="r2DbBucket" value="${esc(sBackup.r2DbBucket)}"></label>
+                <label>R2 DB object prefix<input name="r2DbObjectPrefix" value="${esc(sBackup.r2DbObjectPrefix)}"></label>
                 <label class="row"><input type="checkbox" name="bootstrapEnabled" ${checked(sBackup.bootstrapEnabled)}> Enable bootstrap download</label>
                 <label>Bootstrap URL (https://…)<input name="bootstrapUrl" value="${esc(sBackup.bootstrapUrl)}"></label>
               </fieldset>
@@ -649,6 +676,7 @@ class ControlServer(
             <pre id="apply-log" class="apply-log" style="display:none"></pre>
             $maintenanceSection
             $backupSection
+            $dbBackupSection
             <p><a href="/">Back to dashboard</a></p>
             <script>
             (function () {
@@ -709,6 +737,16 @@ class ControlServer(
                 }).catch(function () {});
               }
               setInterval(pollBackup, 5000); pollBackup();
+              function pollDbBackup() {
+                fetch('/api/crawler/backup/db').then(function (r) { return r.json(); }).then(function (st) {
+                  var box = document.getElementById('db-backup-status');
+                  var text = 'DB backup: ' + st.state + (st.message ? ' \u2014 ' + st.message : '');
+                  if (st.bytes != null) text += ' (' + st.bytes + ' bytes uploaded)';
+                  if (st.lastSuccess != null) text += ' (last success ' + new Date(st.lastSuccess).toLocaleString() + ')';
+                  box.textContent = text;
+                }).catch(function () {});
+              }
+              setInterval(pollDbBackup, 5000); pollDbBackup();
             })();
             </script>
             </body></html>
@@ -752,6 +790,27 @@ class ControlServer(
                     onsubmit="return confirm('Upload the BEP51 cache to R2 now?')">
               <button type="submit">Upload now</button></form>
               <div id="backup-status" class="meta">Backup: ${st.state.name}</div>
+            </fieldset>
+        """.trimIndent()
+    }
+
+    /** The DB dump backup section on the crawler panel (plan 2, Stage 3). */
+    private fun buildDbBackupSection(): String {
+        val st = crawlerBackupDbStatus()
+        val enabledNote = if (st.uploadEnabled) "" else
+            "<p class=\"warn\">DB dump upload is disabled — tick <em>Enable daily DB dump upload</em> above and apply first.</p>"
+        return """
+            <fieldset><legend>DB backup (upload the crawler's incremental SQLite dump to the R2 DB bucket)</legend>
+              <p class="meta">Dumps new torrents (<code>torrents.db</code>) as gzip-compressed SQL to
+              <code>&lt;db-prefix&gt;/incremental_&lt;date&gt;_&lt;start&gt;-&lt;end&gt;.sql.gz</code> — at most once per day, on
+              Wi-Fi, and only when no apply/maintenance job is running. The upload bookmark advances only
+              after a successful upload, so a failed run retries the same range.
+              <em>Upload now</em> bypasses the daily gate only.</p>
+              $enabledNote
+              <form method="post" action="/crawler/backup/db"
+                    onsubmit="return confirm('Upload the crawler DB dump to R2 now?')">
+              <button type="submit">Upload now</button></form>
+              <div id="db-backup-status" class="meta">DB backup: ${st.state.name}</div>
             </fieldset>
         """.trimIndent()
     }
@@ -877,6 +936,25 @@ class ControlServer(
             append(",\"configured\":").append(st.configured).append("}")
         }
 
+        /**
+         * The /api/crawler/backup/db response body (plan 2, Stage 3): state,
+         * message, last attempt/success epoch millis, uploaded (gzip) bytes,
+         * the last successful upload's object key / SQL bytes / statement
+         * count and the config flags. Secrets never appear here.
+         */
+        internal fun dbBackupStatusJson(st: com.torrent.app.backup.DbBackupStatus): String = buildString {
+            append("{\"state\":\"").append(st.state.name).append("\"")
+            append(",\"message\":").append(jsonStr(st.message))
+            append(",\"lastAttempt\":").append(st.lastAttempt?.toString() ?: "null")
+            append(",\"lastSuccess\":").append(st.lastSuccess?.toString() ?: "null")
+            append(",\"bytes\":").append(st.uploadedBytes?.toString() ?: "null")
+            append(",\"sqlBytes\":").append(st.sqlBytes?.toString() ?: "null")
+            append(",\"statementCount\":").append(st.statementCount?.toString() ?: "null")
+            append(",\"objectKey\":").append(jsonStr(st.objectKey))
+            append(",\"uploadEnabled\":").append(st.uploadEnabled)
+            append(",\"configured\":").append(st.configured).append("}")
+        }
+
         internal fun parseForm(body: String): Map<String, String> {
             if (body.isEmpty()) return emptyMap()
             return body.split("&").mapNotNull { pair ->
@@ -993,6 +1071,9 @@ class ControlServer(
             r2AccessKeyId = form["r2AccessKeyId"] ?: current.r2AccessKeyId,
             r2SecretAccessKey = form["r2SecretAccessKey"]?.takeIf { it.isNotEmpty() } ?: current.r2SecretAccessKey,
             uploadEnabled = form.containsKey("uploadEnabled"),
+            dbBackupEnabled = form.containsKey("dbBackupEnabled"),
+            r2DbBucket = form["r2DbBucket"] ?: current.r2DbBucket,
+            r2DbObjectPrefix = form["r2DbObjectPrefix"]?.takeIf { it.isNotEmpty() } ?: current.r2DbObjectPrefix,
             bootstrapEnabled = form.containsKey("bootstrapEnabled"),
             bootstrapUrl = form["bootstrapUrl"] ?: current.bootstrapUrl,
         )

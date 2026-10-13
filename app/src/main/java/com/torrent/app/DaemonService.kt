@@ -39,6 +39,8 @@ import com.torrent.app.config.CrawlerGate
 import com.torrent.app.backup.Bep51BackupManager
 import com.torrent.app.backup.Bep51BootstrapDownloader
 import com.torrent.app.backup.BootstrapResult
+import com.torrent.app.backup.CrawlerDbDumper
+import com.torrent.app.backup.DbBackupManager
 
 sealed class ServiceState {
     data object Starting : ServiceState()
@@ -125,6 +127,12 @@ class DaemonService : Service() {
     // R2 daily (and on manual dashboard trigger) on its own single-thread
     // scheduler; the busy/wifi predicates mirror the crawler lifecycle ops.
     private lateinit var bep51Backup: Bep51BackupManager
+    // DB dump backup (plan 2, Stage 3): uploads the crawler's incremental
+    // SQLite dump to the R2 DB bucket daily (and on manual dashboard
+    // trigger) on its own single-thread scheduler; the busy/wifi predicates
+    // mirror the crawler lifecycle ops. The bookmark file (filesDir/backup)
+    // advances only after a successful upload (upload-first ordering).
+    private lateinit var dbBackup: DbBackupManager
     // Stage 5: in-memory rate limit for failed BEP51 bootstrap attempts —
     // a failure is not retried (on a later start) for at least one hour.
     @Volatile private var bep51BootstrapFailureAt: Long? = null
@@ -193,6 +201,33 @@ class DaemonService : Service() {
             readLastSuccessDate = { configStore.lastBackupSuccessDate() },
             writeLastSuccessDate = { configStore.setLastBackupSuccessDate(it) },
         )
+        // DB dump backup (plan 2, Stage 3): the crawler DB lives in the same
+        // data dir as the BEP51 cache; the dumper is built per-check so a
+        // changed object-prefix setting takes effect without a restart.
+        dbBackup = DbBackupManager(
+            dbFile = { File(crawlerConfig.dataDir, "torrents.db") },
+            dumperFactory = { s -> CrawlerDbDumper(keyPrefix = s.r2DbObjectPrefix) },
+            loadSettings = { configStore.load().backup },
+            isBusy = {
+                crawlerApplyStatus.phase.isActive ||
+                    crawlerMaintenance.status.running
+            },
+            isWifi = { wifiGateMonitor.state.value.wifi },
+            clientFactory = { s ->
+                val client = com.torrent.app.s3.S3Client(
+                    endpoint = s.r2Endpoint,
+                    bucket = s.r2DbBucket,
+                    accessKeyId = s.r2AccessKeyId,
+                    secretAccessKey = s.r2SecretAccessKey,
+                )
+                com.torrent.app.backup.S3DbUploader { key, contentType, body ->
+                    client.put(key, contentType, body)
+                }
+            },
+            bookmarkFile = { File(filesDir, "backup/db_bookmark.txt") },
+            readLastSuccessDate = { configStore.lastDbBackupSuccessDate() },
+            writeLastSuccessDate = { configStore.setDbBackupSuccessDate(it) },
+        )
         // Plan 10 §4: register the crawler supervisor up-front so dht_crawler
         // is always listed in the daemons table (STOPPED until something starts
         // it), even when it is disabled or wifi-paused. Registration is pure —
@@ -230,6 +265,8 @@ class DaemonService : Service() {
             crawlerMaintenanceStatus = { crawlerMaintenance.status },
             crawlerBackupUpload = { bep51Backup.uploadNow(manual = true).message },
             crawlerBackupStatus = { bep51Backup.status },
+            crawlerBackupDbUpload = { dbBackup.uploadNow(manual = true).message },
+            crawlerBackupDbStatus = { dbBackup.status },
 )
         wifiGateMonitor = WifiGateMonitor(this)
         ftpHangWatchdog = FtpHangWatchdog(
@@ -291,6 +328,7 @@ class DaemonService : Service() {
         ftpHangWatchdog.start()
         wifiGateMonitor.start()
         bep51Backup.start()
+        dbBackup.start()
         observeWifiForFtp()
         observeWifiForCrawler()
         startSupervisors()
@@ -301,6 +339,7 @@ class DaemonService : Service() {
         rollbackJob?.cancel()
         controlServer.stop()
         bep51Backup.stop()
+        dbBackup.stop()
         crawlerProxy?.stop()
         crawlerProxy = null
         ftpObservingJob?.cancel()

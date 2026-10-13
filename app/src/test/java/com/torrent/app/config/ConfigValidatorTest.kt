@@ -201,4 +201,37 @@ class ConfigValidatorTest {
     @Test fun backupBootstrapDisabled_emptyUrl_passes() {
         assertTrue(ConfigValidator.validateBackup(BackupSettings(bootstrapEnabled = false, bootstrapUrl = "")).ok)
     }
+
+    @Test fun validDbBackup_passes() {
+        assertTrue(ConfigValidator.validateDbBackup(validBackup().copy(dbBackupEnabled = true)).ok)
+    }
+
+    @Test fun dbBackupDisabled_emptyValues_pass() {
+        assertTrue(ConfigValidator.validateDbBackup(BackupSettings()).ok)
+    }
+
+    @Test fun dbBackupHttpEndpoint_fails() {
+        val r = ConfigValidator.validateDbBackup(
+            validBackup().copy(dbBackupEnabled = true, r2Endpoint = "http://acme.r2.cloudflarestorage.com"))
+        assertFalse(r.ok); assertTrue(r.errors.any { it.contains("R2 endpoint", true) })
+    }
+
+    @Test fun dbBackupMissingFields_fails() {
+        val r = ConfigValidator.validateDbBackup(
+            validBackup().copy(dbBackupEnabled = true, r2DbBucket = "", r2AccessKeyId = "", r2SecretAccessKey = ""))
+        assertFalse(r.ok)
+        assertTrue(r.errors.any { it.contains("DB bucket", true) })
+        assertTrue(r.errors.any { it.contains("access key ID", true) })
+        assertTrue(r.errors.any { it.contains("secret access key", true) })
+    }
+
+    @Test fun dbBackupBlankPrefix_fails() {
+        assertFalse(ConfigValidator.validateDbBackup(
+            validBackup().copy(dbBackupEnabled = true, r2DbObjectPrefix = "")).ok)
+    }
+
+    @Test fun dbBackupPrefixWithSlash_fails() {
+        assertFalse(ConfigValidator.validateDbBackup(
+            validBackup().copy(dbBackupEnabled = true, r2DbObjectPrefix = "a/b")).ok)
+    }
 }

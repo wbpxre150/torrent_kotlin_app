@@ -17,6 +17,9 @@ object WizardSubmit {
         val r2AccessKeyId: String = "",
         val r2SecretAccessKey: String = "",
         val uploadEnabled: Boolean = false,
+        val dbBackupEnabled: Boolean = false,
+        val r2DbBucket: String = ConfigDefaults.DB_BACKUP_BUCKET,
+        val r2DbObjectPrefix: String = ConfigDefaults.DB_BACKUP_OBJECT_PREFIX,
         val bootstrapEnabled: Boolean = false,
         val bootstrapUrl: String = "",
     )
@@ -43,6 +46,9 @@ object WizardSubmit {
             r2AccessKeyId = f.r2AccessKeyId,
             r2SecretAccessKey = f.r2SecretAccessKey,
             uploadEnabled = f.uploadEnabled,
+            dbBackupEnabled = f.dbBackupEnabled,
+            r2DbBucket = f.r2DbBucket,
+            r2DbObjectPrefix = f.r2DbObjectPrefix,
             bootstrapEnabled = f.bootstrapEnabled,
             bootstrapUrl = f.bootstrapUrl,
         )
@@ -57,7 +63,8 @@ object WizardSubmit {
         val errors = ConfigValidator.validateTransmission(tx).errors +
                      ConfigValidator.validateFtp(ftp).errors +
                      ConfigValidator.validateDataDir(cfg).errors +
-                     ConfigValidator.validateBackup(backup).errors
+                     ConfigValidator.validateBackup(backup).errors +
+                     ConfigValidator.validateDbBackup(backup).errors
         return if (errors.isEmpty()) Outcome(true, emptyList(), tx, ftp, backup, f.crawlerEnabled)
                else Outcome(false, errors, null, null, null, false)
     }

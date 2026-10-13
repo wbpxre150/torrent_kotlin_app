@@ -102,4 +102,48 @@ class WizardSubmitTest {
         assertFalse(o.ok)
         assertTrue(o.errors.any { it.contains("bootstrap", true) })
     }
+
+    @Test fun dbBackupFieldsMappedIntoOutcome() {
+        val o = WizardSubmit.submit(validForm().copy(
+            r2Endpoint = "https://acme.r2.cloudflarestorage.com",
+            r2AccessKeyId = "AKID",
+            r2SecretAccessKey = "s3cr3t",
+            dbBackupEnabled = true,
+            r2DbBucket = "my-dht-backup",
+            r2DbObjectPrefix = "custom",
+        ))
+        assertTrue(o.ok)
+        val b = o.backup!!
+        assertTrue(b.dbBackupEnabled)
+        assertEquals("my-dht-backup", b.r2DbBucket)
+        assertEquals("custom", b.r2DbObjectPrefix)
+    }
+
+    @Test fun dbBackupDefaults() {
+        val o = WizardSubmit.submit(validForm())
+        assertTrue(o.ok)
+        val b = o.backup!!
+        assertFalse(b.dbBackupEnabled)
+        assertEquals("dht_backup", b.r2DbBucket)
+        assertEquals("db", b.r2DbObjectPrefix)
+    }
+
+    @Test fun dbBackupEnabledMissingFieldsFails() {
+        val o = WizardSubmit.submit(validForm().copy(dbBackupEnabled = true))
+        assertFalse(o.ok)
+        assertNull(o.backup)
+        assertTrue(o.errors.any { it.contains("R2", true) })
+    }
+
+    @Test fun dbBackupEnabledSlashPrefixFails() {
+        val o = WizardSubmit.submit(validForm().copy(
+            r2Endpoint = "https://acme.r2.cloudflarestorage.com",
+            r2AccessKeyId = "AKID",
+            r2SecretAccessKey = "s3cr3t",
+            dbBackupEnabled = true,
+            r2DbObjectPrefix = "a/b",
+        ))
+        assertFalse(o.ok)
+        assertTrue(o.errors.any { it.contains("prefix", true) })
+    }
 }

@@ -124,6 +124,38 @@ class ControlServerHelpersTest {
             json)
     }
 
+    @Test fun dbBackupStatusJson_idleStatus() {
+        val json = ControlServer.dbBackupStatusJson(com.torrent.app.backup.DbBackupStatus())
+        assertEquals(
+            "{\"state\":\"IDLE\",\"message\":\"\",\"lastAttempt\":null,\"lastSuccess\":null,"
+                + "\"bytes\":null,\"sqlBytes\":null,\"statementCount\":null,\"objectKey\":null,"
+                + "\"uploadEnabled\":false,\"configured\":false}",
+            json)
+    }
+
+    @Test fun dbBackupStatusJson_fullStatusEscapesMessage() {
+        val st = com.torrent.app.backup.DbBackupStatus(
+            state = com.torrent.app.backup.DbBackupState.SUCCESS,
+            message = "uploaded 123 bytes to \"db/incremental_20231114_0-10.sql.gz\" (3 statements)",
+            lastAttempt = 111L,
+            lastSuccess = 222L,
+            uploadedBytes = 123L,
+            sqlBytes = 123L,
+            statementCount = 3,
+            objectKey = "db/incremental_20231114_0-10.sql.gz",
+            uploadEnabled = true,
+            configured = true,
+        )
+        val json = ControlServer.dbBackupStatusJson(st)
+        assertEquals(
+            "{\"state\":\"SUCCESS\","
+                + "\"message\":\"uploaded 123 bytes to \\\"db/incremental_20231114_0-10.sql.gz\\\" (3 statements)\","
+                + "\"lastAttempt\":111,\"lastSuccess\":222,\"bytes\":123,\"sqlBytes\":123,"
+                + "\"statementCount\":3,\"objectKey\":\"db/incremental_20231114_0-10.sql.gz\","
+                + "\"uploadEnabled\":true,\"configured\":true}",
+            json)
+    }
+
     @Test fun esc_escapesHtmlAndQuotes() {
         assertEquals("a&quot;b &amp; c&lt;d&gt;", ControlServer.esc("a\"b & c<d>"))
         assertEquals("plain", ControlServer.esc("plain"))
@@ -156,6 +188,23 @@ class ControlServerHelpersTest {
         val renamed = ControlServer.backupSettingsFromForm(
             mapOf("r2ObjectKey" to "other/key.gz"), current)
         assertEquals("other/key.gz", renamed.r2ObjectKey)
+    }
+
+    @Test fun backupSettingsFromForm_dbFields() {
+        val current = backupSettingsForFormTest().copy(
+            dbBackupEnabled = true, r2DbBucket = "cur-bucket", r2DbObjectPrefix = "cur-prefix")
+        val off = ControlServer.backupSettingsFromForm(emptyMap(), current)
+        assertFalse(off.dbBackupEnabled)
+        // Missing values fall back to the current settings.
+        assertEquals("cur-bucket", off.r2DbBucket)
+        assertEquals("cur-prefix", off.r2DbObjectPrefix)
+        val on = ControlServer.backupSettingsFromForm(
+            mapOf("dbBackupEnabled" to "", "r2DbBucket" to "new-bucket", "r2DbObjectPrefix" to ""),
+            current)
+        assertTrue(on.dbBackupEnabled)
+        assertEquals("new-bucket", on.r2DbBucket)
+        // A blank prefix keeps the current value.
+        assertEquals("cur-prefix", on.r2DbObjectPrefix)
     }
 
     private fun backupSettingsForFormTest() = BackupSettings(

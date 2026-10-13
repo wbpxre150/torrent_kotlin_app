@@ -134,6 +134,42 @@ class ConfigStoreTest {
         assertEquals("https://unjumble.au/bep51/bep51_cache.dat.gz", b.bootstrapUrl)
     }
 
+    @Test fun saveBackup_dbFieldsRoundTrip() {
+        store().saveBackup(
+            BackupSettings(
+                r2Endpoint = "https://acme.r2.cloudflarestorage.com",
+                r2Bucket = "cache",
+                r2AccessKeyId = "AKID",
+                r2SecretAccessKey = "s3cr3t",
+                dbBackupEnabled = true,
+                r2DbBucket = "my-dht-backup",
+                r2DbObjectPrefix = "custom",
+            )
+        )
+        val b = store().load().backup
+        assertTrue(b.dbBackupEnabled)
+        assertEquals("my-dht-backup", b.r2DbBucket)
+        assertEquals("custom", b.r2DbObjectPrefix)
+    }
+
+    @Test fun backupDbDefaults_disabledWithDhtBackupBucket() {
+        val b = store().load().backup
+        assertFalse(b.dbBackupEnabled)
+        assertEquals("dht_backup", b.r2DbBucket)
+        assertEquals("db", b.r2DbObjectPrefix)
+    }
+
+    @Test fun dbBackupSuccessDate_roundTrips() {
+        val s = store()
+        assertNull(s.lastDbBackupSuccessDate())
+        s.setDbBackupSuccessDate("2025-01-02")
+        assertEquals("2025-01-02", s.lastDbBackupSuccessDate())
+        // Independent of the BEP51 cache upload date.
+        s.setLastBackupSuccessDate("2025-01-03")
+        assertEquals("2025-01-02", s.lastDbBackupSuccessDate())
+        assertEquals("2025-01-03", s.lastBackupSuccessDate())
+    }
+
     @Test fun setWizardCompleted_persists() {
         val s = store()
         assertFalse(s.load().wizardCompleted)

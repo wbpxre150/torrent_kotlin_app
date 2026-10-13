@@ -55,6 +55,9 @@ class ConfigStore(context: Context) {
             r2AccessKeyId = prefs.getString(KEY_BACKUP_R2_ACCESS_KEY_ID, ConfigDefaults.BACKUP.r2AccessKeyId)!!,
             r2SecretAccessKey = prefs.getString(KEY_BACKUP_R2_SECRET, ConfigDefaults.BACKUP.r2SecretAccessKey)!!,
             uploadEnabled = prefs.getBoolean(KEY_BACKUP_UPLOAD_ENABLED, ConfigDefaults.BACKUP.uploadEnabled),
+            dbBackupEnabled = prefs.getBoolean(KEY_BACKUP_DB_ENABLED, ConfigDefaults.BACKUP.dbBackupEnabled),
+            r2DbBucket = prefs.getString(KEY_BACKUP_R2_DB_BUCKET, ConfigDefaults.BACKUP.r2DbBucket)!!,
+            r2DbObjectPrefix = prefs.getString(KEY_BACKUP_R2_DB_OBJECT_PREFIX, ConfigDefaults.BACKUP.r2DbObjectPrefix)!!,
             bootstrapEnabled = prefs.getBoolean(KEY_BACKUP_BOOTSTRAP_ENABLED, ConfigDefaults.BACKUP.bootstrapEnabled),
             bootstrapUrl = prefs.getString(KEY_BACKUP_BOOTSTRAP_URL, ConfigDefaults.BACKUP.bootstrapUrl)!!,
         ),
@@ -129,6 +132,9 @@ class ConfigStore(context: Context) {
             .putString(KEY_BACKUP_R2_ACCESS_KEY_ID, s.r2AccessKeyId)
             .putString(KEY_BACKUP_R2_SECRET, s.r2SecretAccessKey)
             .putBoolean(KEY_BACKUP_UPLOAD_ENABLED, s.uploadEnabled)
+            .putBoolean(KEY_BACKUP_DB_ENABLED, s.dbBackupEnabled)
+            .putString(KEY_BACKUP_R2_DB_BUCKET, s.r2DbBucket)
+            .putString(KEY_BACKUP_R2_DB_OBJECT_PREFIX, s.r2DbObjectPrefix)
             .putBoolean(KEY_BACKUP_BOOTSTRAP_ENABLED, s.bootstrapEnabled)
             .putString(KEY_BACKUP_BOOTSTRAP_URL, s.bootstrapUrl)
             .apply()
@@ -137,8 +143,15 @@ class ConfigStore(context: Context) {
     /** Local date (`yyyy-MM-dd`) of the last successful BEP51 cache upload (Stage 4). */
     fun lastBackupSuccessDate(): String? = prefs.getString(KEY_BACKUP_LAST_SUCCESS_DATE, null)
 
+    /** Local date (`yyyy-MM-dd`) of the last successful DB-dump upload (plan 2, Stage 3). */
+    fun lastDbBackupSuccessDate(): String? = prefs.getString(KEY_BACKUP_DB_LAST_SUCCESS_DATE, null)
+
     fun setLastBackupSuccessDate(date: String) {
         prefs.edit().putString(KEY_BACKUP_LAST_SUCCESS_DATE, date).apply()
+    }
+
+    fun setDbBackupSuccessDate(date: String) {
+        prefs.edit().putString(KEY_BACKUP_DB_LAST_SUCCESS_DATE, date).apply()
     }
 
     fun setWizardCompleted() { prefs.edit().putBoolean(KEY_WIZARD, true).apply() }
@@ -287,6 +300,10 @@ class ConfigStore(context: Context) {
         private const val KEY_BACKUP_BOOTSTRAP_ENABLED = "backup_bootstrap_enabled"
         private const val KEY_BACKUP_BOOTSTRAP_URL = "backup_bootstrap_url"
         private const val KEY_BACKUP_LAST_SUCCESS_DATE = "backup_last_success_date"
+        private const val KEY_BACKUP_DB_ENABLED = "backup_db_enabled"
+        private const val KEY_BACKUP_R2_DB_BUCKET = "backup_r2_db_bucket"
+        private const val KEY_BACKUP_R2_DB_OBJECT_PREFIX = "backup_r2_db_object_prefix"
+        private const val KEY_BACKUP_DB_LAST_SUCCESS_DATE = "backup_db_last_success_date"
         private const val KEY_LKG_CRAWLER_PRESENT = "lkg_crawler_present"
         private const val KEY_LKG_CRAWLER_ENABLED = "lkg_crawler_enabled"
         private const val KEY_LKG_CRAWLER_WIFI_ONLY = "lkg_crawler_wifi_only"
