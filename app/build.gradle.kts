@@ -418,7 +418,8 @@ tasks.register("prepareDhtCrawlerSrc") {
         for (patchName in listOf(
             "bencode-cap-fix.patch",
             "bencode-init-fix.patch",
-            "civetweb-stop-flag-atomic.patch"
+            "civetweb-stop-flag-atomic.patch",
+            "bep51-periodic-cache-save.patch"
         )) {
             project.exec {
                 commandLine("patch", "-p1", "-d", destDir.absolutePath, "-i", file("$destDir/patches/$patchName").absolutePath)
