@@ -207,11 +207,20 @@ fun MainScreen(
         verticalArrangement = Arrangement.Top
     ) {
         Text(
-            text = "Torrent App",
-            style = MaterialTheme.typography.headlineMedium
+            text = "USB Storage",
+            style = MaterialTheme.typography.titleMedium
         )
+        Spacer(modifier = Modifier.height(8.dp))
+        val status = safStatus
+        Text(
+            text = if (status?.granted == true) "USB: connected (${status.treeUri?.takeLast(24) ?: ""})"
+                   else "USB: not granted",
+            style = MaterialTheme.typography.bodyMedium
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Button(onClick = onGrantUsb) { Text("Grant USB") }
 
-        Spacer(modifier = Modifier.height(24.dp))
+        Spacer(modifier = Modifier.height(32.dp))
 
         // Connection info (shown when network is available)
         if (showConnection) {
@@ -238,21 +247,6 @@ fun MainScreen(
                 style = MaterialTheme.typography.bodyMedium
             )
         }
-
-        Spacer(modifier = Modifier.height(32.dp))
-        Text(
-            text = "USB Storage",
-            style = MaterialTheme.typography.titleMedium
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        val status = safStatus
-        Text(
-            text = if (status?.granted == true) "USB: connected (${status.treeUri?.takeLast(24) ?: ""})"
-                   else "USB: not granted",
-            style = MaterialTheme.typography.bodyMedium
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        Button(onClick = onGrantUsb) { Text("Grant USB") }
 
         // QR code pinned to the bottom of the screen
         Spacer(modifier = Modifier.weight(1f))
