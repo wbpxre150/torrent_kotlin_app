@@ -151,11 +151,12 @@ class S3ClientTest {
     }
 
     private fun client(
+        endpoint: String = "http://127.0.0.1:${port()}",
         sleeper: (Long) -> Unit = { },
         openCount: AtomicInteger? = null,
     ): S3Client {
         return S3Client(
-            endpoint = "http://127.0.0.1:${port()}",
+            endpoint = endpoint,
             bucket = "my-bucket",
             accessKeyId = "AKIDEXAMPLE",
             secretAccessKey = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
@@ -196,6 +197,36 @@ class S3ClientTest {
         assertTrue(auth, auth.contains("/auto/s3/aws4_request"))
         assertTrue(auth, auth.contains("SignedHeaders=host;x-amz-content-sha256;x-amz-date"))
         assertTrue(auth, auth.matches(Regex(".*Signature=[0-9a-f]{64}$")))
+    }
+
+    @Test(timeout = 10_000)
+    fun putSignsPathExactlyAsSentWithEndpointPrefix() {
+        planned.add(PlannedResponse(200, etag = "\"abc123\""))
+        val body = "hello r2".toByteArray()
+        val result = client(endpoint = "http://127.0.0.1:${port()}/base")
+            .put("dir/my file.pdf", "application/pdf", body)
+
+        result.expect<S3PutResult.Success>()
+
+        val recorded = synchronized(requests) { requests.toList() }.single()
+        assertEquals("PUT", recorded.method)
+        // The bucket/key are appended after the endpoint's own path prefix.
+        assertEquals("/base/my-bucket/dir/my%20file.pdf", recorded.path)
+        val date = recorded.headers.getValue("x-amz-date").single()
+        // Re-sign over exactly the path the stub observed on the wire, with the same
+        // host header and the request's own timestamp: the Authorization must match.
+        val expected = SigV4.sign(
+            accessKeyId = "AKIDEXAMPLE",
+            secretAccessKey = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+            method = "PUT",
+            host = "127.0.0.1:${port()}",
+            path = recorded.path,
+            payload = body,
+            timestamp = date,
+            region = "auto",
+            service = "s3",
+        ).headers.getValue("Authorization")
+        assertEquals(expected, recorded.headers.getValue("authorization").single())
     }
 
     @Test(timeout = 10_000)

@@ -55,7 +55,10 @@ class S3Client(
      */
     fun put(objectKey: String, contentType: String, body: ByteArray): S3PutResult {
         val url = objectUrl(objectKey)
-        val path = "/" + SigV4.encodeS3PathSegment(bucket) + "/" + encodedKeyPath(objectKey)
+        // Sign the path exactly as sent on the wire: `url.path` is the raw (percent-encoded)
+        // path of the request URL, which also covers endpoints that already carry a path
+        // prefix (e.g. `https://acct.r2.cloudflarestorage.com/unjumble`).
+        val path = url.path.ifEmpty { "/" }
         val date = amzDate(timeSource())
         val signed = SigV4.sign(
             accessKeyId = accessKeyId,
