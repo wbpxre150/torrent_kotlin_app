@@ -128,6 +128,12 @@ class ControlServer(
                         call.respondText(html, ContentType.Text.Html)
                     }
 
+                    // Crawler stats page (webui stage 2): a live view fed by
+                    // the stats websocket below; the page never polls.
+                    get("stats") {
+                        call.respondText(buildStatsPage(), ContentType.Text.Html)
+                    }
+
                     get("api/status") { call.respondText(buildStatusJson(), ContentType.Application.Json) }
                     get("downloads") { call.respondText(buildDownloadsJson(), ContentType.Application.Json) }
 
@@ -501,6 +507,7 @@ class ControlServer(
               <a class="cfg" href="/settings/ftp">FTP settings</a>
               <a class="cfg" href="/settings/storage">Storage</a>
               <a class="cfg" href="/settings/crawler">Crawler</a>
+              <a class="cfg" href="/stats">Crawler Stats</a>
             </p>
             <h2>Daemons</h2>
             <table><tr><th>Name</th><th>State</th><th>PID</th><th>Uptime</th><th>Restarts</th><th>Control</th></tr>
@@ -971,18 +978,6 @@ class ControlServer(
         }
     }
 
-    private val panelCss = """
-        body{font-family:system-ui,sans-serif;max-width:640px;margin:2em auto;padding:0 1em}
-        label{display:block;margin:.6em 0} input{display:block;width:100%;padding:6px;box-sizing:border-box;margin-top:2px}
-        fieldset{margin:.8em 0;border:1px solid #ddd;border-radius:4px}
-        fieldset label{display:inline-block;width:auto;vertical-align:middle} fieldset input{display:inline;width:auto}
-        label.row{display:block} .meta{color:#666;font-size:.9em}
-        .ok{background:#d4edda;color:#155724;padding:.6em;border-radius:4px;margin:1em 0}
-        .err{background:#f8d7da;color:#721c24;padding:.6em;border-radius:4px;margin:1em 0}
-        .warn{background:#fff3cd;color:#856404;padding:.6em;border-radius:4px;margin:1em 0}
-        button{padding:.5em 1em;margin-top:1em}
-    """.trimIndent()
-
     private fun urlEnc(s: String): String = URLEncoder.encode(s, "UTF-8")
     // ── helpers ─────────────────────────────────────────────────────────────
 
@@ -1009,6 +1004,244 @@ class ControlServer(
         internal fun esc(s: String): String =
             s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 .replace("\"", "&quot;")
+
+        /** Shared CSS for the simple settings/display pages. */
+        private val panelCss = """
+            body{font-family:system-ui,sans-serif;max-width:640px;margin:2em auto;padding:0 1em}
+            label{display:block;margin:.6em 0} input{display:block;width:100%;padding:6px;box-sizing:border-box;margin-top:2px}
+            fieldset{margin:.8em 0;border:1px solid #ddd;border-radius:4px}
+            fieldset label{display:inline-block;width:auto;vertical-align:middle} fieldset input{display:inline;width:auto}
+            label.row{display:block} .meta{color:#666;font-size:.9em}
+            .ok{background:#d4edda;color:#155724;padding:.6em;border-radius:4px;margin:1em 0}
+            .err{background:#f8d7da;color:#721c24;padding:.6em;border-radius:4px;margin:1em 0}
+            .warn{background:#fff3cd;color:#856404;padding:.6em;border-radius:4px;margin:1em 0}
+            button{padding:.5em 1em;margin-top:1em}
+        """.trimIndent()
+
+        /**
+         * The /stats page (webui stage 2): a live view of the crawler's
+         * /stats JSON, pushed over the stats websocket (no polling). All
+         * markup, CSS and JS are inline — no external assets. Every
+         * object/array renders as a collapsible section keyed by a stable
+         * path ("supervisor", "trees.2", "trees.2.queues"); the user's
+         * expand/collapse choices live in the page's `openOverrides` map
+         * and survive every re-render. The `running:false` fallback payload
+         * swaps the sections for a status banner and recovers on its own
+         * when real stats resume.
+         */
+        internal fun buildStatsPage(): String = """
+            <!DOCTYPE html><html><head><title>Torrent App — Crawler Stats</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <style>$panelCss
+              body{max-width:820px}
+              a.cfg{display:inline-block;margin:.5em .5em .5em 0;padding:.4em .8em;background:#fff;border-radius:4px;text-decoration:none;border:1px solid #ddd}
+              .strip{display:flex;flex-wrap:wrap;gap:.4em 1.5em;margin:1em 0;background:#fff;border-radius:6px;padding:.75em 1em;box-shadow:0 1px 3px rgba(0,0,0,.1)}
+              .strip div{font-size:.95em}
+              .strip b{display:block;font-size:.7em;text-transform:uppercase;letter-spacing:.05em;color:#666;font-weight:600}
+              .live{padding:2px 8px;border-radius:4px;font-size:.85em;font-weight:600;white-space:nowrap}
+              .live.ok{background:#d4edda;color:#155724}.live.bad{background:#f8d7da;color:#721c24}
+              .banner{padding:.6em;border-radius:4px;margin:1em 0}
+              .banner.stop{background:#f8d7da;color:#721c24}
+              .banner.start{background:#fff3cd;color:#856404}
+              section{margin:0 0 .75em}
+              .head{cursor:pointer;user-select:none;background:#fff;border:1px solid #ddd;border-radius:4px;padding:.5em .9em;font-weight:600}
+              .head .tri{display:inline-block;width:1.2em;color:#666}
+              .body{border:1px solid #ddd;border-top:none;border-radius:0 0 4px 4px;padding:.25em .9em .6em;background:#fafafa}
+              .row{display:flex;gap:.5em;padding:.15em 0;font-size:.95em}
+              .row .k{color:#666;min-width:11em;flex-shrink:0}
+              .row .v{overflow-wrap:anywhere}
+            </style></head><body>
+            <h1>Crawler Stats</h1>
+            <p>
+              <a class="cfg" href="/">Dashboard</a>
+              <a class="cfg" href="/settings/crawler">Crawler settings</a>
+            </p>
+            <p class="meta">Feed: <span id="live" class="live bad">connecting…</span>
+               &nbsp; last update: <span id="updated">—</span></p>
+            <div class="strip">
+              <div><b>Version</b><span id="s-version">—</span></div>
+              <div><b>Uptime</b><span id="s-uptime">—</span></div>
+              <div><b>Indexed torrents</b><span id="s-torrents">—</span></div>
+              <div><b>Indexed files</b><span id="s-files">—</span></div>
+              <div><b>New torrents (1h)</b><span id="s-last-hour">—</span></div>
+              <div><b>Timestamp</b><span id="s-timestamp">—</span></div>
+            </div>
+            <div id="banner" class="banner stop">Waiting for the first stats push…</div>
+            <div id="tree"></div>
+            <script>
+            (function () {
+              var ws = null;
+              var backoff = 1000;
+              var MAX_BACKOFF = 30000;
+              var lastData = null;
+              var lastFrameAt = null;
+              // Explicit expand/collapse choices keyed by a stable section
+              // path ("supervisor", "trees.2", "trees.2.queues"); they
+              // survive every re-render because render() re-reads them.
+              var openOverrides = {};
+
+              function el(id) { return document.getElementById(id); }
+
+              function setLive(ok, label) {
+                var s = el('live');
+                s.textContent = label;
+                s.className = 'live ' + (ok ? 'ok' : 'bad');
+              }
+
+              function connect() {
+                var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+                // Same-origin upgrade: the control_token cookie is sent
+                // automatically; a ?token= in the page URL rides along too.
+                ws = new WebSocket(proto + '//' + location.host + '/stats/ws' + location.search);
+                ws.onopen = function () {
+                  backoff = 1000;
+                  setLive(true, 'live');
+                };
+                ws.onmessage = function (ev) {
+                  var data = null;
+                  try { data = JSON.parse(ev.data); } catch (e) { return; }
+                  lastData = data;
+                  lastFrameAt = new Date();
+                  render();
+                };
+                ws.onclose = function () {
+                  setLive(false, 'reconnecting in ' + Math.round(backoff / 1000) + 's…');
+                  var wait = backoff;
+                  backoff = Math.min(backoff * 2, MAX_BACKOFF);
+                  setTimeout(connect, wait);
+                };
+                ws.onerror = function () { try { ws.close(); } catch (e) {} };
+              }
+
+              function esc(s) {
+                var d = document.createElement('div');
+                d.textContent = s;
+                return d.innerHTML;
+              }
+
+              function fmtScalar(v) {
+                if (v === null || v === undefined) return '—';
+                if (typeof v === 'number') return String(Math.round(v * 10000) / 10000);
+                if (typeof v === 'boolean') return v ? 'yes' : 'no';
+                return String(v);
+              }
+
+              function defaultOpen(depth) {
+                // Top-level sections and per-item objects start expanded;
+                // deeper nesting (e.g. a tree's queues) starts collapsed.
+                return depth <= 2;
+              }
+
+              function isOpen(path, depth) {
+                var o = openOverrides[path];
+                return o !== undefined ? o : defaultOpen(depth);
+              }
+
+              function rowHtml(key, value) {
+                return '<div class="row"><span class="k">' + esc(String(key)) + '</span>' +
+                    '<span class="v">' + esc(fmtScalar(value)) + '</span></div>';
+              }
+
+              function itemTitle(parentKey, item, index) {
+                if (parentKey === 'trees') {
+                  var t = 'tree ' + (item.tree_id != null ? item.tree_id : index);
+                  return item.phase ? t + ' \u2014 ' + item.phase : t;
+                }
+                if (parentKey === 'partitions') {
+                  return 'partition ' + (item.partition != null ? item.partition : index);
+                }
+                return 'item ' + index;
+              }
+
+              function sectionNode(title, value, path, depth) {
+                var open = isOpen(path, depth);
+                var html = '<section><div class="head" data-path="' + esc(path) + '">' +
+                    '<span class="tri">' + (open ? '\u25be' : '\u25b8') + '</span>' + esc(title) + '</div>';
+                if (open) {
+                  html += '<div class="body">' + childrenHtml(
+                      value, path, depth, Array.isArray(value) ? title : null) + '</div>';
+                }
+                return html + '</section>';
+              }
+
+              function childrenHtml(value, path, depth, parentKey) {
+                var html = '';
+                if (Array.isArray(value)) {
+                  for (var i = 0; i < value.length; i++) {
+                    var item = value[i];
+                    var p = (path ? path + '.' : '') + i;
+                    if (item !== null && typeof item === 'object') {
+                      html += sectionNode(itemTitle(parentKey, item, i), item, p, depth + 1);
+                    } else {
+                      html += rowHtml(String(i), item);
+                    }
+                  }
+                } else if (value !== null && typeof value === 'object') {
+                  for (var k in value) {
+                    if (!Object.prototype.hasOwnProperty.call(value, k)) continue;
+                    var v = value[k];
+                    var p2 = (path ? path + '.' : '') + k;
+                    if (v !== null && typeof v === 'object') {
+                      html += sectionNode(k, v, p2, depth + 1);
+                    } else {
+                      html += rowHtml(k, v);
+                    }
+                  }
+                } else {
+                  html += rowHtml(parentKey || 'value', value);
+                }
+                return html;
+              }
+
+              function render() {
+                var data = lastData;
+                el('s-version').textContent = fmtScalar(data ? data.version : null);
+                el('s-uptime').textContent = fmtScalar(data ? data.uptime : null);
+                el('s-torrents').textContent = fmtScalar(data ? data.torrents_indexed : null);
+                el('s-files').textContent = fmtScalar(data ? data.files_indexed : null);
+                el('s-last-hour').textContent = fmtScalar(data ? data.torrents_last_hour : null);
+                el('s-timestamp').textContent = fmtScalar(data ? data.timestamp : null);
+                el('updated').textContent = lastFrameAt ? lastFrameAt.toLocaleTimeString() : '—';
+                var banner = el('banner');
+                var tree = el('tree');
+                if (!data) {
+                  banner.className = 'banner stop';
+                  banner.textContent = 'Waiting for the first stats push…';
+                  tree.innerHTML = '';
+                  return;
+                }
+                if (data.running === false) {
+                  var st = data.state || 'STOPPED';
+                  if (st === 'STARTING') {
+                    banner.className = 'banner start';
+                    banner.textContent = 'Crawler is starting \u2014 stats appear once its HTTP API is up.';
+                  } else {
+                    banner.className = 'banner stop';
+                    banner.textContent = 'Crawler not running (state: ' + st + ').';
+                  }
+                  tree.innerHTML = '';
+                  return;
+                }
+                banner.className = 'banner';
+                banner.textContent = '';
+                tree.innerHTML = childrenHtml(data, '', 0, null);
+              }
+
+              el('tree').addEventListener('click', function (ev) {
+                var head = ev.target.closest ? ev.target.closest('.head') : null;
+                if (!head) return;
+                var path = head.getAttribute('data-path');
+                var depth = path ? path.split('.').length : 0;
+                openOverrides[path] = !isOpen(path, depth);
+                render();
+              });
+
+              connect();
+              render();
+            })();
+            </script>
+            </body></html>
+        """.trimIndent()
 
         private fun jsonStr(s: String?): String =
             if (s == null) "null" else "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
