@@ -323,14 +323,14 @@ fun WizardScreen(
 ) {
     val cfg = boundService?.loadConfig()
     var txUser by remember { mutableStateOf(cfg?.transmission?.username ?: "torrentapp") }
-    var txPass by remember { mutableStateOf("") }
+    var txPass by remember { mutableStateOf(cfg?.transmission?.password ?: "") }
     var peerPort by remember { mutableStateOf((cfg?.transmission?.peerPort ?: 51413).toString()) }
     var dlSubpath by remember { mutableStateOf(cfg?.dataSubpath ?: "") }
     var ftpUser by remember { mutableStateOf(cfg?.ftp?.username ?: "kodi") }
-    var ftpPass by remember { mutableStateOf("") }
+    var ftpPass by remember { mutableStateOf(cfg?.ftp?.password ?: "") }
     var ftpPort by remember { mutableStateOf((cfg?.ftp?.port ?: 2121).toString()) }
-    var ftpWifiOnly by remember { mutableStateOf(cfg?.ftp?.wifiOnly ?: true) }
-    var crawlerEnabled by remember { mutableStateOf(false) }
+    var ftpWifiOnly by remember { mutableStateOf(cfg?.ftp?.wifiOnly ?: ConfigDefaults.FTP.wifiOnly) }
+    var crawlerEnabled by remember { mutableStateOf(cfg?.crawler?.enabled ?: false) }
     var r2Endpoint by remember { mutableStateOf(cfg?.backup?.r2Endpoint ?: "") }
     var r2Bucket by remember { mutableStateOf(cfg?.backup?.r2Bucket ?: "") }
     var r2ObjectKey by remember { mutableStateOf(cfg?.backup?.r2ObjectKey ?: ConfigDefaults.BACKUP_OBJECT_KEY) }
@@ -370,7 +370,7 @@ fun WizardScreen(
         Text("4. DHT crawler (optional)", style = MaterialTheme.typography.titleMedium)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Switch(checked = crawlerEnabled, onCheckedChange = { crawlerEnabled = it })
-            Spacer(Modifier.width(8.dp)); Text("Enable DHT crawler (default off)")
+            Spacer(Modifier.width(8.dp)); Text("Enable DHT crawler (default on)")
         }
 
         Text("5. Backup & Bootstrap (optional)", style = MaterialTheme.typography.titleMedium)

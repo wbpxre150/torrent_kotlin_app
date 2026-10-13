@@ -199,6 +199,6 @@ class ConfigValidatorTest {
     }
 
     @Test fun backupBootstrapDisabled_emptyUrl_passes() {
-        assertTrue(ConfigValidator.validateBackup(BackupSettings(bootstrapUrl = "")).ok)
+        assertTrue(ConfigValidator.validateBackup(BackupSettings(bootstrapEnabled = false, bootstrapUrl = "")).ok)
     }
 }

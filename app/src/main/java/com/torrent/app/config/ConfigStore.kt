@@ -143,10 +143,11 @@ class ConfigStore(context: Context) {
 
     fun setWizardCompleted() { prefs.edit().putBoolean(KEY_WIZARD, true).apply() }
 
-    /** FTP password auto-generates + persists on first access (preserves Stage 06 behavior). */
+    /** FTP password falls back to the built-in default + persists on first access;
+     *  a random password is only generated when the default is blank (Stage 06 behavior). */
     fun ftpPassword(): String {
         prefs.getString(KEY_FTP_PASS, null)?.let { if (it.isNotEmpty()) return it }
-        val gen = ConfigDefaults.randomPassword()
+        val gen = ConfigDefaults.FTP.password.ifEmpty { ConfigDefaults.randomPassword() }
         prefs.edit().putString(KEY_FTP_PASS, gen).apply()
         return gen
     }

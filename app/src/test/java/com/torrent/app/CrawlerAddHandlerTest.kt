@@ -100,7 +100,7 @@ class CrawlerAddHandlerTest {
 
     @Test
     fun found_blankDataSubpath_downloadsToUsbRoot() {
-        store.save(ConfigDefaults.INITIAL) // dataSubpath ""
+        store.save(ConfigDefaults.INITIAL.copy(dataSubpath = "")) // blank subpath downloads to USB root
         handler().add(HASH)
         assertEquals("/saf/usb", lastDownloadDir)
     }

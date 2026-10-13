@@ -19,7 +19,7 @@ data class FtpSettings(
 )
 
 data class CrawlerSettings(
-    val enabled: Boolean = false,
+    val enabled: Boolean = true,
     /** Start/stop only on wifi (default on: the crawler is bandwidth heavy). */
     val wifiOnly: Boolean = true,
     val logLevel: String = "INFO",
@@ -57,10 +57,10 @@ data class BackupSettings(
     val r2SecretAccessKey: String = "",
     /** Whether the periodic/daily upload to R2 runs. */
     val uploadEnabled: Boolean = false,
-    /** Wizard/app-start cache download toggle. */
-    val bootstrapEnabled: Boolean = false,
+    /** Wizard/app-start cache download toggle (default on: fresh installs seed the BEP51 cache). */
+    val bootstrapEnabled: Boolean = true,
     /** HTTPS URL serving the cache file for fresh installs. */
-    val bootstrapUrl: String = "",
+    val bootstrapUrl: String = ConfigDefaults.BACKUP_BOOTSTRAP_URL,
 )
 
 data class AppConfig(
@@ -79,14 +79,15 @@ object ConfigDefaults {
     const val FTP_PORT = 2121
     const val PASSWORD_MIN_LEN = 6
     const val FTP_PASSWORD_LEN = 24
-    const val DATA_SUBPATH = ""
+    const val DATA_SUBPATH = "torrent_data"
     const val BACKUP_OBJECT_KEY = "bep51/bep51_cache.dat.gz"
+    const val BACKUP_BOOTSTRAP_URL = "https://unjumble.au/bep51/bep51_cache.dat.gz"
     private val FTP_PASSWORD_CHARS =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789".toCharArray()
 
     val TRANSMISSION = TransmissionSettings(
         username = TRANSMISSION_USERNAME,
-        password = "test",
+        password = "testtest",
         peerPort = TRANSMISSION_PEER_PORT,
         speedLimitDown = 0,
         speedLimitUp = 0,
@@ -95,12 +96,12 @@ object ConfigDefaults {
     )
     val FTP = FtpSettings(
         username = FTP_USERNAME,
-        password = "",
+        password = "testtest",
         port = FTP_PORT,
-        wifiOnly = true,
+        wifiOnly = false,
     )
     val CRAWLER = CrawlerSettings(
-        enabled = false,
+        enabled = true,
     )
     val BACKUP = BackupSettings()
     val INITIAL = AppConfig(wizardCompleted = false, transmission = TRANSMISSION, ftp = FTP, crawler = CRAWLER, backup = BACKUP, dataSubpath = DATA_SUBPATH)

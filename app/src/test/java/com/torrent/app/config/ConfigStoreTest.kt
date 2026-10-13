@@ -19,12 +19,12 @@ class ConfigStoreTest {
         val c = store().load()
         assertFalse(c.wizardCompleted)
         assertEquals(ConfigDefaults.TRANSMISSION.username, c.transmission.username)
-        assertEquals("test", c.transmission.password)
+        assertEquals("testtest", c.transmission.password)
         assertEquals(51413, c.transmission.peerPort)
         assertEquals(2121, c.ftp.port)
-        assertTrue(c.ftp.wifiOnly)
+        assertFalse(c.ftp.wifiOnly)
         assertEquals(0, c.ftp.maxDownloadKiBps)
-        assertFalse("crawler must be disabled by default", c.crawler.enabled)
+        assertTrue("crawler must be enabled by default", c.crawler.enabled)
     }
 
     private fun prefs() =
@@ -56,9 +56,9 @@ class ConfigStoreTest {
         assertEquals("LegacyFtp", store().load().dataSubpath)
     }
 
-    @Test fun load_dataSubpath_defaultsToEmptyWhenNoKeyPresent() {
+    @Test fun load_dataSubpath_defaultsToTorrentDataWhenNoKeyPresent() {
         prefs().edit().clear().apply()
-        assertEquals("", store().load().dataSubpath)
+        assertEquals("torrent_data", store().load().dataSubpath)
     }
 
     @Test fun saveTransmission_persistsAndReloads() {
@@ -91,10 +91,10 @@ class ConfigStoreTest {
         assertFalse(s.load().crawler.enabled)
     }
 
-    @Test fun ftpPassword_autoGeneratesWhenEmpty_thenIdempotent() {
+    @Test fun ftpPassword_fallsBackToDefaultWhenEmpty_thenIdempotent() {
         val s = store()
         val p = s.ftpPassword()
-        assertTrue(p.length >= 16)
+        assertEquals(ConfigDefaults.FTP.password, p)
         assertEquals(p, s.ftpPassword())
     }
 
@@ -130,8 +130,8 @@ class ConfigStoreTest {
         assertEquals("", b.r2AccessKeyId)
         assertEquals("", b.r2SecretAccessKey)
         assertFalse(b.uploadEnabled)
-        assertFalse(b.bootstrapEnabled)
-        assertEquals("", b.bootstrapUrl)
+        assertTrue(b.bootstrapEnabled)
+        assertEquals("https://unjumble.au/bep51/bep51_cache.dat.gz", b.bootstrapUrl)
     }
 
     @Test fun setWizardCompleted_persists() {
@@ -211,7 +211,7 @@ class ConfigStoreTest {
 
     @Test fun crawlerDefaults_matchConfigIniDefault() {
         val c = store().load().crawler
-        assertFalse(c.enabled)
+        assertTrue(c.enabled)
         assertTrue(c.wifiOnly)
         assertEquals("INFO", c.logLevel)
         assertEquals(6881, c.dhtPort)
