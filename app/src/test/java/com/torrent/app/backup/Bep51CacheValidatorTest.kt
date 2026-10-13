@@ -75,4 +75,27 @@ class Bep51CacheValidatorTest {
             assertTrue((check as Bep51CacheCheck.Invalid).reason.startsWith("file is too small"))
         }
     }
+
+    @Test fun hugeNodeCountWithWrappingSizeRejected() {
+        // 12 + 39 * 110_127_367 = 4_294_967_325, which wraps to 29 in Int —
+        // exactly this crafted file's size, so Int arithmetic would have
+        // accepted it. The absurd node count must be rejected outright.
+        val bytes = ByteArray(29)
+        bytes[0] = 'B'.code.toByte()
+        bytes[1] = 'E'.code.toByte()
+        bytes[2] = 'P'.code.toByte()
+        bytes[3] = '1'.code.toByte()
+        bytes[4] = 0
+        bytes[5] = 0
+        bytes[6] = 0
+        bytes[7] = 2 // version 2
+        bytes[8] = (110_127_367 ushr 24).toByte()
+        bytes[9] = (110_127_367 ushr 16).toByte()
+        bytes[10] = (110_127_367 ushr 8).toByte()
+        bytes[11] = 110_127_367.toByte()
+        val check = Bep51CacheValidator.validate(bytes)
+        assertTrue(check is Bep51CacheCheck.Invalid)
+        assertTrue(
+            (check as Bep51CacheCheck.Invalid).reason.startsWith("node count too large"))
+    }
 }

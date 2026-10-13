@@ -5,6 +5,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+import com.torrent.app.config.BackupSettings
 import com.torrent.app.config.CrawlerSettings
 import com.torrent.app.migration.ConfigDiffEntry
 import com.torrent.app.migration.FileRole
@@ -181,4 +182,49 @@ class ControlServerHelpersTest {
                 + "\"uploadEnabled\":true,\"configured\":true}",
             json)
     }
+
+    @Test fun esc_escapesHtmlAndQuotes() {
+        assertEquals("a&quot;b &amp; c&lt;d&gt;", ControlServer.esc("a\"b & c<d>"))
+        assertEquals("plain", ControlServer.esc("plain"))
+    }
+
+    @Test fun backupSettingsFromForm_blankSecretKeepsCurrentValue() {
+        val current = backupSettingsForFormTest()
+        val s = ControlServer.backupSettingsFromForm(mapOf("r2SecretAccessKey" to ""), current)
+        assertEquals("keep-me", s.r2SecretAccessKey)
+        // Unrelated values fall back to the current settings.
+        assertEquals("bucket", s.r2Bucket)
+        assertEquals("https://example.com/c.gz", s.bootstrapUrl)
+    }
+
+    @Test fun backupSettingsFromForm_checkboxPresenceDrivesEnabledFlags() {
+        val current = backupSettingsForFormTest()
+        val off = ControlServer.backupSettingsFromForm(emptyMap(), current)
+        assertFalse(off.uploadEnabled)
+        assertFalse(off.bootstrapEnabled)
+        val on = ControlServer.backupSettingsFromForm(
+            mapOf("uploadEnabled" to "", "bootstrapEnabled" to ""), current)
+        assertTrue(on.uploadEnabled)
+        assertTrue(on.bootstrapEnabled)
+    }
+
+    @Test fun backupSettingsFromForm_blankObjectKeyKeepsCurrentValue() {
+        val current = backupSettingsForFormTest()
+        val s = ControlServer.backupSettingsFromForm(mapOf("r2ObjectKey" to ""), current)
+        assertEquals("custom/key.gz", s.r2ObjectKey)
+        val renamed = ControlServer.backupSettingsFromForm(
+            mapOf("r2ObjectKey" to "other/key.gz"), current)
+        assertEquals("other/key.gz", renamed.r2ObjectKey)
+    }
+
+    private fun backupSettingsForFormTest() = BackupSettings(
+        r2Endpoint = "https://acct.r2.cloudflarestorage.com",
+        r2Bucket = "bucket",
+        r2ObjectKey = "custom/key.gz",
+        r2AccessKeyId = "keyid",
+        r2SecretAccessKey = "keep-me",
+        uploadEnabled = true,
+        bootstrapEnabled = true,
+        bootstrapUrl = "https://example.com/c.gz",
+    )
 }

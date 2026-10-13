@@ -38,6 +38,13 @@ object Bep51CacheValidator {
     private const val RECORD_SIZE_V2 = 39
     private const val TRAILER_SIZE = 32
 
+    /**
+     * Upper bound on plausible node_count. Anything above is rejected
+     * outright; it also keeps `12 + n*39` far below Int.MAX_VALUE so the
+     * size comparison cannot overflow.
+     */
+    private const val MAX_NODE_COUNT = 2_000_000
+
     fun validate(bytes: ByteArray): Bep51CacheCheck {
         if (bytes.size < HEADER_SIZE) {
             return Bep51CacheCheck.Invalid(
@@ -58,10 +65,15 @@ object Bep51CacheValidator {
         if (nodeCount < 0) {
             return Bep51CacheCheck.Invalid("bad node_count $nodeCount")
         }
+        if (nodeCount > MAX_NODE_COUNT) {
+            return Bep51CacheCheck.Invalid("node count too large: $nodeCount")
+        }
+        // Long arithmetic: a crafted huge node_count must not wrap the
+        // expected size back into the Int range and pass the comparison.
         val bodySize = HEADER_SIZE.toLong() + nodeCount.toLong() * RECORD_SIZE_V2
-        return when (bytes.size) {
-            bodySize.toInt() -> Bep51CacheCheck.Valid(nodeCount, hasTrailer = false)
-            (bodySize + TRAILER_SIZE).toInt() -> {
+        return when (bytes.size.toLong()) {
+            bodySize -> Bep51CacheCheck.Valid(nodeCount, hasTrailer = false)
+            bodySize + TRAILER_SIZE -> {
                 val digest = sha256(bytes, 0, bodySize.toInt())
                 if (java.util.Arrays.equals(digest, 0, digest.size, bytes, bodySize.toInt(), bytes.size)) {
                     Bep51CacheCheck.Valid(nodeCount, hasTrailer = true)

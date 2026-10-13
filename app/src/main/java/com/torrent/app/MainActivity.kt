@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import com.torrent.app.config.ConfigDefaults
 import com.torrent.app.config.WizardSubmit
 import androidx.compose.foundation.Image
 import androidx.compose.material3.*
@@ -332,7 +333,7 @@ fun WizardScreen(
     var crawlerEnabled by remember { mutableStateOf(false) }
     var r2Endpoint by remember { mutableStateOf(cfg?.backup?.r2Endpoint ?: "") }
     var r2Bucket by remember { mutableStateOf(cfg?.backup?.r2Bucket ?: "") }
-    var r2ObjectKey by remember { mutableStateOf(cfg?.backup?.r2ObjectKey ?: "bep51/bep51_cache.dat.gz") }
+    var r2ObjectKey by remember { mutableStateOf(cfg?.backup?.r2ObjectKey ?: ConfigDefaults.BACKUP_OBJECT_KEY) }
     var r2AccessKeyId by remember { mutableStateOf(cfg?.backup?.r2AccessKeyId ?: "") }
     var r2SecretAccessKey by remember { mutableStateOf("") }
     var uploadEnabled by remember { mutableStateOf(cfg?.backup?.uploadEnabled ?: false) }
@@ -400,7 +401,11 @@ fun WizardScreen(
                     txUser, txPass, peerPort.toIntOrNull() ?: 0, dlSubpath,
                     ftpUser, ftpPass, ftpPort.toIntOrNull() ?: 0, ftpWifiOnly,
                     crawlerEnabled,
-                    r2Endpoint, r2Bucket, r2ObjectKey, r2AccessKeyId, r2SecretAccessKey,
+                    r2Endpoint, r2Bucket, r2ObjectKey, r2AccessKeyId,
+                    // Blank secret keeps the current value (same as the dashboard form),
+                    // so re-showing the wizard with upload enabled can't fail on it.
+                    if (r2SecretAccessKey.isBlank()) (svc.loadConfig()?.backup?.r2SecretAccessKey ?: "")
+                    else r2SecretAccessKey,
                     uploadEnabled, bootstrapEnabled, bootstrapUrl,
                 )
                 val outcome = WizardSubmit.submit(form)

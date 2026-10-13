@@ -307,4 +307,41 @@ class Bep51BackupManagerTest {
         assertTrue(st.message, st.message.contains("shutting down"))
         assertEquals(0, up.calls)
     }
+
+    @Test fun dailyGateSkipUpdatesLastAttemptAndKeepsPriorState() {
+        val up = FakeUploader()
+        var stored: String? = null
+        var now = DAY1
+        val m = newManager(
+            validCacheFile(), up,
+            clock = { now },
+            lastSuccessDate = { stored },
+            writeLastSuccessDate = { stored = it },
+        )
+        val first = m.runCheck(manual = false)
+        assertEquals(BackupState.SUCCESS, first.state)
+        assertEquals(DAY1, first.lastAttempt)
+        now += 60_000
+        val second = m.runCheck(manual = false)
+        assertTrue(second.message.contains("already uploaded today"))
+        assertEquals(BackupState.SUCCESS, second.state)
+        assertEquals(DAY1 + 60_000, second.lastAttempt)
+        assertEquals(1, up.calls)
+    }
+
+    @Test fun periodicTriggerWhileRunningKeepsStatusMessage() {
+        val up = FakeUploader()
+        val noop = NoopScheduledExecutorService()
+        val m = newManager(validCacheFile(), up, executor = noop)
+        m.uploadNow(manual = true)
+        assertEquals(BackupState.RUNNING, m.status.state)
+        // A periodic tick while the manual upload is in flight is refused,
+        // but must not clobber the in-flight status message.
+        val tick = m.uploadNow(manual = false)
+        assertEquals(BackupState.RUNNING, tick.state)
+        assertEquals(BackupState.RUNNING, m.status.state)
+        assertEquals("upload queued", m.status.message)
+        assertEquals(1, noop.submitted.get())
+        assertEquals(0, up.calls)
+    }
 }

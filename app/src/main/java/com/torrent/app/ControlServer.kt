@@ -1058,14 +1058,17 @@ class ControlServer(
     }
     private fun formatRate(bps: Long): String =
         if (bps <= 0) "—" else "%.1f KB/s".format(bps.toDouble() / 1024)
-    private fun esc(s: String): String =
-        s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     private fun formatMtime(ms: Long): String =
         if (ms <= 0) "—" else java.time.Instant.ofEpochMilli(ms)
             .atZone(java.time.ZoneId.systemDefault()).toLocalDateTime()
             .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
 
     companion object {
+        /** HTML-escapes a value for embedding in dashboard markup. */
+        internal fun esc(s: String): String =
+            s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                .replace("\"", "&quot;")
+
         private fun jsonStr(s: String?): String =
             if (s == null) "null" else "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 

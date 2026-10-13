@@ -106,7 +106,11 @@ class Bep51BackupManager(
     fun uploadNow(manual: Boolean): BackupStatus {
         val accepted = synchronized(lock) {
             if (status.state == BackupState.RUNNING) {
-                status = status.copy(message = "refused: an upload is already running")
+                // Only a manual trigger surfaces the refusal; a periodic tick
+                // must not clobber the in-flight upload's status message.
+                if (manual) {
+                    status = status.copy(message = "refused: an upload is already running")
+                }
                 false
             } else {
                 status = status.copy(state = BackupState.RUNNING, message = "upload queued")
@@ -167,9 +171,12 @@ class Bep51BackupManager(
         }
         val today = todayString()
         if (!manual && readLastSuccessDate() == today) {
-            // Daily gate: already uploaded today. Keep the previous state.
-            return status.copy(
-                message = "skipped: already uploaded today ($today)",
+            // Daily gate: already uploaded today. Keep the previous state, but
+            // route through finish() so lastAttempt is updated (per the
+            // BackupStatus KDoc).
+            return finish(
+                status.state,
+                "skipped: already uploaded today ($today)",
                 uploadEnabled = true, configured = true)
         }
         val file = cacheFile()
