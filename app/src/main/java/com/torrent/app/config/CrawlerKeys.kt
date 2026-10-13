@@ -110,7 +110,7 @@ object CrawlerKeys {
 
     /**
      * Estimated worker-thread count for [s]: `num_trees × (find_node + bep51 +
-     * get_peers + metadata)` + a fixed overhead. The 16-tree Termux-proven
+     * get_peers + metadata)` + a fixed overhead. The 16-tree
      * config estimates to 1552.
      */
     fun estimateThreads(s: CrawlerSettings): Int =

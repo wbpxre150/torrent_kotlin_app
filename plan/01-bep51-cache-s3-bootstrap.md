@@ -88,7 +88,7 @@ Depends on: nothing (this plan builds the shared SigV4 module that Plan 2 reuses
 ### Stage 4 — Upload manager (DaemonService wiring)
 - New collaborator constructed in `DaemonService.onCreate` (invariant 12): single-thread executor, scheduler
   (`ScheduledExecutorService` is sufficient — the FGS outlives it; WorkManager only if restart-resilience is wanted).
-- Upload flow: check `busy()` (don't race migration/apply/maintenance) → verify cache file passes the same
+- Upload flow: check `busy()` (don't race apply/maintenance) → verify cache file passes the same
   validation the crawler does (magic/version/size/SHA-256) → **gzip-compress** → PUT to `r2Bucket/r2ObjectKey`
   with `Content-Type: application/octet-stream` (or `application/gzip`) → record status.
 - **Decided: fixed object key, overwrite** — no timestamped history copies (R2 keeps object versioning if you
@@ -97,7 +97,7 @@ Depends on: nothing (this plan builds the shared SigV4 module that Plan 2 reuses
   copying the maintenance-route pattern; auth via the existing token interceptor.
 - **Decided: Wi-Fi-only gate** — reuse the `CrawlerGate`-style check used for crawler ops; cadence is **daily**.
 - Exit criteria: manual trigger from dashboard uploads the file and the object is fetchable via plain HTTPS GET;
-  status visible on the dashboard; upload skipped while a migration/apply is in flight.
+  status visible on the dashboard; upload skipped while an apply is in flight.
 
 ### Stage 5 — Wizard bootstrap download
 - On "Finish setup" (after validation, before `completeWizard()`/`startConfiguredDaemons()`):
@@ -113,7 +113,6 @@ Depends on: nothing (this plan builds the shared SigV4 module that Plan 2 reuses
   "Finish setup" button while the download runs, or run it after daemon-start with a note — pick during review.
 - **Decided: also re-download on later app starts** when the cache file is missing (e.g. after clear-data) and a
   bootstrap URL is configured — same download+validate+place flow, run by `DaemonService` (not the wizard UI).
-- Skip whenever a `TermuxMigration` import is pending (migration brings real data).
 - Exit criteria: fresh install with a bootstrap URL starts the crawler with a warm cache (verify via `/stats`
   `bep51_cache.cached_nodes` > 0 shortly after start); fresh install without a URL behaves as today; corrupt URL
   payload is rejected and does not end up on disk; a missing cache on a later start gets re-downloaded.

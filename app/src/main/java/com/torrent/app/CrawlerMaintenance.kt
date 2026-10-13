@@ -49,7 +49,7 @@ data class MaintenanceStatus(
  *
  * Refusals are recorded in [status].message and never thrown:
  *  - an action is already running (the mutex),
- *  - the [busy] predicate is set (an apply job, or a future migration, is running),
+ *  - the [busy] predicate is set (an apply job is running),
  *  - a [MaintenanceAction.needsSpaceCheck] action lacks free internal space for a
  *    DB-sized copy.
  *
@@ -82,7 +82,7 @@ class CrawlerMaintenance(
             return status
         }
         if (busy()) {
-            status = current.copy(message = "refused: an apply (or migration) job is running")
+            status = current.copy(message = "refused: an apply job is running")
             return status
         }
         if (action.needsSpaceCheck) {

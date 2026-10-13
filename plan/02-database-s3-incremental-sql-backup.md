@@ -92,7 +92,7 @@ re-crawling the network. Pure-Kotlin SigV4 (no rclone) to keep APK size unchange
 - App-side bookmark file (e.g. `filesDir/backup/db_bookmark.txt`, same two-line format, atomic tmp+rename write).
   Update order: upload succeeds → bookmark advances (never the reverse, so a failed upload is naturally retried).
 - `DbBackupManager` in `DaemonService.onCreate`: single-thread executor + scheduler; run only when not `busy()`
-  (migration/apply/maintenance) — the crawler itself can keep running during a dump (WAL snapshot read), but
+  (apply/maintenance) — the crawler itself can keep running during a dump (WAL snapshot read), but
   coordinate if we prefer quiet periods.
 - Reuse Plan 1's settings surface: add DB-backup enable flag, key prefix, cadence to the same settings group.
 - `ControlServer`: `post("crawler/backup/db")` + status endpoint, following the maintenance-route pattern.

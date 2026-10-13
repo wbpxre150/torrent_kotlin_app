@@ -39,9 +39,6 @@ import com.torrent.app.config.CrawlerGate
 import com.torrent.app.backup.Bep51BackupManager
 import com.torrent.app.backup.Bep51BootstrapDownloader
 import com.torrent.app.backup.BootstrapResult
-import com.torrent.app.migration.CrawlerTreeGrant
-import com.torrent.app.migration.MigrationPhase
-import com.torrent.app.migration.TermuxMigration
 
 sealed class ServiceState {
     data object Starting : ServiceState()
@@ -124,11 +121,6 @@ class DaemonService : Service() {
     // created in onCreate() once applicationInfo is available.
     private lateinit var oneShotRunner: OneShotRunner
     private lateinit var crawlerMaintenance: CrawlerMaintenance
-    // Termux migration backend (plan 10 step 6): background jobs on the
-    // crawler-control executor; the SAF tree grant is persisted separately so
-    // a long copy survives a service restart.
-    private lateinit var crawlerTreeGrant: CrawlerTreeGrant
-    private lateinit var crawlerMigration: TermuxMigration
     // BEP51 cache backup (Stage 4): uploads the crawler's bootstrap cache to
     // R2 daily (and on manual dashboard trigger) on its own single-thread
     // scheduler; the busy/wifi predicates mirror the crawler lifecycle ops.
@@ -172,33 +164,8 @@ class DaemonService : Service() {
             freeSpace = ::internalFreeSpace,
             stopCrawler = { stopCrawlerSupervisors() },
             startCrawlerIfEnabled = ::startCrawlerIfEnabled,
-            busy = { crawlerApplyStatus.phase.isActive || crawlerMigration.isBusy() },
+            busy = { crawlerApplyStatus.phase.isActive },
         )
-        // Termux migration backend (plan 10 step 6): scan/copy/verify/swap/
-        // start/confirm/revert as background jobs, mutually exclusive with
-        // the apply and maintenance jobs (both consult isBusy).
-        crawlerTreeGrant = CrawlerTreeGrant(this)
-        crawlerMigration = TermuxMigration(
-            context = this,
-            oneShotRunner = oneShotRunner,
-            executor = crawlerControlExecutor,
-            crawlerConfig = CrawlerConfig(this),
-            grant = crawlerTreeGrant,
-            freeSpace = ::internalFreeSpace,
-            stopCrawler = { stopCrawlerSupervisors() },
-            startCrawlerIfEnabled = ::startCrawlerIfEnabled,
-            applyCrawler = ::applyCrawlerSettings,
-            currentSettings = { configStore.load().crawler },
-            crawlerRunning = {
-                supervisors.any { s ->
-                    s.status.value.label == CRAWLER_LABEL && s.status.value.state == ProcessState.RUNNING
-                }
-            },
-            statsReachable = ::crawlerStatsReachable,
-        )
-        // A tree granted before the last service start is still persisted
-        // (persistable permission): hand it back to the coordinator.
-        crawlerTreeGrant.treeUri()?.let { crawlerMigration.setTree(it) }
         // BEP51 cache backup (Stage 4): the cache file lives in the crawler's
         // data dir; a running maintenance job counts as busy (its status is
         // observable via crawlerMaintenance). Prefs-backed last-success date
@@ -209,7 +176,6 @@ class DaemonService : Service() {
             loadSettings = { configStore.load().backup },
             isBusy = {
                 crawlerApplyStatus.phase.isActive ||
-                    crawlerMigration.isBusy() ||
                     crawlerMaintenance.status.running
             },
             isWifi = { wifiGateMonitor.state.value.wifi },
@@ -262,8 +228,6 @@ class DaemonService : Service() {
             internalFreeSpace = ::internalFreeSpace,
             crawlerMaintenanceStart = ::startCrawlerMaintenance,
             crawlerMaintenanceStatus = { crawlerMaintenance.status },
-            crawlerMigrationStart = { crawlerMigration.action(it) },
-            crawlerMigrationStatus = { crawlerMigration.status },
             crawlerBackupUpload = { bep51Backup.uploadNow(manual = true).message },
             crawlerBackupStatus = { bep51Backup.status },
 )
@@ -307,7 +271,6 @@ class DaemonService : Service() {
         fun usbFreeSpace(): Long? = this@DaemonService.usbFreeSpace()
         fun completeWizard() = this@DaemonService.completeWizard()
         fun lastApplyRolledBack(): Boolean = this@DaemonService.lastApplyRolledBack
-        fun setCrawlerImportTree(uri: Uri): String = this@DaemonService.setCrawlerImportTree(uri)
         fun setCrawlerEnabled(enabled: Boolean) = this@DaemonService.setCrawlerEnabled(enabled)
     }
 
@@ -668,12 +631,6 @@ class DaemonService : Service() {
      * every other crawler stop/start.
      */
     fun applyCrawlerSettings(s: com.torrent.app.config.CrawlerSettings): com.torrent.app.config.ApplyResult {
-        // Mutual exclusion (plan 10 step 6): never apply settings while a
-        // migration job is in flight.
-        if (crawlerMigration.isBusy()) {
-            return com.torrent.app.config.ApplyResult(
-                false, "a migration job is running; try again when it finishes", false)
-        }
         val errors = com.torrent.app.config.ConfigValidator.validateCrawler(s)
         if (errors.isNotEmpty()) {
             return com.torrent.app.config.ApplyResult(false, errors.joinToString("; "), false)
@@ -912,7 +869,7 @@ class DaemonService : Service() {
             // but a restart is gated like a manual start — restarting while
             // paused (wifi-only, no wifi) is refused (plan 10 §5) — and the
             // stop+start is serialized on the crawler-control executor with
-            // every other crawler lifecycle op (apply/migration/gate), not
+            // every other crawler lifecycle op (apply/gate), not
             // on the per-label daemon-action executor.
             val c = configStore.load().crawler
             if (!CrawlerGate.shouldRun(c.enabled, c.wifiOnly, wifiGateMonitor.state.value.wifi)) {
@@ -1221,7 +1178,7 @@ class DaemonService : Service() {
 
     /**
      * Stage 5: when the BEP51 bootstrap is configured, the cache file is
-     * missing, and no Termux migration is in progress, downloads the cache
+     * missing, downloads the cache
      * from the configured HTTPS URL so the crawler warm-starts. Runs on the
      * crawler-control executor (called from [startCrawlerSupervisor], the
      * only explicit start path — the supervisor's own crash-restart loop
@@ -1234,16 +1191,9 @@ class DaemonService : Service() {
     private fun maybeBootstrapBep51Cache(crawlerConfig: CrawlerConfig) {
         val settings = configStore.load().backup
         val cacheFile = File(crawlerConfig.dataDir, "bep51_cache.dat")
-        // "Pending" = anything other than IDLE / terminal phases (CONFIRMED,
-        // REVERTED, FAILED, CANCELLED): during READY..STARTED the migration
-        // may stage its own data (which can include a Termux
-        // bep51_cache.dat), so we must not write our own cache in.
-        val migrationPending =
-            crawlerMigration.status.phase !in BEP51_BOOTSTRAP_SAFE_MIGRATION_PHASES
         if (!Bep51BootstrapDownloader.shouldBootstrap(
             settings = settings,
             cacheExists = cacheFile.exists(),
-            migrationPending = migrationPending,
             lastFailureAt = bep51BootstrapFailureAt,
             now = System.currentTimeMillis(),
         )) return
@@ -1299,19 +1249,6 @@ class DaemonService : Service() {
         return crawlerMaintenance.start(a).message
     }
 
-    /**
-     * Persists the Termux migration tree picked in MainActivity
-     * (plan 10 §6.2) and hands it to the migration backend. Refuses the USB
-     * tree URI — the crawler data never touches USB.
-     */
-    fun setCrawlerImportTree(uri: Uri): String {
-        val usb = usbPermissionManager.treeUri()
-        if (usb != null && usb == uri) {
-            return "refused: that is the USB storage tree — pick the Termux dht_crawler folder"
-        }
-        crawlerTreeGrant.grant(uri)
-        return crawlerMigration.setTree(uri)
-    }
 
     /**
      * Persists the first-run wizard's crawler toggle (plan 10 step 7): flips
@@ -1392,17 +1329,6 @@ class DaemonService : Service() {
         const val FTP_LABEL = "ftp_server"
         const val CRAWLER_GRACE_MS = 60_000L
 
-        // Stage 5: migration phases in which a BEP51 bootstrap download is
-        // safe (IDLE and the terminal states). Any other phase may have an
-        // import staged/in flight (which can carry its own bep51_cache.dat),
-        // so the download is skipped until the migration settles.
-        private val BEP51_BOOTSTRAP_SAFE_MIGRATION_PHASES = setOf(
-            MigrationPhase.IDLE,
-            MigrationPhase.CONFIRMED,
-            MigrationPhase.REVERTED,
-            MigrationPhase.FAILED,
-            MigrationPhase.CANCELLED,
-        )
 
         // The apply job watches the restarted crawler for a crash loop for
         // this long (plan 10 §1), polling at this interval.

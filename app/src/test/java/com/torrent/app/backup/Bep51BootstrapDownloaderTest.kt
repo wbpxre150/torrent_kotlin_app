@@ -191,47 +191,42 @@ class Bep51BootstrapDownloaderTest {
 
     @Test fun shouldBootstrap_allGood_true() {
         assertTrue(Bep51BootstrapDownloader.shouldBootstrap(
-            goodSettings, cacheExists = false, migrationPending = false,
+            goodSettings, cacheExists = false,
             lastFailureAt = null, now = now))
     }
 
     @Test fun shouldBootstrap_disabled_false() {
         assertFalse(Bep51BootstrapDownloader.shouldBootstrap(
-            goodSettings.copy(bootstrapEnabled = false), false, false, null, now))
+            goodSettings.copy(bootstrapEnabled = false), false, null, now))
     }
 
     @Test fun shouldBootstrap_blankUrl_false() {
         assertFalse(Bep51BootstrapDownloader.shouldBootstrap(
-            goodSettings.copy(bootstrapUrl = "  "), false, false, null, now))
+            goodSettings.copy(bootstrapUrl = "  "), false, null, now))
     }
 
     @Test fun shouldBootstrap_httpUrl_false() {
         assertFalse(Bep51BootstrapDownloader.shouldBootstrap(
-            goodSettings.copy(bootstrapUrl = "http://example.com/cache"), false, false, null, now))
+            goodSettings.copy(bootstrapUrl = "http://example.com/cache"), false, null, now))
     }
 
     @Test fun shouldBootstrap_cacheExists_false() {
         assertFalse(Bep51BootstrapDownloader.shouldBootstrap(
-            goodSettings, cacheExists = true, migrationPending = false, lastFailureAt = null,
+            goodSettings, cacheExists = true, lastFailureAt = null,
             now = now))
     }
 
-    @Test fun shouldBootstrap_migrationPending_false() {
-        assertFalse(Bep51BootstrapDownloader.shouldBootstrap(
-            goodSettings, cacheExists = false, migrationPending = true, lastFailureAt = null,
-            now = now))
-    }
 
     @Test fun shouldBootstrap_recentFailure_rateLimited() {
         // 30 minutes after the last failure: inside the 1-hour window.
         assertFalse(Bep51BootstrapDownloader.shouldBootstrap(
-            goodSettings, false, false, lastFailureAt = now - 30L * 60 * 1000, now = now))
+            goodSettings, false, lastFailureAt = now - 30L * 60 * 1000, now = now))
     }
 
     @Test fun shouldBootstrap_oldFailure_retryAllowed() {
         // 2 hours after the last failure: outside the 1-hour window.
         assertTrue(Bep51BootstrapDownloader.shouldBootstrap(
-            goodSettings, false, false, lastFailureAt = now - 2L * 60 * 60 * 1000, now = now))
+            goodSettings, false, lastFailureAt = now - 2L * 60 * 60 * 1000, now = now))
     }
 
 }

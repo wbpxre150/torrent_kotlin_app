@@ -170,7 +170,7 @@ class Bep51BackupManager(
         }
         if (isBusy()) {
             return finish(BackupState.SKIPPED_BUSY,
-                "skipped: an apply/maintenance/migration job is running",
+                "skipped: an apply/maintenance job is running",
                 uploadEnabled = true, configured = true)
         }
         if (!isWifi()) {

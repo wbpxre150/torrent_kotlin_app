@@ -44,8 +44,6 @@ class MainActivity : ComponentActivity() {
     private val wizardCompleted = MutableStateFlow(true)
     private val serviceState = MutableStateFlow<ServiceState>(ServiceState.Stopped)
     private var authToken = MutableStateFlow("")
-    // Result/note for the Termux migration folder picker (plan 10 §6.2).
-    private val crawlerNoteFlow = MutableStateFlow("")
 
     private var boundService: DaemonService.LocalBinder? = null
 
@@ -103,7 +101,6 @@ class MainActivity : ComponentActivity() {
             val state by serviceState.collectAsState()
             val token by authToken.collectAsState()
             val ip by wifiIp.collectAsState()
-            val crawlerNote by crawlerNoteFlow.collectAsState()
 
             // Auto-start when service is stopped
             LaunchedEffect(serviceState.value) {
@@ -115,33 +112,6 @@ class MainActivity : ComponentActivity() {
                 ActivityResultContracts.OpenDocumentTree()
             ) { uri: Uri? ->
                 uri?.let { boundService?.setUsbTree(it) }
-            }
-            // Termux migration folder picker (plan 10 §6.2): OpenDocumentTree
-            // opened at the Termux dht_crawler home via EXTRA_INITIAL_URI.
-            val crawlerTreeLauncher = rememberLauncherForActivityResult(
-                ActivityResultContracts.OpenDocumentTree()
-            ) { uri: Uri? ->
-                if (uri == null) {
-                    crawlerNoteFlow.value =
-                        "No folder selected — the migration needs the Termux dht_crawler folder."
-                } else {
-                    crawlerNoteFlow.value = boundService?.setCrawlerImportTree(uri)
-                        ?: "Service not bound — reopen the app and try again."
-                }
-            }
-            val onChooseCrawlerTree = {
-                // OpenDocumentTree's input Uri is set as EXTRA_INITIAL_URI, so
-                // the picker opens at the Termux dht_crawler home.
-                val initial = android.provider.DocumentsContract.buildDocumentUri(
-                    com.torrent.app.migration.TermuxMigration.TERMUX_AUTHORITY,
-                    com.torrent.app.migration.TermuxMigration.TERMUX_INITIAL_DOC_ID)
-                try {
-                    crawlerTreeLauncher.launch(initial)
-                } catch (e: Exception) {
-                    // No activity for the intent (e.g. Termux not installed).
-                    crawlerNoteFlow.value =
-                        "Could not open the folder picker — is Termux installed? (${e.message})"
-                }
             }
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
@@ -160,8 +130,6 @@ class MainActivity : ComponentActivity() {
                             wifiIp = ip,
                             safStatus = safStatus.collectAsState().value,
                             onGrantUsb = { usbTreeLauncher.launch(null) },
-                            crawlerNote = crawlerNote,
-                            onChooseCrawlerTree = onChooseCrawlerTree,
                         )
                     }
                 }
@@ -226,8 +194,6 @@ fun MainScreen(
     wifiIp: String,
     safStatus: SafStatus?,
     onGrantUsb: () -> Unit,
-    crawlerNote: String = "",
-    onChooseCrawlerTree: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val showConnection = wifiIp.isNotEmpty() && authToken.isNotEmpty()
@@ -287,24 +253,6 @@ fun MainScreen(
         )
         Spacer(modifier = Modifier.height(8.dp))
         Button(onClick = onGrantUsb) { Text("Grant USB") }
-
-        Spacer(modifier = Modifier.height(32.dp))
-        Text(
-            text = "Termux crawler migration",
-            style = MaterialTheme.typography.titleMedium
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(
-            text = "Migrate the existing dht_crawler database from Termux into the app " +
-                "(the control panel drives the scan/copy/verify steps).",
-            style = MaterialTheme.typography.bodyMedium
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        Button(onClick = onChooseCrawlerTree) { Text("Choose Termux dht_crawler folder") }
-        if (crawlerNote.isNotEmpty()) {
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(text = crawlerNote, style = MaterialTheme.typography.bodySmall)
-        }
 
         // QR code pinned to the bottom of the screen
         Spacer(modifier = Modifier.weight(1f))

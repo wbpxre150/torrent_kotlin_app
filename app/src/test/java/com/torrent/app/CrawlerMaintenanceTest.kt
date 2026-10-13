@@ -117,7 +117,7 @@ class CrawlerMaintenanceTest {
         val ex = CapturingExecutor()
         val m = newMaintenance(ex, busy = true)
         val st = m.start(MaintenanceAction.COMPACT)
-        assertTrue(st.message, st.message.startsWith("refused: an apply (or migration) job is running"))
+        assertTrue(st.message, st.message.startsWith("refused: an apply job is running"))
         assertFalse(st.running)
         assertEquals(0, ex.submitted.get())
     }

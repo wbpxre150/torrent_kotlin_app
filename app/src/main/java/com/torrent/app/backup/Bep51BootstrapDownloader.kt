@@ -170,13 +170,12 @@ class Bep51BootstrapDownloader(
 
         /**
          * Pure gate for the bootstrap (Stage 5): bootstrap enabled + a valid
-         * https URL + a missing cache file + no Termux migration in progress
-         * + not within the retry interval after the last failed attempt.
+         * https URL + a missing cache file + not within the retry interval
+         * after the last failed attempt.
          */
         fun shouldBootstrap(
             settings: BackupSettings,
             cacheExists: Boolean,
-            migrationPending: Boolean,
             lastFailureAt: Long?,
             now: Long,
         ): Boolean {
@@ -184,7 +183,6 @@ class Bep51BootstrapDownloader(
             if (settings.bootstrapUrl.isBlank()) return false
             if (!ConfigValidator.validHttpsUrl(settings.bootstrapUrl)) return false
             if (cacheExists) return false
-            if (migrationPending) return false
             if (lastFailureAt != null && now - lastFailureAt < FAILURE_RETRY_INTERVAL_MS) return false
             return true
         }

@@ -65,7 +65,7 @@ torrent_kotlin_app/
 | `CrawlerProxyServer.kt` (301) | Ktor/CIO authed reverse proxy to crawler's loopback HTTP API on 8081; strips auth when forwarding |
 | `NativeProcess.kt` | Shared exec primitives — runs binaries **in place from `nativeLibraryDir`** |
 | `ProcessSupervisor.kt` (363) | Supervises one child with restart/backoff; graceful SIGTERM; serialized start/stop |
-| `OneShotRunner.kt` (77) | Single run of a native binary, cancellable (SIGTERM→SIGKILL) — used for maintenance/migration steps |
+| `OneShotRunner.kt` (77) | Single run of a native binary, cancellable (SIGTERM→SIGKILL) — used for maintenance steps |
 | `RollbackPolicy.kt` (11) | Pure threshold-based rollback decision |
 | `TokenManager.kt` (34) | Constant-time control-token validation |
 | `CrawlerConfig.kt` | Parses/writes crawler `config.ini`; atomic writes; pinned keys (lives in root package, not `config/`!) |
@@ -86,8 +86,6 @@ torrent_kotlin_app/
   URI), `SafIpcServer` (Unix-socket bridge, fds via `SCM_RIGHTS`), `SafIpcRequestHandler` /
   `FtpSafIpcRequestHandler`, `SafIpcCodec` (little-endian wire codec), `UsbFdBridge`, `SafModels`, `SafPaths` (pure).
 - `ftp/` — `FtpCredentials` (user from store, password from settings), `FtpStatus`.
-- `migration/` — `TermuxMigration` (845; scan→copy→verify→swap→adopt→start→confirm, phase persisted to
-  `migration_state.json` for resume/revert), `CrawlerTreeGrant` (persisted tree URI), `MigrationModels`.
 - `transmission/` — `TransmissionRpcClient` (narrow RPC surface on 127.0.0.1:9091, Basic auth + 409
   session-id handling, `TorrentAdder` interface) + summary/result models.
 

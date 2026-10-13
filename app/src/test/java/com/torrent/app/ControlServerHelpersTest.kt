@@ -7,11 +7,6 @@ import org.junit.Test
 
 import com.torrent.app.config.BackupSettings
 import com.torrent.app.config.CrawlerSettings
-import com.torrent.app.migration.ConfigDiffEntry
-import com.torrent.app.migration.FileRole
-import com.torrent.app.migration.MigrationPhase
-import com.torrent.app.migration.MigrationStatus
-import com.torrent.app.migration.ScannedFile
 import org.junit.Assert.assertFalse
 class ControlServerHelpersTest {
     @Test fun parseForm_decodesPairs() {
@@ -87,60 +82,6 @@ class ControlServerHelpersTest {
         assertEquals("bep51_cache_capacity=77", s.advancedOverrides)
         assertEquals(8090, s.proxyPort)
         assertEquals(8091, s.crawlerHttpPort)
-    }
-
-    @Test fun migrationStatusJson_idleStatus() {
-        val json = ControlServer.migrationStatusJson(MigrationStatus())
-        assertTrue(json.contains("\"phase\":\"IDLE\""))
-        assertTrue(json.contains("\"files\":[]"))
-        assertTrue(json.contains("\"configDiff\":[]"))
-        assertTrue(json.contains("\"verifyExitCode\":null"))
-        assertTrue(json.contains("\"torrentCount\":null"))
-        assertTrue(json.contains("\"crawlerRunning\":false"))
-        assertTrue(json.contains("\"statsReachable\":false"))
-    }
-
-    @Test fun migrationStatusJson_fullStatus() {
-        val st = MigrationStatus(
-            phase = MigrationPhase.COPYING,
-            message = "copy \"done\" \\",
-            treeUri = "content://com.termux.documents/tree/x",
-            treeAuthority = "com.termux.documents",
-            nonTermuxWarning = false,
-            files = listOf(ScannedFile("torrents.db", "id1", 1234, 55, FileRole.IMPORT)),
-            totalBytes = 1234,
-            freeSpaceBytes = 999,
-            spaceOk = true,
-            currentFile = "torrents.db",
-            copiedBytes = 500,
-            copyBytesPerSec = 1048576,
-            verifyExitCode = 0,
-            verifyLines = listOf("line1", "a\"b"),
-            torrentCount = 42,
-            configDiff = listOf(ConfigDiffEntry("num_trees", "32", "16")),
-            bloomRebuilt = true,
-            crawlerRunning = true,
-            statsReachable = true,
-            startedAt = 1L,
-            finishedAt = 2L,
-        )
-        val json = ControlServer.migrationStatusJson(st)
-        assertTrue(json.contains("\"phase\":\"COPYING\""))
-        assertTrue(json.contains("\"message\":\"copy \\\"done\\\" \\\\\""))
-        assertTrue(json.contains("\"treeUri\":\"content://com.termux.documents/tree/x\""))
-        assertTrue(json.contains("\"name\":\"torrents.db\",\"size\":1234,\"mtime\":55,\"role\":\"IMPORT\""))
-        assertTrue(json.contains("\"totalBytes\":1234"))
-        assertTrue(json.contains("\"freeSpaceBytes\":999"))
-        assertTrue(json.contains("\"spaceOk\":true"))
-        assertTrue(json.contains("\"copiedBytes\":500"))
-        assertTrue(json.contains("\"copyBytesPerSec\":1048576"))
-        assertTrue(json.contains("\"verifyLines\":[\"line1\",\"a\\\"b\"]"))
-        assertTrue(json.contains("\"torrentCount\":42"))
-        assertTrue(json.contains("\"key\":\"num_trees\",\"termuxValue\":\"32\",\"currentValue\":\"16\""))
-        assertTrue(json.contains("\"bloomRebuilt\":true"))
-        assertTrue(json.contains("\"crawlerRunning\":true"))
-        assertTrue(json.contains("\"startedAt\":1"))
-        assertTrue(json.contains("\"finishedAt\":2"))
     }
 
     @Test fun crawlerSettingsFromForm_keepsCurrentWhenBlankOrMissing() {
