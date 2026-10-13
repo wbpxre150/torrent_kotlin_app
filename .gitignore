@@ -41,3 +41,6 @@ Thumbs.db
 
 # Maven / Gradle wrapper binaries (keep wrapper scripts, ignore binary JAR)
 gradle/wrapper/gradle-wrapper.jar
+
+# graphify knowledge graph artifacts (regenerable via `graphify update .`)
+graphify-out/

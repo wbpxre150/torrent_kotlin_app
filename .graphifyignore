@@ -1,0 +1,29 @@
+# graphify corpus exclusions for this repo
+
+# NEVER index: live crawler backup credentials/hosts (AGENTS.md invariant 11)
+app/src/main/cpp/dht_crawler/config.ini
+
+# Machine-local config
+local.properties
+
+# Build & tooling output (also in .gitignore)
+.gradle/
+.kotlin/
+build/
+app/build/
+.cxx/
+.externalNativeBuild/
+captures/
+graphify-out/
+
+# Binaries
+*.so
+*.apk
+*.log
+
+# VCS internals
+.git/
+
+# Vendored third-party submodule trees (upstream code);
+# project deltas for these live in dht_crawler/patches/
+app/src/main/cpp/dht_crawler/lib/
