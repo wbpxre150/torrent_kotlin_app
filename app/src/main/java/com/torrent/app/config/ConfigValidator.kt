@@ -95,7 +95,7 @@ object ConfigValidator {
     private fun validPort(p: Int) = p in 1..65535
 
     /** `https://` scheme with a non-empty host; `http://`, hostless and unparsable URLs are rejected. */
-    private fun validHttpsUrl(raw: String): Boolean {
+    internal fun validHttpsUrl(raw: String): Boolean {
         val uri = try { java.net.URI(raw.trim()) } catch (e: Exception) { return false }
         return uri.scheme?.equals("https", ignoreCase = true) == true && !uri.host.isNullOrBlank()
     }

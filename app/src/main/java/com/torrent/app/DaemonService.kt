@@ -37,7 +37,10 @@ import java.util.concurrent.ThreadFactory
 import org.json.JSONObject
 import com.torrent.app.config.CrawlerGate
 import com.torrent.app.backup.Bep51BackupManager
+import com.torrent.app.backup.Bep51BootstrapDownloader
+import com.torrent.app.backup.BootstrapResult
 import com.torrent.app.migration.CrawlerTreeGrant
+import com.torrent.app.migration.MigrationPhase
 import com.torrent.app.migration.TermuxMigration
 
 sealed class ServiceState {
@@ -130,6 +133,9 @@ class DaemonService : Service() {
     // R2 daily (and on manual dashboard trigger) on its own single-thread
     // scheduler; the busy/wifi predicates mirror the crawler lifecycle ops.
     private lateinit var bep51Backup: Bep51BackupManager
+    // Stage 5: in-memory rate limit for failed BEP51 bootstrap attempts —
+    // a failure is not retried (on a later start) for at least one hour.
+    @Volatile private var bep51BootstrapFailureAt: Long? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -1199,6 +1205,11 @@ class DaemonService : Service() {
             try {
                 val crawlerConfig = CrawlerConfig(this)
                 crawlerConfig.ensureLayout()
+                // Stage 5: before the crawler's (re)launch, warm-start it from
+                // a downloaded BEP51 bootstrap cache when configured. Bounded
+                // (15 s connect / 30 s read), and every failure falls through
+                // to the cold start below.
+                maybeBootstrapBep51Cache(crawlerConfig)
                 val crawler =
                     registerCrawlerSupervisor(emptyList())
                 crawler.start()
@@ -1207,6 +1218,62 @@ class DaemonService : Service() {
             }
         }
     }
+
+    /**
+     * Stage 5: when the BEP51 bootstrap is configured, the cache file is
+     * missing, and no Termux migration is in progress, downloads the cache
+     * from the configured HTTPS URL so the crawler warm-starts. Runs on the
+     * crawler-control executor (called from [startCrawlerSupervisor], the
+     * only explicit start path — the supervisor's own crash-restart loop
+     * never re-enters it, so auto-restarts do not re-download). Every
+     * failure is logged and the start proceeds: the crawler cold-bootstraps
+     * as before. Rate-limited in memory: a failed attempt is not retried
+     * for [Bep51BootstrapDownloader.FAILURE_RETRY_INTERVAL_MS]. Only the URL
+     * host is logged (the URL may carry a token).
+     */
+    private fun maybeBootstrapBep51Cache(crawlerConfig: CrawlerConfig) {
+        val settings = configStore.load().backup
+        val cacheFile = File(crawlerConfig.dataDir, "bep51_cache.dat")
+        // "Pending" = anything other than IDLE / terminal phases (CONFIRMED,
+        // REVERTED, FAILED, CANCELLED): during READY..STARTED the migration
+        // may stage its own data (which can include a Termux
+        // bep51_cache.dat), so we must not write our own cache in.
+        val migrationPending =
+            crawlerMigration.status.phase !in BEP51_BOOTSTRAP_SAFE_MIGRATION_PHASES
+        if (!Bep51BootstrapDownloader.shouldBootstrap(
+            settings = settings,
+            cacheExists = cacheFile.exists(),
+            migrationPending = migrationPending,
+            lastFailureAt = bep51BootstrapFailureAt,
+            now = System.currentTimeMillis(),
+        )) return
+        val result = Bep51BootstrapDownloader().bootstrap(
+            url = settings.bootstrapUrl,
+            dest = cacheFile,
+            tempDir = crawlerConfig.dataDir,
+        )
+        when (result) {
+            is BootstrapResult.Placed ->
+                android.util.Log.i(
+                    "DaemonService",
+                    "BEP51 bootstrap: placed ${result.bytes} bytes (${result.nodeCount} nodes) " +
+                        "from ${hostOf(settings.bootstrapUrl)}")
+            is BootstrapResult.SkippedExists ->
+                android.util.Log.i("DaemonService", "BEP51 bootstrap: cache file already present")
+            is BootstrapResult.Failed -> {
+                bep51BootstrapFailureAt = System.currentTimeMillis()
+                android.util.Log.w(
+                    "DaemonService",
+                    "BEP51 bootstrap from ${hostOf(settings.bootstrapUrl)} failed; " +
+                        "crawler will cold-start: ${result.reason}")
+            }
+        }
+    }
+
+    /** Host part of a URL for logging (never the full URL — it may carry a token). */
+    private fun hostOf(url: String): String =
+        try { java.net.URI(url.trim()).host ?: "<no host>" }
+        catch (e: Exception) { "<unparsable URL>" }
 
     /**
      * Starts the crawler if it is enabled and the wifi gate allows (plan 10 §5).
@@ -1324,6 +1391,18 @@ class DaemonService : Service() {
         const val CRAWLER_LABEL = "dht_crawler"
         const val FTP_LABEL = "ftp_server"
         const val CRAWLER_GRACE_MS = 60_000L
+
+        // Stage 5: migration phases in which a BEP51 bootstrap download is
+        // safe (IDLE and the terminal states). Any other phase may have an
+        // import staged/in flight (which can carry its own bep51_cache.dat),
+        // so the download is skipped until the migration settles.
+        private val BEP51_BOOTSTRAP_SAFE_MIGRATION_PHASES = setOf(
+            MigrationPhase.IDLE,
+            MigrationPhase.CONFIRMED,
+            MigrationPhase.REVERTED,
+            MigrationPhase.FAILED,
+            MigrationPhase.CANCELLED,
+        )
 
         // The apply job watches the restarted crawler for a crash loop for
         // this long (plan 10 §1), polling at this interval.

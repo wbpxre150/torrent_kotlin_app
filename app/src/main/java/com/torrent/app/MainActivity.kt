@@ -387,6 +387,8 @@ fun WizardScreen(
             Spacer(Modifier.width(8.dp)); Text("Enable bootstrap download (fresh installs)")
         }
         OutlinedTextField(bootstrapUrl, { bootstrapUrl = it }, label = { Text("Bootstrap URL (https://…)") })
+        Text("If set, the cache is downloaded before the crawler first starts.",
+             style = MaterialTheme.typography.bodyMedium)
         if (errors.isNotEmpty()) {
             Column { errors.forEach { Text(it, color = MaterialTheme.colorScheme.error) } }
         }
