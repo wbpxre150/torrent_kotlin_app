@@ -155,7 +155,7 @@ class ConfigStoreTest {
     @Test fun backupDbDefaults_disabledWithDhtBackupBucket() {
         val b = store().load().backup
         assertFalse(b.dbBackupEnabled)
-        assertEquals("dht_backup", b.r2DbBucket)
+        assertEquals("dht-backup", b.r2DbBucket)
         assertEquals("db", b.r2DbObjectPrefix)
     }
 

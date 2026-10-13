@@ -88,7 +88,7 @@ object ConfigDefaults {
     const val DATA_SUBPATH = "torrent_data"
     const val BACKUP_OBJECT_KEY = "bep51/bep51_cache.dat.gz"
     const val BACKUP_BOOTSTRAP_URL = "https://unjumble.au/bep51/bep51_cache.dat.gz"
-    const val DB_BACKUP_BUCKET = "dht_backup"
+    const val DB_BACKUP_BUCKET = "dht-backup"
     const val DB_BACKUP_OBJECT_PREFIX = "db"
     private val FTP_PASSWORD_CHARS =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789".toCharArray()

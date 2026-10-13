@@ -116,7 +116,7 @@ class DbBackupManagerTest {
         r2AccessKeyId = "keyid",
         r2SecretAccessKey = "secret",
         dbBackupEnabled = dbBackupEnabled,
-        r2DbBucket = "dht_backup",
+        r2DbBucket = "dht-backup",
         r2DbObjectPrefix = prefix,
     )
 

@@ -92,7 +92,7 @@ class DbRestoreManagerTest {
     private fun settings(
         endpoint: String = "https://acct.r2.cloudflarestorage.com",
         prefix: String = "db",
-        bucket: String = "dht_backup",
+        bucket: String = "dht-backup",
         dbBackupEnabled: Boolean = false,
     ) = BackupSettings(
         r2Endpoint = endpoint,

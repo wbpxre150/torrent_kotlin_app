@@ -124,7 +124,7 @@ class WizardSubmitTest {
         assertTrue(o.ok)
         val b = o.backup!!
         assertFalse(b.dbBackupEnabled)
-        assertEquals("dht_backup", b.r2DbBucket)
+        assertEquals("dht-backup", b.r2DbBucket)
         assertEquals("db", b.r2DbObjectPrefix)
     }
 
