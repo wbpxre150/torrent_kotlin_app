@@ -7,6 +7,9 @@ import io.ktor.server.engine.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
+import io.ktor.server.websocket.*
+import io.ktor.websocket.*
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import java.net.URLDecoder
 import java.net.URLEncoder
@@ -44,6 +47,8 @@ class ControlServer(
     private val crawlerApplyStatus: () -> CrawlerApplyStatus = { CrawlerApplyStatus() },
     private val crawlerPausedNoWifi: () -> Boolean = { false },
     private val crawlerHttpPort: () -> Int = { 8081 },
+    // Stats websocket push period (webui stage 1); injectable for tests.
+    private val wsPushPeriodMs: Long = 10_000L,
     private val crawlerDbSize: () -> Long? = { null },
     private val internalFreeSpace: () -> Long = { 0L },
     // Maintenance (plan 10 step 5): the POST route queues an action by name and
@@ -75,6 +80,7 @@ class ControlServer(
     fun start() {
         if (server != null) return
         server = embeddedServer(CIO, port = port, host = "0.0.0.0") {
+            install(WebSockets)
             routing {
                 get("/health") { call.respondText("ok", ContentType.Text.Plain) }
 
@@ -253,10 +259,37 @@ class ControlServer(
                         call.respondText(json, ContentType.Application.Json)
                     }
                     get("api/crawler/stats") {
-                        val crawler = daemonStatuses()
-                            .firstOrNull { it.label == DaemonService.CRAWLER_LABEL }
-                        val body = if (crawler?.state == ProcessState.RUNNING) fetchCrawlerStats(crawlerHttpPort()) else null
-                        call.respondText(crawlerStatsJson(body, crawler?.state), ContentType.Application.Json)
+                        call.respondText(crawlerStatsPayload(), ContentType.Application.Json)
+                    }
+
+                    // Live stats feed (webui stage 1): the crawler's CivetWeb has no
+                    // websocket support, so the WS terminates here and we poll the
+                    // loopback /stats ourselves. The interceptor above already
+                    // rejected unauthenticated upgrades with 401; the handler
+                    // re-checks the token (same precedence, constant-time via
+                    // TokenManager) and never pushes stats on a bad socket.
+                    webSocket("stats/ws") {
+                        // `this` is the DefaultWebSocketServerSession.
+                        val (token, _) = resolveAuthToken(
+                            call.request.headers["Cookie"],
+                            call.request.queryParameters["token"],
+                            call.request.headers["Authorization"],
+                            tokenManager::validate,
+                        )
+                        if (token == null) {
+                            close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, "unauthorized"))
+                            return@webSocket
+                        }
+                        while (true) {
+                            try {
+                                send(Frame.Text(crawlerStatsPayload()))
+                            } catch (e: kotlinx.coroutines.CancellationException) {
+                                throw e // coroutine cancelled (client gone); exit cleanly
+                            } catch (e: Exception) {
+                                break // the socket went away; stop pushing
+                            }
+                            delay(wsPushPeriodMs)
+                        }
                     }
 
                     // Maintenance (plan 10 step 4): queue a one-shot action by name.
@@ -905,6 +938,19 @@ class ControlServer(
             })();
             </script>
         """.trimIndent()
+    }
+
+    /**
+     * The crawler stats payload served by /api/crawler/stats and pushed over
+     * the stats websocket: the crawler's own /stats JSON while the daemon is
+     * RUNNING, otherwise the clean "not running" fallback — so a connected
+     * client recovers automatically when the crawler comes back up.
+     */
+    private fun crawlerStatsPayload(): String {
+        val crawler = daemonStatuses()
+            .firstOrNull { it.label == DaemonService.CRAWLER_LABEL }
+        val body = if (crawler?.state == ProcessState.RUNNING) fetchCrawlerStats(crawlerHttpPort()) else null
+        return crawlerStatsJson(body, crawler?.state)
     }
 
     /**

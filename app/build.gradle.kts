@@ -575,6 +575,7 @@ dependencies {
     // Ktor server (CIO engine — pure Kotlin, no native deps)
     implementation("io.ktor:ktor-server-cio:3.5.0")
     implementation("io.ktor:ktor-server-core:3.5.0")
+    implementation("io.ktor:ktor-server-websockets:3.5.0")
     // ZXing for QR code generation
     implementation("com.google.zxing:core:3.5.3")
     // SAF DocumentFile helper (used by SafStorageGateway)
