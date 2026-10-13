@@ -56,6 +56,12 @@ class ControlServer(
     // the GET route polls the coordinator's status (progress, verify log, diff).
     private val crawlerMigrationStart: (String) -> String = { "migration is not wired" },
     private val crawlerMigrationStatus: () -> MigrationStatus = { MigrationStatus() },
+    // BEP51 cache backup (Stage 4): the POST route queues a manual upload of
+    // the crawler's bootstrap cache to R2; the GET route polls the manager's
+    // status (state, message, last success, bytes).
+    private val crawlerBackupUpload: () -> String = { "backup upload is not wired" },
+    private val crawlerBackupStatus: () -> com.torrent.app.backup.BackupStatus =
+        { com.torrent.app.backup.BackupStatus() },
     private val port: Int = 8090,
 ) {
     @Volatile private var server: EmbeddedServer<*, *>? = null
@@ -294,6 +300,23 @@ class ControlServer(
 
                     get("api/crawler/migration") {
                         call.respondText(migrationStatusJson(crawlerMigrationStatus()), ContentType.Application.Json)
+                    }
+
+                    // BEP51 cache backup (Stage 4): queue a manual upload of
+                    // the crawler's bootstrap cache to R2 (gates apply; the
+                    // daily gate is bypassed); the page polls
+                    // /api/crawler/backup for the result.
+                    post("crawler/backup/upload") {
+                        val msg = crawlerBackupUpload()
+                        val ok = !msg.startsWith("refused")
+                        val token = parseCookieToken(call.request.headers["Cookie"])
+                            ?: call.request.queryParameters["token"] ?: ""
+                        call.respondRedirect("/settings/crawler?msg=${urlEnc(msg)}&ok=$ok&token=$token")
+                    }
+
+                    // Backup status JSON for the crawler panel poller.
+                    get("api/crawler/backup") {
+                        call.respondText(backupStatusJson(crawlerBackupStatus()), ContentType.Application.Json)
                     }
                 }
             }
@@ -580,6 +603,7 @@ class ControlServer(
                   onsubmit="return confirm('Rebuild the bloom filter? The crawler is stopped while it runs (a few minutes).')">
             <button type="submit">Run --rebuild-bloom-filter</button></form></div>""" else ""
         val maintenanceSection = buildMaintenanceSection()
+        val backupSection = buildBackupSection()
         return """
             <!DOCTYPE html><html><head><title>DHT crawler settings</title>
             <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -649,6 +673,7 @@ class ControlServer(
             <pre id="apply-log" class="apply-log" style="display:none"></pre>
             $maintenanceSection
             ${buildMigrationSection()}
+            $backupSection
             <p><a href="/">Back to dashboard</a></p>
             <script>
             (function () {
@@ -735,6 +760,16 @@ class ControlServer(
                 }).catch(function () {});
               }
               setInterval(pollMig, 2000); pollMig();
+              function pollBackup() {
+                fetch('/api/crawler/backup').then(function (r) { return r.json(); }).then(function (st) {
+                  var box = document.getElementById('backup-status');
+                  var text = 'Backup: ' + st.state + (st.message ? ' \u2014 ' + st.message : '');
+                  if (st.bytes != null) text += ' (' + st.bytes + ' bytes uploaded)';
+                  if (st.lastSuccess != null) text += ' (last success ' + new Date(st.lastSuccess).toLocaleString() + ')';
+                  box.textContent = text;
+                }).catch(function () {});
+              }
+              setInterval(pollBackup, 5000); pollBackup();
             })();
             </script>
             </body></html>
@@ -759,6 +794,25 @@ class ControlServer(
               <div id="maint-btns">$buttons</div>
               <div id="maint-status" class="meta">Maintenance: idle</div>
               <pre id="maint-log" class="apply-log" style="display:none"></pre>
+            </fieldset>
+        """.trimIndent()
+    }
+
+    /** The BEP51 cache backup section on the crawler panel (Stage 4). */
+    private fun buildBackupSection(): String {
+        val st = crawlerBackupStatus()
+        val enabledNote = if (st.uploadEnabled) "" else
+            "<p class=\"warn\">R2 upload is disabled — tick <em>Enable R2 upload</em> above and apply first.</p>"
+        return """
+            <fieldset><legend>Cache backup (upload the crawler's BEP51 bootstrap cache to R2)</legend>
+              <p class="meta">Uploads <code>bep51_cache.dat</code> (validated + gzip-compressed) to the R2
+              object key above — at most once per day, on Wi-Fi, and only when no apply/maintenance/
+              migration job is running. <em>Upload now</em> bypasses the daily gate only.</p>
+              $enabledNote
+              <form method="post" action="/crawler/backup/upload"
+                    onsubmit="return confirm('Upload the BEP51 cache to R2 now?')">
+              <button type="submit">Upload now</button></form>
+              <div id="backup-status" class="meta">Backup: ${st.state.name}</div>
             </fieldset>
         """.trimIndent()
     }
@@ -1014,6 +1068,21 @@ class ControlServer(
     companion object {
         private fun jsonStr(s: String?): String =
             if (s == null) "null" else "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+        /**
+         * The /api/crawler/backup response body (Stage 4): state, message, last
+         * attempt/success epoch millis, uploaded (gzip) bytes and the config
+         * flags. Secrets never appear here.
+         */
+        internal fun backupStatusJson(st: com.torrent.app.backup.BackupStatus): String = buildString {
+            append("{\"state\":\"").append(st.state.name).append("\"")
+            append(",\"message\":").append(jsonStr(st.message))
+            append(",\"lastAttempt\":").append(st.lastAttempt?.toString() ?: "null")
+            append(",\"lastSuccess\":").append(st.lastSuccess?.toString() ?: "null")
+            append(",\"bytes\":").append(st.uploadedBytes?.toString() ?: "null")
+            append(",\"uploadEnabled\":").append(st.uploadEnabled)
+            append(",\"configured\":").append(st.configured).append("}")
+        }
 
         /**
          * The /api/crawler/migration response body (plan 10 step 7): the polled

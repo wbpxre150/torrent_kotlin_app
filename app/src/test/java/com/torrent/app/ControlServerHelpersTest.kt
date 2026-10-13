@@ -154,4 +154,31 @@ class ControlServerHelpersTest {
         assertFalse(s.enabled)
         assertFalse(s.pornFilterEnabled)
     }
+
+    @Test fun backupStatusJson_idleStatus() {
+        val json = ControlServer.backupStatusJson(com.torrent.app.backup.BackupStatus())
+        assertEquals(
+            "{\"state\":\"IDLE\",\"message\":\"\",\"lastAttempt\":null,\"lastSuccess\":null,"
+                + "\"bytes\":null,\"uploadEnabled\":false,\"configured\":false}",
+            json)
+    }
+
+    @Test fun backupStatusJson_fullStatusEscapesMessage() {
+        val st = com.torrent.app.backup.BackupStatus(
+            state = com.torrent.app.backup.BackupState.SUCCESS,
+            message = "uploaded 123 bytes to \"bep51/bep51_cache.dat.gz\"",
+            lastAttempt = 111L,
+            lastSuccess = 222L,
+            uploadedBytes = 123L,
+            uploadEnabled = true,
+            configured = true,
+        )
+        val json = ControlServer.backupStatusJson(st)
+        assertEquals(
+            "{\"state\":\"SUCCESS\","
+                + "\"message\":\"uploaded 123 bytes to \\\"bep51/bep51_cache.dat.gz\\\"\","
+                + "\"lastAttempt\":111,\"lastSuccess\":222,\"bytes\":123,"
+                + "\"uploadEnabled\":true,\"configured\":true}",
+            json)
+    }
 }

@@ -134,6 +134,13 @@ class ConfigStore(context: Context) {
             .apply()
     }
 
+    /** Local date (`yyyy-MM-dd`) of the last successful BEP51 cache upload (Stage 4). */
+    fun lastBackupSuccessDate(): String? = prefs.getString(KEY_BACKUP_LAST_SUCCESS_DATE, null)
+
+    fun setLastBackupSuccessDate(date: String) {
+        prefs.edit().putString(KEY_BACKUP_LAST_SUCCESS_DATE, date).apply()
+    }
+
     fun setWizardCompleted() { prefs.edit().putBoolean(KEY_WIZARD, true).apply() }
 
     /** FTP password auto-generates + persists on first access (preserves Stage 06 behavior). */
@@ -278,6 +285,7 @@ class ConfigStore(context: Context) {
         private const val KEY_BACKUP_UPLOAD_ENABLED = "backup_upload_enabled"
         private const val KEY_BACKUP_BOOTSTRAP_ENABLED = "backup_bootstrap_enabled"
         private const val KEY_BACKUP_BOOTSTRAP_URL = "backup_bootstrap_url"
+        private const val KEY_BACKUP_LAST_SUCCESS_DATE = "backup_last_success_date"
         private const val KEY_LKG_CRAWLER_PRESENT = "lkg_crawler_present"
         private const val KEY_LKG_CRAWLER_ENABLED = "lkg_crawler_enabled"
         private const val KEY_LKG_CRAWLER_WIFI_ONLY = "lkg_crawler_wifi_only"

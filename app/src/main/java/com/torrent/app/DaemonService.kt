@@ -36,6 +36,7 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadFactory
 import org.json.JSONObject
 import com.torrent.app.config.CrawlerGate
+import com.torrent.app.backup.Bep51BackupManager
 import com.torrent.app.migration.CrawlerTreeGrant
 import com.torrent.app.migration.TermuxMigration
 
@@ -125,6 +126,10 @@ class DaemonService : Service() {
     // a long copy survives a service restart.
     private lateinit var crawlerTreeGrant: CrawlerTreeGrant
     private lateinit var crawlerMigration: TermuxMigration
+    // BEP51 cache backup (Stage 4): uploads the crawler's bootstrap cache to
+    // R2 daily (and on manual dashboard trigger) on its own single-thread
+    // scheduler; the busy/wifi predicates mirror the crawler lifecycle ops.
+    private lateinit var bep51Backup: Bep51BackupManager
 
     override fun onCreate() {
         super.onCreate()
@@ -188,6 +193,34 @@ class DaemonService : Service() {
         // A tree granted before the last service start is still persisted
         // (persistable permission): hand it back to the coordinator.
         crawlerTreeGrant.treeUri()?.let { crawlerMigration.setTree(it) }
+        // BEP51 cache backup (Stage 4): the cache file lives in the crawler's
+        // data dir; a running maintenance job counts as busy (its status is
+        // observable via crawlerMaintenance). Prefs-backed last-success date
+        // keeps the calendar-day gate across restarts.
+        val crawlerConfig = CrawlerConfig(this)
+        bep51Backup = Bep51BackupManager(
+            cacheFile = { File(crawlerConfig.dataDir, "bep51_cache.dat") },
+            loadSettings = { configStore.load().backup },
+            isBusy = {
+                crawlerApplyStatus.phase.isActive ||
+                    crawlerMigration.isBusy() ||
+                    crawlerMaintenance.status.running
+            },
+            isWifi = { wifiGateMonitor.state.value.wifi },
+            clientFactory = { s ->
+                val client = com.torrent.app.s3.S3Client(
+                    endpoint = s.r2Endpoint,
+                    bucket = s.r2Bucket,
+                    accessKeyId = s.r2AccessKeyId,
+                    secretAccessKey = s.r2SecretAccessKey,
+                )
+                com.torrent.app.backup.S3Uploader { key, contentType, body ->
+                    client.put(key, contentType, body)
+                }
+            },
+            readLastSuccessDate = { configStore.lastBackupSuccessDate() },
+            writeLastSuccessDate = { configStore.setLastBackupSuccessDate(it) },
+        )
         // Plan 10 §4: register the crawler supervisor up-front so dht_crawler
         // is always listed in the daemons table (STOPPED until something starts
         // it), even when it is disabled or wifi-paused. Registration is pure —
@@ -225,6 +258,8 @@ class DaemonService : Service() {
             crawlerMaintenanceStatus = { crawlerMaintenance.status },
             crawlerMigrationStart = { crawlerMigration.action(it) },
             crawlerMigrationStatus = { crawlerMigration.status },
+            crawlerBackupUpload = { bep51Backup.uploadNow(manual = true).message },
+            crawlerBackupStatus = { bep51Backup.status },
 )
         wifiGateMonitor = WifiGateMonitor(this)
         ftpHangWatchdog = FtpHangWatchdog(
@@ -286,6 +321,7 @@ class DaemonService : Service() {
         ftpSafIpcServer.start()
         ftpHangWatchdog.start()
         wifiGateMonitor.start()
+        bep51Backup.start()
         observeWifiForFtp()
         observeWifiForCrawler()
         startSupervisors()
@@ -295,6 +331,7 @@ class DaemonService : Service() {
     override fun onDestroy() {
         rollbackJob?.cancel()
         controlServer.stop()
+        bep51Backup.stop()
         crawlerProxy?.stop()
         crawlerProxy = null
         ftpObservingJob?.cancel()
