@@ -1,6 +1,7 @@
 package com.torrent.app.s3
 
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -11,6 +12,7 @@ import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketException
+import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -46,6 +48,15 @@ class S3ClientTest {
      * narrow the type in Kotlin; `throw` is a true `Nothing`.)
      */
     private inline fun <reified T : S3PutResult> S3PutResult.expect(): T =
+        this as? T ?: throw AssertionError("expected ${T::class.simpleName}, got $this")
+
+    private inline fun <reified T : S3GetResult> S3GetResult.expect(): T =
+        this as? T ?: throw AssertionError("expected ${T::class.simpleName}, got $this")
+
+    private inline fun <reified T : S3DeleteResult> S3DeleteResult.expect(): T =
+        this as? T ?: throw AssertionError("expected ${T::class.simpleName}, got $this")
+
+    private inline fun <reified T : S3ListResult> S3ListResult.expect(): T =
         this as? T ?: throw AssertionError("expected ${T::class.simpleName}, got $this")
 
     private var socket: ServerSocket? = null
@@ -288,5 +299,281 @@ class S3ClientTest {
         assertEquals(3, error.attempts)
         assertTrue(error.bodySnippet, error.bodySnippet.contains("boom"))
         assertEquals(3, open.get())
+    }
+
+    // ---------- GET ----------
+
+    @Test(timeout = 10_000)
+    fun getSendsPathStyleSignedRequestAndReturnsBodyBytes() {
+        planned.add(PlannedResponse(200, "dump-bytes", etag = "\"deadbeef\""))
+        val result = client().get("dir/my file.pdf")
+
+        val success = result.expect<S3GetResult.Success>()
+        assertEquals(200, success.statusCode)
+        assertArrayEquals("dump-bytes".toByteArray(), success.body)
+        assertEquals("deadbeef", success.etag)
+
+        val recorded = synchronized(requests) { requests.toList() }.single()
+        assertEquals("GET", recorded.method)
+        assertEquals("/my-bucket/dir/my%20file.pdf", recorded.path)
+        assertTrue("GET sends no body", recorded.body.isEmpty())
+        assertEquals(
+            SigV4.EMPTY_PAYLOAD_SHA256,
+            recorded.headers.getValue("x-amz-content-sha256").single(),
+        )
+    }
+
+    @Test(timeout = 10_000)
+    fun getSignsPathExactlyAsSentWithEndpointPrefix() {
+        planned.add(PlannedResponse(200, "x"))
+        client(endpoint = "http://127.0.0.1:${port()}/base").get("dir/my file.pdf")
+            .expect<S3GetResult.Success>()
+
+        val recorded = synchronized(requests) { requests.toList() }.single()
+        assertEquals("GET", recorded.method)
+        assertEquals("/base/my-bucket/dir/my%20file.pdf", recorded.path)
+        val date = recorded.headers.getValue("x-amz-date").single()
+        // Re-sign over exactly the path the stub observed on the wire: the Authorization
+        // must match.
+        val expected = SigV4.sign(
+            accessKeyId = "AKIDEXAMPLE",
+            secretAccessKey = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+            method = "GET",
+            host = "127.0.0.1:${port()}",
+            path = recorded.path,
+            payload = ByteArray(0),
+            timestamp = date,
+            region = "auto",
+            service = "s3",
+        ).headers.getValue("Authorization")
+        assertEquals(expected, recorded.headers.getValue("authorization").single())
+    }
+
+    @Test(timeout = 10_000)
+    fun getReturnsClientErrorImmediatelyOn404() {
+        planned.add(PlannedResponse(404, "<Error><Code>NoSuchKey</Code></Error>"))
+        val open = AtomicInteger()
+        val result = client(openCount = open).get("missing/key")
+
+        val error = result.expect<S3GetResult.ClientError>()
+        assertEquals(404, error.statusCode)
+        assertTrue(error.bodySnippet, error.bodySnippet.contains("NoSuchKey"))
+        assertEquals("only one request should hit the server for a 4xx", 1, open.get())
+    }
+
+    @Test(timeout = 10_000)
+    fun getRetriesOn500ThenSucceeds() {
+        planned.add(PlannedResponse(500, "Internal Server Error"))
+        planned.add(PlannedResponse(200, "dump-bytes"))
+        val sleeps = mutableListOf<Long>()
+        val open = AtomicInteger()
+        val result = client(sleeper = { sleeps.add(it) }, openCount = open).get("k")
+
+        assertTrue("expected Success, got $result", result is S3GetResult.Success)
+        assertEquals(2, open.get())
+        assertEquals(listOf(1000L), sleeps)
+    }
+
+    @Test(timeout = 10_000)
+    fun getRetriesOnTransportFailureThenSucceeds() {
+        // A pre-response connection drop is transparently retried by the JDK for bodyless
+        // GETs (the injected opener is not re-invoked), so simulate the transport failure
+        // in the opener itself to exercise the client's own retry path.
+        planned.add(PlannedResponse(200, "dump-bytes"))
+        val open = AtomicInteger()
+        val result = S3Client(
+            endpoint = "http://127.0.0.1:${port()}",
+            bucket = "my-bucket",
+            accessKeyId = "AKIDEXAMPLE",
+            secretAccessKey = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+            connectTimeoutMs = 2000,
+            readTimeoutMs = 2000,
+            opener = { url ->
+                if (open.incrementAndGet() == 1) throw IOException("simulated transport failure")
+                url.openConnection() as HttpURLConnection
+            },
+        ).get("k")
+
+        assertTrue("expected Success, got $result", result is S3GetResult.Success)
+        assertEquals(2, open.get())
+    }
+
+    @Test(timeout = 10_000)
+    fun getReturnsServerErrorAfterExhaustingRetries() {
+        repeat(3) { planned.add(PlannedResponse(500, "boom")) }
+        val open = AtomicInteger()
+        val result = client(openCount = open).get("k")
+
+        val error = result.expect<S3GetResult.ServerError>()
+        assertEquals(500, error.statusCode)
+        assertEquals(3, error.attempts)
+        assertTrue(error.bodySnippet, error.bodySnippet.contains("boom"))
+        assertEquals(3, open.get())
+    }
+
+    // ---------- DELETE ----------
+
+    @Test(timeout = 10_000)
+    fun deleteSendsSignedDeleteAndTreats204AsSuccess() {
+        planned.add(PlannedResponse(204))
+        val result = client().delete("old/dump.sql.gz")
+
+        val success = result.expect<S3DeleteResult.Success>()
+        assertEquals(204, success.statusCode)
+
+        val recorded = synchronized(requests) { requests.toList() }.single()
+        assertEquals("DELETE", recorded.method)
+        assertEquals("/my-bucket/old/dump.sql.gz", recorded.path)
+        assertTrue("DELETE sends no body", recorded.body.isEmpty())
+        assertEquals(
+            SigV4.EMPTY_PAYLOAD_SHA256,
+            recorded.headers.getValue("x-amz-content-sha256").single(),
+        )
+    }
+
+    @Test(timeout = 10_000)
+    fun deleteReturnsClientErrorImmediatelyOn404() {
+        planned.add(PlannedResponse(404, "<Error><Code>NoSuchKey</Code></Error>"))
+        val open = AtomicInteger()
+        val result = client(openCount = open).delete("missing")
+
+        val error = result.expect<S3DeleteResult.ClientError>()
+        assertEquals(404, error.statusCode)
+        assertEquals("only one request should hit the server for a 4xx", 1, open.get())
+    }
+
+    // ---------- LIST (ListObjectsV2) ----------
+
+    /** Builds a minimal ListObjectsV2 XML page for the stub. */
+    private fun listXml(
+        truncated: Boolean,
+        token: String? = null,
+        vararg entries: Pair<String, Long?>,
+    ): String = buildString {
+        append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+        append("<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">")
+        append("<KeyCount>").append(entries.size).append("</KeyCount>")
+        append("<IsTruncated>").append(truncated).append("</IsTruncated>")
+        if (token != null) append("<NextContinuationToken>").append(token).append("</NextContinuationToken>")
+        for ((key, size) in entries) {
+            append("<Contents><Key>").append(key).append("</Key>")
+            if (size != null) append("<Size>").append(size).append("</Size>")
+            append("<StorageClass>STANDARD</StorageClass></Contents>")
+        }
+        append("</ListBucketResult>")
+    }
+
+    @Test(timeout = 10_000)
+    fun listSendsCanonicalQueryAndParsesKeysAndSizes() {
+        planned.add(
+            PlannedResponse(
+                200,
+                listXml(
+                    truncated = false,
+                    token = null,
+                    "dump/2025-01-01/cache.sql.gz" to 123L,
+                    "dump/2025-01-02/cache.sql.gz" to null,
+                ),
+            ),
+        )
+        val result = client().list("dump/", maxKeys = 5)
+
+        val success = result.expect<S3ListResult.Success>()
+        assertEquals(200, success.statusCode)
+        assertEquals(
+            listOf("dump/2025-01-01/cache.sql.gz", "dump/2025-01-02/cache.sql.gz"),
+            success.objects.map { it.key },
+        )
+        // Size is null when <Size> is absent.
+        assertEquals(listOf(123L, null), success.objects.map { it.size })
+
+        val recorded = synchronized(requests) { requests.toList() }.single()
+        assertEquals("GET", recorded.method)
+        // The wire query is exactly the canonical form of the signed query map.
+        val expectedQuery = SigV4.canonicalQueryString(
+            mapOf("list-type" to "2", "prefix" to "dump/", "max-keys" to "5"),
+        )
+        assertEquals("/my-bucket?$expectedQuery", recorded.path)
+    }
+
+    @Test(timeout = 10_000)
+    fun listAuthorizationMatchesReSignOfWireQuery() {
+        planned.add(PlannedResponse(200, listXml(truncated = false, token = null, "dump/one.sql.gz" to 1L)))
+        client().list("dump dir", maxKeys = 7).expect<S3ListResult.Success>()
+
+        val recorded = synchronized(requests) { requests.toList() }.single()
+        // Split the recorded request target back into path + wire query.
+        val qIndex = recorded.path.indexOf('?')
+        assertTrue("expected a query on the wire, got ${recorded.path}", qIndex > 0)
+        val path = recorded.path.substring(0, qIndex)
+        val wireQuery = recorded.path.substring(qIndex + 1)
+        // Decode the wire pairs to raw values; the canonical form of that map must be
+        // byte-identical to what was sent (wire matches signed).
+        val queryMap = wireQuery.split("&").associate { pair ->
+            val (k, v) = pair.split("=", limit = 2)
+            URLDecoder.decode(k, "UTF-8") to URLDecoder.decode(v, "UTF-8")
+        }
+        assertEquals(wireQuery, SigV4.canonicalQueryString(queryMap))
+        val date = recorded.headers.getValue("x-amz-date").single()
+        val expected = SigV4.sign(
+            accessKeyId = "AKIDEXAMPLE",
+            secretAccessKey = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+            method = "GET",
+            host = "127.0.0.1:${port()}",
+            path = path,
+            payload = ByteArray(0),
+            timestamp = date,
+            region = "auto",
+            service = "s3",
+            query = queryMap,
+        ).headers.getValue("Authorization")
+        assertEquals(expected, recorded.headers.getValue("authorization").single())
+    }
+
+    @Test(timeout = 10_000)
+    fun listFollowsContinuationTokenAcrossPages() {
+        planned.add(PlannedResponse(200, listXml(truncated = true, token = "tok-1", "dump/a.sql.gz" to 1L)))
+        planned.add(PlannedResponse(200, listXml(truncated = false, token = null, "dump/b.sql.gz" to 2L)))
+
+        val result = client().list("dump/")
+
+        val success = result.expect<S3ListResult.Success>()
+        assertEquals(listOf("dump/a.sql.gz", "dump/b.sql.gz"), success.objects.map { it.key })
+
+        val recorded = synchronized(requests) { requests.toList() }
+        assertEquals(2, recorded.size)
+        assertEquals(
+            "/my-bucket?${SigV4.canonicalQueryString(mapOf("list-type" to "2", "prefix" to "dump/"))}",
+            recorded[0].path,
+        )
+        assertEquals(
+            "/my-bucket?${SigV4.canonicalQueryString(mapOf("list-type" to "2", "prefix" to "dump/", "continuation-token" to "tok-1"))}",
+            recorded[1].path,
+        )
+    }
+
+    @Test(timeout = 10_000)
+    fun listReturnsCappedWhenPageLimitReachedWhileTruncated() {
+        repeat(S3Client.MAX_LIST_PAGES) {
+            planned.add(PlannedResponse(200, listXml(truncated = true, token = "tok-$it", "dump/k$it" to 1L)))
+        }
+        val open = AtomicInteger()
+        val result = client(openCount = open).list("dump/")
+
+        val capped = result.expect<S3ListResult.Capped>()
+        assertEquals(S3Client.MAX_LIST_PAGES, capped.objects.size)
+        assertEquals("tok-99", capped.nextContinuationToken)
+        assertEquals(S3Client.MAX_LIST_PAGES, open.get())
+    }
+
+    @Test(timeout = 10_000)
+    fun listReturnsClientErrorImmediatelyOn403() {
+        planned.add(PlannedResponse(403, "<Error><Code>AccessDenied</Code></Error>"))
+        val open = AtomicInteger()
+        val result = client(openCount = open).list("dump/")
+
+        val error = result.expect<S3ListResult.ClientError>()
+        assertEquals(403, error.statusCode)
+        assertEquals("only one request should hit the server for a 4xx", 1, open.get())
     }
 }
