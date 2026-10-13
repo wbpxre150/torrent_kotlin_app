@@ -517,6 +517,68 @@ class DbRestoreManagerTest {
         assertTrue(tempFiles(File(tmp.root, "tmp")).isEmpty())
     }
 
+    @Test fun overlappingChainAfterRebaseline_succeedsAndReplaysInSortedOrder() {
+        val restorer = FakeRestorer()
+        val runner = FakeRunner()
+        val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        val (m, flags, _) = newManager(
+            restorer, runner,
+            bookmarkFile = bookmarkFile,
+            // The exact on-device scenario: after a restore reset the bookmark
+            // to first run, the next backup re-dumped the whole restored DB
+            // from 0, so the bucket holds an overlapping pair. Listing order
+            // is deliberately the unsorted one.
+            objects = listOf(
+                "db/incremental_20261013_47-1390.sql.gz" to "INSERT OR IGNORE INTO torrents VALUES(48);",
+                "db/incremental_20261013_0-1434.sql.gz" to "INSERT OR IGNORE INTO torrents VALUES(1);",
+            ),
+        )
+        DbBookmark.write(bookmarkFile, DbBookmark(10, 2))
+
+        val st = m.runRestore()
+
+        // Overlap is valid: the replay is idempotent (INSERT OR IGNORE), so
+        // both objects are downloaded and replayed in sorted chain order.
+        assertEquals(DbRestoreState.SUCCESS, st.state)
+        assertEquals(
+            listOf("db/incremental_20261013_0-1434.sql.gz", "db/incremental_20261013_47-1390.sql.gz"),
+            restorer.getOrder)
+        assertEquals(2, st.objectCount)
+        assertEquals(2, st.objectKeys.size)
+        assertEquals(1, runner.calls)
+        assertEquals(
+            "INSERT OR IGNORE INTO torrents VALUES(1);" +
+                "INSERT OR IGNORE INTO torrents VALUES(48);",
+            String(runner.capturedFileBytes!!))
+        assertTrue(st.message, st.message.contains("chain starts at torrent id 0"))
+        // Crawler restarted, temp file cleaned, bookmark reset on zero exit.
+        assertEquals(1, flags.stopCount)
+        assertEquals(1, flags.startCount)
+        assertEquals(DbBookmark.FIRST_RUN, DbBookmark.read(bookmarkFile))
+        assertTrue(tempFiles(File(tmp.root, "tmp")).isEmpty())
+    }
+
+    @Test fun adjacentChain_succeedsWithoutOffByOne() {
+        val restorer = FakeRestorer()
+        val runner = FakeRunner()
+        val (m, _, _) = newManager(
+            restorer, runner,
+            objects = listOf(
+                "db/incremental_20231114_0-10.sql.gz" to "A",
+                "db/incremental_20231115_11-20.sql.gz" to "B",
+            ),
+        )
+
+        val st = m.runRestore()
+
+        // Exactly adjacent (end 10, next start 11 == end + 1): a valid chain.
+        assertEquals(DbRestoreState.SUCCESS, st.state)
+        assertEquals(
+            listOf("db/incremental_20231114_0-10.sql.gz", "db/incremental_20231115_11-20.sql.gz"),
+            restorer.getOrder)
+        assertEquals(1, runner.calls)
+    }
+
     @Test fun stopCrawlerThrows_failsAndStillRestartsCrawler() {
         val restorer = FakeRestorer()
         val runner = FakeRunner()

@@ -224,14 +224,22 @@ class DbRestoreManager(
             // Chain coherence: with seeded baselines the chain legitimately
             // starts at ANY id — the first object's start defines the chain
             // start (pre-baseline history is deliberately not in the bucket) —
-            // so there is no "missing baseline" failure. A GAP between
-            // consecutive objects, however, means the bucket is incomplete and
-            // restoring it would silently drop rows — fail that case.
+            // so there is no "missing baseline" failure.
+            //
+            // A restore-induced re-baseline legitimately produces an OVERLAPPING
+            // chain: after a restore resets the bookmark to first run, the next
+            // backup re-dumps the whole (restored) database starting at 0, so
+            // the bucket can hold e.g. `[0-1434, 47-1390]` (sorted by date,
+            // start). Overlap is safe: every dump statement is
+            // `INSERT OR IGNORE`, so replaying overlapping ranges is
+            // idempotent. A TRUE gap — the next object's start beyond the
+            // previous object's end + 1 — means the bucket is missing data and
+            // restoring it would silently drop rows; fail that case.
             val first = chain.first().second
             for (i in 0 until chain.size - 1) {
                 val (keyA, a) = chain[i]
                 val (keyB, b) = chain[i + 1]
-                if (a.end + 1L != b.start) {
+                if (b.start > a.end + 1L) {
                     throw IllegalStateException(
                         "backup chain has a gap: object $keyA ends at ${a.end} " +
                             "but next object $keyB starts at ${b.start}")
