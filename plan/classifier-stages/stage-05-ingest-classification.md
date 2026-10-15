@@ -53,6 +53,35 @@ Stage 4 (tparse + ftc proven on arm64; `models/v1/{adult,category,tv_kind}.ftz` 
 5. No new crashes in logcat over the 30 min run.
 6. `./gradlew :app:testDebugUnitTest` passes.
 
+## Results (recorded 2026-10-15, via dev-workflow)
+
+App commits: `839eb7d` (vendor tparse/ftc/fastText + CMake), `019e4be` (gitlink → crawler `c42736f`:
+classifier module, torrent_class/classifier_meta schema in database.c **and** the batch_writer backup
+mirror, same-transaction insert, /stats counters, config keys), `586df58` (models as assets + binary-safe
+Kotlin staging + 3 fidelity tests), `26e7f65` (review fix-ups: stats-mutex on model_load_failures,
+classifier_meta in the backup mirror, cmake comment).
+
+1. **Build: PASS.** `./gradlew installDebug` on JDK 21; APK `app/build/outputs/apk/debug/app-debug.apk`.
+2. **Zero unclassified new rows: PASS.** 35-min window on CPH2305; DB pulled to host (no on-device
+   sqlite3): `SELECT count(*) FROM torrents t LEFT JOIN torrent_class c ON c.torrent_id=t.id WHERE
+   c.torrent_id IS NULL AND t.added_timestamp >= <restart>` → **0** (5,921/5,921 new rows classified;
+   940 adult-tagged, 1,616 tv_kind non-null).
+3. **/stats classifier counters: PASS.** by_category, adult_tagged, mean µs/item, tv_kind_model_used,
+   parser_only_fallback=0, model_load_failures=0. Note: live mean ≈ 5.6 ms/item (stage-4 standalone
+   bench p50 was 134 µs) — counter includes cold-start model loads + worker contention; ingest rate
+   unaffected, investigate only if it ever matters.
+4. **Ingest rate: PASS (no regression).** ≈15,870/hr over the window vs 13,287/hr pre-change baseline
+   (+19.5%, i.e. above the −5% bar; DHT rates fluctuate).
+5. **No crashes: PASS.** 0 fatal signals/exceptions/tombstones in logcat over the window.
+6. **Unit tests: PASS.** `:app:testDebugUnitTest` 539/539 (incl. 3 binary-staging fidelity tests +
+   key-preservation test).
+
+Deviations (accepted): `libdhtcrawler.so` NOT committed — repo policy (.gitignore:21-22; AGENTS.md
+invariant 4 is stale for crawler/transmission binaries, only libftpserver.so is tracked); crawler
+changes as vendored-repo commits (sanctioned) instead of patches; `calibration.json` not shipped
+(manifest carries the thresholds); classifier keys are parsed by the crawler but not yet in the
+Kotlin `CrawlerKeys` allow-list — stage 6 owns form exposure.
+
 ## Commit
 
 `crawler: stage 5 — torrent_class schema + ingest-time tparse/ftc classification (tag mode)`
