@@ -10,7 +10,7 @@ Every new torrent on the phone gets a `torrent_class` row (tag mode; the existin
 
 ## Depends on
 
-Stage 4 (tparse + ftc proven on arm64; `models/v1/{adult,category}.ftz` + `manifest.json` exist).
+Stage 4 (tparse + ftc proven on arm64; `models/v1/{adult,category,tv_kind}.ftz` + `manifest.json` exist).
 
 ## Scope
 
@@ -19,12 +19,16 @@ Stage 4 (tparse + ftc proven on arm64; `models/v1/{adult,category}.ftz` + `manif
    - Do **not** edit `dht_crawler/lib/` (vendored; changes are wiped on rebuild).
    - Crawler source changes go through the vendored repo's commits or a new patch in `dht_crawler/patches/`,
      applied by `prepareDhtCrawlerSrc`.
-   - Ship the `.ftz` files and the manifest as assets alongside the keyword files (`copyDhtCrawlerAssets`).
+   - Ship all three `.ftz` (`adult`, `category`, `tv_kind`) and the manifest as assets alongside the keyword files
+     (`copyDhtCrawlerAssets`).
 2. In the crawler:
    - Create the `torrent_class` and `classifier_meta` tables (classifier.md §7). This runs in both
      `database.c` and `batch_writer.c`.
    - Classify in `tree_metadata.c` next to `porn_filter_check`, carrying `classification_t` through
      `batch_writer_add`, and insert it in the same transaction.
+   - `tv_kind` comes from tparse (`tp_result_t`); run the `tv_kind.ftz` model only when the parser can't decide
+     (classifier.md §4). Each resident model costs ~19 MB RSS on the phone (stage 4 measurement), so load
+     `tv_kind.ftz` lazily or at startup with the total RSS budget in mind.
    - Model load failure → parser-only classification plus a warning (no crash).
    - `/stats` gains classifier counters (by category, adult, mean µs/item).
 3. Tag mode only in this stage: the existing `porn_filter_enabled` behaviour is unchanged and on its own toggle.
