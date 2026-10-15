@@ -125,9 +125,9 @@ class CrawlerKeysTest {
     }
 
     @Test fun estimateThreads_sixteenTreeConfig() {
-        val s = CrawlerSettings() // 16 trees, 3+10+30+50 per-tree workers
-        assertEquals(16 * (3 + 10 + 30 + 50) + CrawlerKeys.THREAD_OVERHEAD, CrawlerKeys.estimateThreads(s))
-        assertEquals(1552, CrawlerKeys.estimateThreads(s))
+        val s = CrawlerSettings() // 16 trees, 3+5+8+12 per-tree workers
+        assertEquals(16 * (3 + 5 + 8 + 12) + CrawlerKeys.THREAD_OVERHEAD, CrawlerKeys.estimateThreads(s))
+        assertEquals(512, CrawlerKeys.estimateThreads(s))
         assertTrue(CrawlerKeys.estimateThreads(s) < CrawlerKeys.THREAD_WARN_THRESHOLD)
     }
 

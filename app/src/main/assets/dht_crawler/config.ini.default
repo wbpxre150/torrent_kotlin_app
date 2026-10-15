@@ -99,11 +99,11 @@ max_trees_per_partition = 4
 # find_node workers per tree
 tree_find_node_workers = 3
 # BEP51 sample_infohashes workers per tree
-tree_bep51_workers = 10
+tree_bep51_workers = 5
 # get_peers workers per tree
-tree_get_peers_workers = 30
+tree_get_peers_workers = 8
 # Metadata workers per tree
-tree_metadata_workers = 50
+tree_metadata_workers = 12
 # Infohash queue capacity per tree
 tree_infohash_queue_capacity = 3000
 # BEP51 query interval in milliseconds

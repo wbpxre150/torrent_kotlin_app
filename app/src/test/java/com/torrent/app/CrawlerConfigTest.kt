@@ -129,8 +129,8 @@ class CrawlerConfigTest {
         assertEquals("0", ini["rclone_backup_enabled"])
         assertEquals("10", ini["nice_level"])
         assertEquals("16", ini["num_trees"])
-        assertEquals("30", ini["tree_get_peers_workers"])
-        assertEquals("50", ini["tree_metadata_workers"])
+        assertEquals("8", ini["tree_get_peers_workers"])
+        assertEquals("12", ini["tree_metadata_workers"])
         assertEquals("8081", ini["http_port"])
         assertEquals("127.0.0.1", ini["http_bind"])
         // Stage 6 adult handling: classifier + calibrated thresholds + hard-block list
