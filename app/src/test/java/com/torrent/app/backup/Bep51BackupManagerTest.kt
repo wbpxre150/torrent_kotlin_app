@@ -4,6 +4,7 @@ import com.torrent.app.config.BackupSettings
 import com.torrent.app.s3.S3PutResult
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -122,6 +123,10 @@ class Bep51BackupManagerTest {
         val m = newManager(validCacheFile(), up, busy = true)
         val st = m.runCheck(manual = true)
         assertEquals(BackupState.SKIPPED_BUSY, st.state)
+        // The busy gate covers apply/maintenance/restore jobs (the DaemonService
+        // wiring deliberately does NOT count a running DB backup check — its
+        // PUT is independent and small).
+        assertTrue(st.message, st.message.contains("apply/maintenance"))
         assertEquals(0, up.calls)
     }
 
@@ -152,6 +157,66 @@ class Bep51BackupManagerTest {
         assertEquals(BackupState.NOT_CONFIGURED, st.state)
         assertTrue(st.message.contains("not configured"))
         assertTrue(!st.configured)
+        assertEquals(0, up.calls)
+    }
+
+    // --- refreshConfigStatus (apply-path snapshot refresh) ---
+
+    @Test fun refreshConfigStatus_updatesStaleSnapshotAfterApply() {
+        val up = FakeUploader()
+        var s = settings(uploadEnabled = false)
+        val m = Bep51BackupManager(
+            cacheFile = { validCacheFile() },
+            loadSettings = { s },
+            isBusy = { false },
+            isWifi = { true },
+            clientFactory = { up },
+            clock = { DAY1 },
+            executor = NoopScheduledExecutorService(),
+        )
+        m.runCheck(manual = true)
+        assertEquals(BackupState.NOT_CONFIGURED, m.status.state)
+        assertTrue(!m.status.uploadEnabled)
+        // The user ticks "Enable R2 upload" and applies: the manager's
+        // status snapshot must refresh immediately, not at the next tick.
+        s = settings(uploadEnabled = true)
+        m.refreshConfigStatus()
+        assertTrue(m.status.uploadEnabled)
+        assertTrue(m.status.configured)
+        assertEquals(BackupState.IDLE, m.status.state)
+        assertEquals(0, up.calls) // config-only refresh: no upload queued
+    }
+
+    @Test fun refreshConfigStatus_invalidSettingsStayNotConfigured() {
+        val up = FakeUploader()
+        val m = newManager(validCacheFile(), up, settings().copy(r2Endpoint = ""))
+        m.refreshConfigStatus()
+        assertEquals(BackupState.NOT_CONFIGURED, m.status.state)
+        assertTrue(m.status.uploadEnabled)
+        assertTrue(!m.status.configured)
+        assertTrue(m.status.message.contains("not configured"))
+        assertEquals(0, up.calls)
+    }
+
+    @Test fun refreshConfigStatus_preservesRealOutcomeState() {
+        val up = FakeUploader()
+        val m = newManager(validCacheFile(), up, settings())
+        m.runCheck(manual = true)
+        assertEquals(BackupState.SUCCESS, m.status.state)
+        m.refreshConfigStatus()
+        assertEquals(BackupState.SUCCESS, m.status.state)
+        assertTrue(m.status.uploadEnabled)
+        assertTrue(m.status.configured)
+        assertEquals(1, up.calls) // no extra upload from the refresh
+    }
+
+    @Test fun refreshConfigStatus_disabledMarksNotConfigured() {
+        val up = FakeUploader()
+        val m = newManager(validCacheFile(), up, settings(uploadEnabled = false))
+        m.refreshConfigStatus()
+        assertEquals(BackupState.NOT_CONFIGURED, m.status.state)
+        assertTrue(!m.status.uploadEnabled)
+        assertTrue(!m.status.configured)
         assertEquals(0, up.calls)
     }
 
@@ -420,5 +485,36 @@ class Bep51BackupManagerTest {
         assertEquals(2, noop.submitted.get())
         noop.last!!.run()
         assertEquals(2, up.calls)
+    }
+
+    @Test fun oomInCheckMarksFailedAndReleasesInFlight() {
+        val noop = NoopScheduledExecutorService()
+        val oom = object : S3Uploader {
+            override fun put(objectKey: String, contentType: String, body: ByteArray): S3PutResult =
+                throw OutOfMemoryError("boom")
+        }
+        val m = Bep51BackupManager(
+            cacheFile = { validCacheFile() },
+            loadSettings = { settings() },
+            isBusy = { false },
+            isWifi = { true },
+            clientFactory = { oom },
+            clock = { DAY1 },
+            zone = ZoneOffset.UTC,
+            executor = noop,
+        )
+        m.uploadNow(manual = true)
+        assertEquals(1, noop.submitted.get())
+        // The executor wrapper catches Throwable: an OOM inside the check must
+        // mark it FAILED and release the in-flight guard (unwinding the check
+        // frees its gzip buffer) instead of escaping and killing the process.
+        noop.last!!.run()
+        assertEquals(BackupState.FAILED, m.status.state)
+        assertTrue(m.status.message, m.status.message.contains("upload failed"))
+        assertTrue(m.status.message, m.status.message.contains("boom"))
+        // Released: a further trigger is accepted, not refused as running.
+        val second = m.uploadNow(manual = true)
+        assertEquals(2, noop.submitted.get())
+        assertFalse(second.message.contains("already running"))
     }
 }

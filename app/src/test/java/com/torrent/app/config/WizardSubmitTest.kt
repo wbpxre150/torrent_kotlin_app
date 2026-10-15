@@ -97,6 +97,20 @@ class WizardSubmitTest {
         assertTrue(o.errors.any { it.contains("R2", true) })
     }
 
+    @Test fun bootstrapOnWithDbBackupOff_passesWithoutR2Credentials() {
+        // Regression for the wizard arg-misalignment bug: bootstrapEnabled on with
+        // dbBackupEnabled off and no R2 credentials must not trip DB-backup validation.
+        val o = WizardSubmit.submit(validForm().copy(
+            bootstrapEnabled = true,
+            bootstrapUrl = "https://unjumble.au/bep51/bep51_cache.dat.gz",
+        ))
+        assertTrue(o.ok)
+        val b = o.backup!!
+        assertFalse(b.dbBackupEnabled)
+        assertFalse(b.uploadEnabled)
+        assertTrue(b.bootstrapEnabled)
+    }
+
     @Test fun backupBootstrapHttpUrlFails() {
         val o = WizardSubmit.submit(validForm().copy(bootstrapEnabled = true, bootstrapUrl = "http://example.com/x"))
         assertFalse(o.ok)

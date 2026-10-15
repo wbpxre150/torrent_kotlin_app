@@ -127,8 +127,12 @@ class Bep51BackupManager(
             executor.execute {
                 try {
                     runCheck(manual)
-                } catch (e: Exception) {
-                    // The check must never take the periodic schedule down.
+                } catch (e: Throwable) {
+                    // Throwable, not Exception: an OutOfMemoryError must mark
+                    // the check FAILED and release inFlight — unwinding this
+                    // frame frees the gzip buffer — instead of killing the
+                    // process and wedging the backup managers. (The check must
+                    // never take the periodic schedule down either.)
                     status = status.copy(
                         state = BackupState.FAILED,
                         message = "upload failed: ${e.message ?: e.javaClass.simpleName}",
@@ -142,6 +146,50 @@ class Bep51BackupManager(
             status = status.copy(state = BackupState.FAILED, message = "refused: service is shutting down")
         }
         return status
+    }
+
+    /**
+     * Re-evaluates only the config gates ([BackupSettings.uploadEnabled] +
+     * [ConfigValidator.validateBackup] errors) against the current settings
+     * and updates [status] synchronously — no executor, no network, no
+     * upload. Called by the settings apply path (DaemonService's
+     * saveBackupSettings) so the crawler panel's "R2 upload is disabled"
+     * note reflects a just-applied change immediately instead of after the
+     * next periodic check (up to [CHECK_INTERVAL_MINUTES] minutes later).
+     *
+     * A previous NOT_CONFIGURED state is reset to IDLE once the settings
+     * are enabled and valid (that state only ever described the config
+     * gate, which has just been cleared); any real outcome state
+     * (SUCCESS/FAILED/SKIPPED_*) and its message is preserved, only the
+     * config flags are corrected. Races with an in-flight check are
+     * benign — status is a best-effort volatile snapshot and the check's
+     * own finish() re-applies its outcome.
+     */
+    fun refreshConfigStatus() {
+        val settings = try {
+            loadSettings()
+        } catch (e: Exception) {
+            finish(BackupState.FAILED, "failed to load settings: ${e.message}",
+                uploadEnabled = false, configured = false)
+            return
+        }
+        if (!settings.uploadEnabled) {
+            finish(BackupState.NOT_CONFIGURED, "R2 upload is disabled",
+                uploadEnabled = false, configured = false)
+            return
+        }
+        val errors = ConfigValidator.validateBackup(settings).errors
+        if (errors.isNotEmpty()) {
+            finish(BackupState.NOT_CONFIGURED,
+                "not configured: " + errors.joinToString("; "),
+                uploadEnabled = true, configured = false)
+            return
+        }
+        status = if (status.state == BackupState.NOT_CONFIGURED)
+            status.copy(state = BackupState.IDLE, message = "",
+                uploadEnabled = true, configured = true)
+        else
+            status.copy(uploadEnabled = true, configured = true)
     }
 
     /**

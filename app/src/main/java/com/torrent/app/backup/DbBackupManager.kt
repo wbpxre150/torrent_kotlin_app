@@ -84,12 +84,13 @@ data class DbBackupStatus(
  * R2 DB bucket (plan 2, Stage 3).
  *
  * A periodic check (every [CHECK_INTERVAL_MINUTES] minutes, first one
- * [FIRST_CHECK_DELAY_MINUTES] after [start]) uploads at most once per
- * calendar day (per [zone]); a manual trigger (dashboard) bypasses the
- * daily gate only — the configured/busy/wifi gates always apply. Every check
- * runs on [executor] (a single-thread [ScheduledExecutorService] by
- * default) so at most one upload is in flight at a time; a trigger while one
- * is running is refused with "already running".
+ * [FIRST_CHECK_DELAY_MINUTES] after [start]) drains the incremental backlog
+ * in bounded chunks, at most once per calendar day (per [zone]); a manual
+ * trigger (dashboard) bypasses the daily gate only — the configured/busy/
+ * wifi gates always apply. Every check runs on [executor] (a single-thread
+ * [ScheduledExecutorService] by default) so at most one upload is in flight
+ * at a time; a trigger while one is running is refused with "already
+ * running".
  *
  * Flow of a check: not configured ([BackupSettings.dbBackupEnabled] false or
  * [ConfigValidator.validateDbBackup] errors) →
@@ -99,15 +100,27 @@ data class DbBackupStatus(
  * bookmark missing (first-ever run against a pre-existing DB) →
  * [DbBackupState.SEEDED] (seed the baseline via [DbDumper.maxCursors],
  * upload nothing); [DbDumper] skips (empty range) →
- * [DbBackupState.SKIPPED_EMPTY]; otherwise PUT the gzip dump →
+ * [DbBackupState.SKIPPED_EMPTY]; otherwise the bounded chunk drain below →
  * [DbBackupState.SUCCESS] / [DbBackupState.FAILED].
  *
+ * Bounded chunk drain: [DbDumper] itself caps one dump at
+ * [CrawlerDbDumper.DEFAULT_MAX_NEW_TORRENT_IDS_PER_DUMP] new torrent ids and
+ * flags the truncation via [DbDumpOutcome.Dump.capped] (materializing the
+ * whole backlog in RAM used to OOM-crash-loop the process). One check
+ * therefore uploads at most [MAX_CHUNKS_PER_CHECK] chunks — up to 8,000
+ * torrents per check — and stops early on the first chunk that is NOT
+ * capped. The daily date is persisted only when the backlog is drained (the
+ * check's final chunk was uncapped), so a still-capped check leaves the date
+ * unwritten and the next periodic tick (15 minutes later) continues the
+ * drain from the advanced bookmark.
+ *
  * Upload-first ordering (the critical invariant): the [DbBookmark] is
- * advanced to the dump's [DbDumpOutcome.Dump.newCursor] ONLY after a
- * successful PUT, and the daily date is persisted right after that. A
- * failed/ killed upload leaves the bookmark unchanged, so the next run
- * re-dumps (and re-uploads) the exact same range — idempotent thanks to
- * `INSERT OR IGNORE`.
+ * advanced to a chunk's [DbDumpOutcome.Dump.newCursor] ONLY after that
+ * chunk's PUT succeeded. A failed/ killed upload leaves the bookmark
+ * unchanged, so the next run re-dumps (and re-uploads) the exact same range
+ * — idempotent thanks to `INSERT OR IGNORE`. A failure in the middle of a
+ * drain likewise costs only the failed chunk: every earlier chunk's PUT was
+ * already followed by its own bookmark write.
  *
  * All collaborators are constructor-injected (plain-JUnit testable);
  * [clock] and [zone] drive the calendar-day gate.
@@ -175,8 +188,13 @@ class DbBackupManager(
             executor.execute {
                 try {
                     runCheck(manual)
-                } catch (e: Exception) {
-                    // The check must never take the periodic schedule down.
+                } catch (e: Throwable) {
+                    // Throwable, not Exception: an OutOfMemoryError raised
+                    // while materializing a chunk must mark the check FAILED
+                    // and release inFlight — unwinding this frame frees the
+                    // dump's memory — instead of killing the process and
+                    // wedging the backup managers. (The check must never take
+                    // the periodic schedule down either.)
                     status = status.copy(
                         state = DbBackupState.FAILED,
                         message = "upload failed: ${e.message ?: e.javaClass.simpleName}",
@@ -190,6 +208,51 @@ class DbBackupManager(
             status = status.copy(state = DbBackupState.FAILED, message = "refused: service is shutting down")
         }
         return status
+    }
+
+    /**
+     * Re-evaluates only the config gates ([BackupSettings.dbBackupEnabled]
+     * + [ConfigValidator.validateDbBackup] errors) against the current
+     * settings and updates [status] synchronously — no executor, no
+     * network, no dump. Called by the settings apply path
+     * (DaemonService's saveBackupSettings) so the crawler panel's
+     * "DB dump upload is disabled" note reflects a just-applied change
+     * immediately instead of after the next periodic check (up to
+     * [CHECK_INTERVAL_MINUTES] minutes later).
+     *
+     * A previous NOT_CONFIGURED state is reset to IDLE once the settings
+     * are enabled and valid (that state only ever described the config
+     * gate, which has just been cleared); any real outcome state
+     * (SUCCESS/SEEDED/FAILED/SKIPPED_*) and its message is preserved, only
+     * the config flags are corrected. Races with an in-flight check are
+     * benign — status is a best-effort volatile snapshot and the check's
+     * own finish() re-applies its outcome.
+     */
+    fun refreshConfigStatus() {
+        val settings = try {
+            loadSettings()
+        } catch (e: Exception) {
+            finish(DbBackupState.FAILED, "failed to load settings: ${e.message}",
+                uploadEnabled = false, configured = false)
+            return
+        }
+        if (!settings.dbBackupEnabled) {
+            finish(DbBackupState.NOT_CONFIGURED, "DB dump upload is disabled",
+                uploadEnabled = false, configured = false)
+            return
+        }
+        val errors = ConfigValidator.validateDbBackup(settings).errors
+        if (errors.isNotEmpty()) {
+            finish(DbBackupState.NOT_CONFIGURED,
+                "not configured: " + errors.joinToString("; "),
+                uploadEnabled = true, configured = false)
+            return
+        }
+        status = if (status.state == DbBackupState.NOT_CONFIGURED)
+            status.copy(state = DbBackupState.IDLE, message = "",
+                uploadEnabled = true, configured = true)
+        else
+            status.copy(uploadEnabled = true, configured = true)
     }
 
     /**
@@ -251,7 +314,9 @@ class DbBackupManager(
             // attempt) but lastSuccess is NOT (nothing was uploaded). The
             // daily date is deliberately NOT persisted, so the next periodic
             // check the same day proceeds to the normal incremental path and
-            // uploads any rows discovered after the baseline.
+            // uploads any rows discovered after the baseline. A capped drain
+            // (see [MAX_CHUNKS_PER_CHECK]) holds the same way: an unfinished
+            // backlog leaves the date unwritten and continues next check.
             val dumper = dumperFactory(settings)
             val seeded = try {
                 dumper.maxCursors(file)
@@ -276,65 +341,108 @@ class DbBackupManager(
                     "baseline is not uploaded",
                 uploadEnabled = true, configured = true)
         }
-        val outcome = try {
-            dumperFactory(settings).dump(file, bookmark)
-        } catch (e: Exception) {
-            return finish(DbBackupState.FAILED, "dump failed: ${e.message ?: e.javaClass.simpleName}",
-                uploadEnabled = true, configured = true)
-        }
-        val dump = when (outcome) {
-            is DbDumpOutcome.Skipped ->
+        // Bounded drain of the incremental backlog: each chunk is dumped (the
+        // dumper caps it at its own row cap), PUT, and only then followed by
+        // its bookmark write (upload-first holds per chunk). The loop budget
+        // keeps one check's wall time bounded; if it runs out while still
+        // capped the next check continues from the advanced bookmark.
+        // The missing-bookmark branch above already returned, so the bookmark
+        // is non-null here.
+        var cursor: DbBookmark = checkNotNull(bookmark)
+        var chunks = 0
+        var totalBytes = 0L
+        var totalStatements = 0
+        var lastDump: DbDumpOutcome.Dump? = null
+        while (chunks < MAX_CHUNKS_PER_CHECK) {
+            val outcome = try {
+                dumperFactory(settings).dump(file, cursor)
+            } catch (e: Exception) {
+                return finish(DbBackupState.FAILED, "dump failed: ${e.message ?: e.javaClass.simpleName}",
+                    uploadEnabled = true, configured = true)
+            }
+            if (outcome is DbDumpOutcome.Skipped) {
+                // Empty range (no new torrents in this chunk's range): nothing
+                // to upload, exactly as before the drain loop.
                 return finish(DbBackupState.SKIPPED_EMPTY,
                     "skipped: no new torrents (max id ${outcome.maxTorrentId})",
                     uploadEnabled = true, configured = true)
-            is DbDumpOutcome.Dump -> outcome
-        }
-        val result = try {
-            clientFactory(settings).put(dump.objectKey, CONTENT_TYPE_GZIP, dump.sqlBytes)
-        } catch (e: Exception) {
-            return finish(DbBackupState.FAILED, "upload failed: ${e.message ?: e.javaClass.simpleName}",
-                uploadEnabled = true, configured = true)
-        }
-        return when (result) {
-            is S3PutResult.Success -> {
-                // Upload-first: the bookmark advances ONLY after the PUT
-                // landed, so a failed/killed upload re-dumps the same range
-                // next run (INSERT OR IGNORE makes the re-upload idempotent).
-                try {
-                    DbBookmark.write(bookmarkFile(), dump.newCursor)
-                } catch (e: Exception) {
-                    // The object is on R2 but the cursor did not move: the
-                    // next run re-dumps and re-uploads the same range.
-                    return finish(
-                        DbBackupState.FAILED,
-                        "upload succeeded but bookmark write failed: ${e.message ?: e.javaClass.simpleName}",
-                        uploadEnabled = true, configured = true)
-                }
-                val now = clock()
-                writeLastSuccessDate(today)
-                finish(
-                    DbBackupState.SUCCESS,
-                    "uploaded ${dump.sqlBytes.size} bytes to ${dump.objectKey} " +
-                        "(${dump.statementCount} statements)",
-                    uploadEnabled = true, configured = true,
-                    uploadedBytes = dump.sqlBytes.size.toLong(),
-                    sqlBytes = dump.sqlBytes.size.toLong(),
-                    statementCount = dump.statementCount,
-                    objectKey = dump.objectKey, lastSuccess = now)
             }
-            is S3PutResult.ClientError -> finish(
-                DbBackupState.FAILED,
-                "R2 rejected the upload (HTTP ${result.statusCode})",
-                uploadEnabled = true, configured = true)
-            is S3PutResult.ServerError -> finish(
-                DbBackupState.FAILED,
-                "R2 server error (HTTP ${result.statusCode} after ${result.attempts} attempts)",
-                uploadEnabled = true, configured = true)
-            is S3PutResult.Failure -> finish(
-                DbBackupState.FAILED,
-                "upload failed: ${result.cause.message ?: result.cause.javaClass.simpleName}",
-                uploadEnabled = true, configured = true)
+            val dump = outcome as DbDumpOutcome.Dump
+            val result = try {
+                clientFactory(settings).put(dump.objectKey, CONTENT_TYPE_GZIP, dump.sqlBytes)
+            } catch (e: Exception) {
+                return finish(DbBackupState.FAILED, "upload failed: ${e.message ?: e.javaClass.simpleName}",
+                    uploadEnabled = true, configured = true)
+            }
+            when (result) {
+                is S3PutResult.Success -> Unit
+                is S3PutResult.ClientError -> return finish(
+                    DbBackupState.FAILED,
+                    "R2 rejected the upload (HTTP ${result.statusCode})",
+                    uploadEnabled = true, configured = true)
+                is S3PutResult.ServerError -> return finish(
+                    DbBackupState.FAILED,
+                    "R2 server error (HTTP ${result.statusCode} after ${result.attempts} attempts)",
+                    uploadEnabled = true, configured = true)
+                is S3PutResult.Failure -> return finish(
+                    DbBackupState.FAILED,
+                    "upload failed: ${result.cause.message ?: result.cause.javaClass.simpleName}",
+                    uploadEnabled = true, configured = true)
+            }
+            // Upload-first: the bookmark advances ONLY after this chunk's PUT
+            // landed, so a failed/killed upload re-dumps the same range next
+            // run (INSERT OR IGNORE makes the re-upload idempotent).
+            try {
+                DbBookmark.write(bookmarkFile(), dump.newCursor)
+            } catch (e: Exception) {
+                // The object is on R2 but the cursor did not move: the
+                // next run re-dumps and re-uploads the same range.
+                return finish(
+                    DbBackupState.FAILED,
+                    "upload succeeded but bookmark write failed: ${e.message ?: e.javaClass.simpleName}",
+                    uploadEnabled = true, configured = true)
+            }
+            chunks++
+            cursor = dump.newCursor
+            totalBytes += dump.sqlBytes.size
+            totalStatements += dump.statementCount
+            // Only the last chunk's dump is retained (for the status fields);
+            // the earlier chunks' byte arrays are released as the loop runs.
+            lastDump = dump
+            if (!dump.capped) {
+                // Uncapped final chunk: the backlog is drained for today, so
+                // the daily date is persisted (the periodic gate then stops
+                // re-running us until tomorrow).
+                writeLastSuccessDate(today)
+                break
+            }
         }
+        // The loop can only exit with at least one uploaded chunk: every other
+        // exit path returns above.
+        val last = checkNotNull(lastDump) { "drain loop exited without a chunk" }
+        val message = if (chunks > 1) {
+            "uploaded $chunks chunks, $totalBytes bytes to ${last.objectKey} " +
+                "($totalStatements statements)"
+        } else {
+            "uploaded ${last.sqlBytes.size} bytes to ${last.objectKey} " +
+                "(${last.statementCount} statements)"
+        }
+        return finish(
+            DbBackupState.SUCCESS,
+            if (last.capped) {
+                // Budget exhausted while still capped: the daily date is
+                // deliberately NOT written (see the class KDoc), so the next
+                // periodic check continues the drain.
+                "$message; backlog continues next check " +
+                    "(capped at torrent id ${cursor.lastTorrentId})"
+            } else {
+                message
+            },
+            uploadEnabled = true, configured = true,
+            uploadedBytes = last.sqlBytes.size.toLong(),
+            sqlBytes = last.sqlBytes.size.toLong(),
+            statementCount = last.statementCount,
+            objectKey = last.objectKey, lastSuccess = clock())
     }
 
     /** Schedules the periodic (daily-gated) check; idempotent. */
@@ -387,6 +495,17 @@ class DbBackupManager(
         const val CONTENT_TYPE_GZIP = "application/gzip"
         const val FIRST_CHECK_DELAY_MINUTES = 2L
         const val CHECK_INTERVAL_MINUTES = 15L
+
+        /**
+         * Upper bound on the chunks one check uploads. Keeps a single
+         * check's wall time (and its network usage) bounded while still
+         * draining the backlog across checks — with the dumper's 2,000-new-
+         * torrent-id cap that is up to 8,000 torrents per check. Chunks left
+         * over are picked up by the next periodic tick (15 minutes later),
+         * because a check that exhausts this budget while still capped leaves
+         * the daily date unwritten.
+         */
+        const val MAX_CHUNKS_PER_CHECK = 4
 
         private fun defaultExecutor(): ScheduledExecutorService =
             Executors.newSingleThreadScheduledExecutor(ThreadFactory {

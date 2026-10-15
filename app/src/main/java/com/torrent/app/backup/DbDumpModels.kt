@@ -33,6 +33,9 @@ sealed class SqlValue {
  * own id, torrent_files on torrent_id). The source guarantees all of this
  * is read inside ONE read transaction so the cursor and the rows can
  * never disagree.
+ *
+ * The torrent range may be a bounded CHUNK of the backlog rather than the
+ * whole table — see [capped].
  */
 data class DbSnapshot(
     val maxTorrentId: Long,
@@ -40,6 +43,12 @@ data class DbSnapshot(
     val pathPrefixes: List<List<SqlValue>>,
     val torrents: List<List<SqlValue>>,
     val torrentFiles: List<List<SqlValue>>,
+    /**
+     * `true` when the torrent range was truncated by the source's chunk cap:
+     * more rows exist beyond [maxTorrentId], so [maxTorrentId] is a chunk
+     * boundary, not the table's true max.
+     */
+    val capped: Boolean = false,
 ) {
     /** Total number of INSERT statements [renderSql] emits for this snapshot. */
     val statementCount: Int
@@ -58,6 +67,10 @@ sealed interface DbDumpOutcome {
      * A dump artifact was produced. [sqlBytes] is the gzip-compressed SQL
      * text; [newCursor] is the bookmark to persist AFTER a successful
      * upload of [objectKey] (never before).
+     *
+     * [capped] flows from the [DbSnapshot] it was built from: `true` when the
+     * source hit its chunk cap, i.e. rows beyond [newCursor] still have to be
+     * dumped by a later run.
      */
     class Dump(
         val sqlBytes: ByteArray,
@@ -65,6 +78,7 @@ sealed interface DbDumpOutcome {
         val newCursor: DbBookmark,
         val objectKey: String,
         val newTorrentCount: Long,
+        val capped: Boolean = false,
     ) : DbDumpOutcome
 
     /** Empty range (`max_torrent_id <= last_torrent_id`): nothing to dump. */

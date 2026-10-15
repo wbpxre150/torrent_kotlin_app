@@ -279,6 +279,9 @@ fun WizardScreen(
     var r2AccessKeyId by remember { mutableStateOf(cfg?.backup?.r2AccessKeyId ?: "") }
     var r2SecretAccessKey by remember { mutableStateOf("") }
     var uploadEnabled by remember { mutableStateOf(cfg?.backup?.uploadEnabled ?: false) }
+    var dbBackupEnabled by remember { mutableStateOf(cfg?.backup?.dbBackupEnabled ?: false) }
+    var r2DbBucket by remember { mutableStateOf(cfg?.backup?.r2DbBucket ?: ConfigDefaults.DB_BACKUP_BUCKET) }
+    var r2DbObjectPrefix by remember { mutableStateOf(cfg?.backup?.r2DbObjectPrefix ?: ConfigDefaults.DB_BACKUP_OBJECT_PREFIX) }
     var bootstrapEnabled by remember { mutableStateOf(cfg?.backup?.bootstrapEnabled ?: false) }
     var bootstrapUrl by remember { mutableStateOf(cfg?.backup?.bootstrapUrl ?: "") }
     var errors by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -326,6 +329,12 @@ fun WizardScreen(
         OutlinedTextField(r2AccessKeyId, { r2AccessKeyId = it }, label = { Text("R2 access key ID") })
         OutlinedTextField(r2SecretAccessKey, { r2SecretAccessKey = it }, label = { Text("R2 secret access key") })
         Row(verticalAlignment = Alignment.CenterVertically) {
+            Switch(checked = dbBackupEnabled, onCheckedChange = { dbBackupEnabled = it })
+            Spacer(Modifier.width(8.dp)); Text("Enable daily DB dump upload (uses the R2 credentials above)")
+        }
+        OutlinedTextField(r2DbBucket, { r2DbBucket = it }, label = { Text("R2 DB bucket") })
+        OutlinedTextField(r2DbObjectPrefix, { r2DbObjectPrefix = it }, label = { Text("R2 DB object prefix") })
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Switch(checked = bootstrapEnabled, onCheckedChange = { bootstrapEnabled = it })
             Spacer(Modifier.width(8.dp)); Text("Enable bootstrap download (fresh installs)")
         }
@@ -340,15 +349,30 @@ fun WizardScreen(
             onClick = {
                 val svc = boundService ?: return@Button
                 val form = WizardSubmit.Form(
-                    txUser, txPass, peerPort.toIntOrNull() ?: 0, dlSubpath,
-                    ftpUser, ftpPass, ftpPort.toIntOrNull() ?: 0, ftpWifiOnly,
-                    crawlerEnabled,
-                    r2Endpoint, r2Bucket, r2ObjectKey, r2AccessKeyId,
+                    txUsername = txUser,
+                    txPassword = txPass,
+                    peerPort = peerPort.toIntOrNull() ?: 0,
+                    dataSubpath = dlSubpath,
+                    ftpUsername = ftpUser,
+                    ftpPassword = ftpPass,
+                    ftpPort = ftpPort.toIntOrNull() ?: 0,
+                    ftpWifiOnly = ftpWifiOnly,
+                    crawlerEnabled = crawlerEnabled,
+                    r2Endpoint = r2Endpoint,
+                    r2Bucket = r2Bucket,
+                    r2ObjectKey = r2ObjectKey,
+                    r2AccessKeyId = r2AccessKeyId,
                     // Blank secret keeps the current value (same as the dashboard form),
                     // so re-showing the wizard with upload enabled can't fail on it.
-                    if (r2SecretAccessKey.isBlank()) (svc.loadConfig()?.backup?.r2SecretAccessKey ?: "")
-                    else r2SecretAccessKey,
-                    uploadEnabled, bootstrapEnabled, bootstrapUrl,
+                    r2SecretAccessKey =
+                        if (r2SecretAccessKey.isBlank()) (svc.loadConfig()?.backup?.r2SecretAccessKey ?: "")
+                        else r2SecretAccessKey,
+                    uploadEnabled = uploadEnabled,
+                    dbBackupEnabled = dbBackupEnabled,
+                    r2DbBucket = r2DbBucket,
+                    r2DbObjectPrefix = r2DbObjectPrefix,
+                    bootstrapEnabled = bootstrapEnabled,
+                    bootstrapUrl = bootstrapUrl,
                 )
                 val outcome = WizardSubmit.submit(form)
                 if (!outcome.ok) { errors = outcome.errors; return@Button }

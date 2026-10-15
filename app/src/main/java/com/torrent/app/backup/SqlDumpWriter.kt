@@ -37,7 +37,10 @@ interface CrawlerDbSource {
  * [buildDump] gates on [DbBookmark]: `max_torrent_id <= last_torrent_id`
  * (incl. an empty table) → [DbDumpOutcome.Skipped] with no artifact at
  * all; otherwise the assembled SQL is gzip-compressed and named
- * `<prefix>/incremental_<YYYYMMDD (UTC)>_<start>-<end>.sql.gz`.
+ * `<prefix>/incremental_<YYYYMMDD (UTC)>_<start>-<end>.sql.gz`. The
+ * snapshot may cover only a capped CHUNK of the backlog (source-side cap):
+ * the object key and the cursor then end at the chunk boundary, and
+ * [DbDumpOutcome.Dump.capped] tells the manager that more rows remain.
  *
  * No Android imports — plain JUnit4 testable with a fake [CrawlerDbSource].
  */
@@ -56,6 +59,8 @@ class SqlDumpWriter(
         if (snapshot.maxTorrentId == 0L || snapshot.maxTorrentId <= bookmark.lastTorrentId) {
             // Empty range (incl. an empty table, even on the first run):
             // no artifact, mirrors the crawler's "no new torrents" skip.
+            // With a source-side chunk cap `maxTorrentId` is the chunk end,
+            // so this stays "no new torrents in this range".
             return DbDumpOutcome.Skipped(
                 maxTorrentId = snapshot.maxTorrentId,
                 maxPrefixId = snapshot.maxPrefixId,
@@ -71,6 +76,7 @@ class SqlDumpWriter(
                 keyPrefix, utcDateString(), bookmark.lastTorrentId + 1, snapshot.maxTorrentId
             ).key,
             newTorrentCount = snapshot.torrents.size.toLong(),
+            capped = snapshot.capped,
         )
     }
 

@@ -204,6 +204,31 @@ class SqlDumpWriterTest {
         assertEquals("dht/incremental_20260102_0-3.sql.gz", outcome.objectKey)
     }
 
+    // --- capped chunk (Stage 1) ---------------------------------------------
+
+    /** A capped snapshot yields a Dump flagged `capped`, twin shape unchanged. */
+    @Test fun cappedSnapshotProducesCappedDump() {
+        val plain = SqlDumpWriter(FakeSource(fixtureSnapshot()), clock = fixedClock)
+            .buildDump(DbBookmark.FIRST_RUN) as DbDumpOutcome.Dump
+        val capped = SqlDumpWriter(
+            FakeSource(fixtureSnapshot().copy(capped = true)), clock = fixedClock
+        ).buildDump(DbBookmark.FIRST_RUN) as DbDumpOutcome.Dump
+
+        assertTrue(capped.capped)
+        assertEquals(plain.objectKey, capped.objectKey)
+        assertEquals(plain.newCursor, capped.newCursor)
+        assertEquals(plain.statementCount, capped.statementCount)
+        assertEquals(plain.newTorrentCount, capped.newTorrentCount)
+        assertEquals(plain.sqlBytes.size, capped.sqlBytes.size)
+    }
+
+    /** The `capped` default (`false`) flows through to the Dump as false. */
+    @Test fun uncappedSnapshotDefaultsToNotCapped() {
+        val dump = SqlDumpWriter(FakeSource(fixtureSnapshot()), clock = fixedClock)
+            .buildDump(DbBookmark.FIRST_RUN) as DbDumpOutcome.Dump
+        assertTrue(!dump.capped)
+    }
+
     // --- gzip ----------------------------------------------------------------
 
     @Test fun gzipRoundTripIsByteIdentical() {

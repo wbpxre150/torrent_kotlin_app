@@ -197,8 +197,12 @@ class DaemonService : Service() {
             isBusy = {
                 crawlerApplyStatus.phase.isActive ||
                     crawlerMaintenance.status.running ||
-                    dbRestore.status.running ||
-                    dbBackup.inFlight
+                    dbRestore.status.running
+                // Deliberately NOT dbBackup.inFlight: the BEP51 cache PUT is
+                // small (~2 MB) and fully independent of the crawler DB (a
+                // different bucket/object), so the two checks may overlap —
+                // counting a running DB drain as busy starved BEP51 of a
+                // clean status while the (now bounded) backlog drained.
             },
             isWifi = { wifiGateMonitor.state.value.wifi },
             clientFactory = { s ->
@@ -749,6 +753,11 @@ class DaemonService : Service() {
             return com.torrent.app.config.ApplyResult(false, errors.joinToString("; "), false)
         }
         configStore.save(configStore.load().copy(backup = s))
+        // Refresh both managers' config-gate snapshots so the panel's
+        // "disabled" notes reflect the just-saved settings immediately
+        // (otherwise they linger until the next periodic check).
+        bep51Backup.refreshConfigStatus()
+        dbBackup.refreshConfigStatus()
         return com.torrent.app.config.ApplyResult(true, "backup settings saved", false)
     }
 
