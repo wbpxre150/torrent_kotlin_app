@@ -129,6 +129,7 @@ class CrawlerConfigTest {
         assertEquals("0", ini["rclone_backup_enabled"])
         assertEquals("10", ini["nice_level"])
         assertEquals("16", ini["num_trees"])
+        assertEquals("5", ini["tree_bep51_workers"])
         assertEquals("8", ini["tree_get_peers_workers"])
         assertEquals("12", ini["tree_metadata_workers"])
         assertEquals("8081", ini["http_port"])
