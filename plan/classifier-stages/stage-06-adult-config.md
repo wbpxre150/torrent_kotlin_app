@@ -35,6 +35,37 @@ Stage 5 (ingest-time classification in place) and Stage 3 (calibrated thresholds
   `dht_crawler/config.ini`.
 - Build env: JDK 21 + Android SDK/NDK r27 (see AGENTS.md); build `./gradlew installDebug`.
 
+## Results (recorded 2026-10-15, via dev-workflow)
+
+App commits: `3f926b3` (gitlink → crawler `a0e0500`: adult_mode tag|drop + thresholds + hard_block.c/h/txt,
+classifier threshold/counter API, supervisor/tree plumbing, tree_metadata ingest hook, /stats counters,
+keyword-filter demotion to models-missing fallback), `b757c77` (CrawlerKeys allow-list incl. classifier keys,
+CrawlerSettings fields, ConfigValidator adultMode/fraction, ConfigStore persistence, ControlServer form
+field-set, wizard switch + DaemonService setCrawlerAdultMode, asset staging of hard_block.txt,
+config.ini.default section, 16 new tests).
+
+1. **Unit tests: PASS.** `:app:testDebugUnitTest --rerun`: 555/555 (was 539).
+2. **Build + install: PASS.** assembleDebug green; `adb install -r` Success on CPH2305 (USB).
+3. **Dashboard apply: PASS.** `/settings/crawler` renders the Adult content handling field-set
+   (classifierEnabled, adultMode select, both thresholds); switching to drop applies cleanly — device
+   config.ini shows `adult_mode = drop`, crawler restarts (apply-watch OK, no rollback).
+4. **Drop mode: PASS** (verified via /stats per operator): `adult_dropped` grows (21→47 and 29 in 90s
+   observed in short windows); `adult_tagged` retains a small residual band `[0.917039, 0.995516)` by
+   design (drop threshold stricter — reviewer-accepted P2). No 15-min DB pull (4.7 GB): operator
+   accepted stats-based verification.
+5. **Tag resume: PASS.** Switching back: `adult_tagged` 18→209 over 5 min, `adult_dropped` = 0.
+6. **Hard-block both modes: PASS.** Test entry `x264` (device file only): tag-mode `hard_block_dropped`
+   6→96 over 5 min; drop-mode 23 in ~90s; after removing the entry the rate collapsed to the shipped
+   list's background (1 in 808) with ingest continuing.
+7. **No regressions: PASS.** Crash buffer clean, no new tombstones (latest 07:39, pre-change), no
+   FATAL/signal lines since install; ingest throughout (~1.3k classified / 5 min).
+
+Deviations (accepted): wireless ADB dropouts twice (user restart once); `hard_block.txt` matches the
+torrent NAME only (file-list scan deferred); `adult_hide_threshold = 0` remains the crawler's
+"use manifest" sentinel, unreachable from the validated form; keyword porn filter now runs only when
+models are missing (classifier owns adult tagging) — `porn_filter_enabled` keeps its key but its
+semantics are fallback-only.
+
 ## Exit criteria (on the phone)
 
 1. Switching to `drop` via the dashboard → crawler restarts (apply watch OK) → adult rows stop being inserted
