@@ -11,6 +11,8 @@ object WizardSubmit {
         val ftpPort: Int,
         val ftpWifiOnly: Boolean,
         val crawlerEnabled: Boolean = false,
+        /** `adult_mode` choice: `"tag"` (default) or `"drop"`. */
+        val crawlerAdultMode: String = "tag",
         val r2Endpoint: String = "",
         val r2Bucket: String = "",
         val r2ObjectKey: String = ConfigDefaults.BACKUP_OBJECT_KEY,
@@ -31,6 +33,8 @@ object WizardSubmit {
         val ftp: FtpSettings?,
         val backup: BackupSettings?,
         val crawlerEnabled: Boolean,
+        /** The requested (normalised) adult mode; only meaningful when [ok]. */
+        val crawlerAdultMode: String,
     )
 
     fun submit(f: Form): Outcome {
@@ -60,12 +64,15 @@ object WizardSubmit {
             backup = backup,
             dataSubpath = f.dataSubpath,
         )
+        val adultMode = f.crawlerAdultMode.trim().lowercase()
         val errors = ConfigValidator.validateTransmission(tx).errors +
                      ConfigValidator.validateFtp(ftp).errors +
                      ConfigValidator.validateDataDir(cfg).errors +
                      ConfigValidator.validateBackup(backup).errors +
-                     ConfigValidator.validateDbBackup(backup).errors
-        return if (errors.isEmpty()) Outcome(true, emptyList(), tx, ftp, backup, f.crawlerEnabled)
-               else Outcome(false, errors, null, null, null, false)
+                     ConfigValidator.validateDbBackup(backup).errors +
+                     ConfigValidator.validateAdultMode(f.crawlerAdultMode).errors
+        return if (errors.isEmpty())
+                   Outcome(true, emptyList(), tx, ftp, backup, f.crawlerEnabled, adultMode)
+               else Outcome(false, errors, null, null, null, false, adultMode)
     }
 }

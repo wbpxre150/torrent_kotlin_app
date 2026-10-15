@@ -212,6 +212,10 @@ class ConfigStoreTest {
                 treePeersQueueCapacity = 2500,
                 pornFilterEnabled = false,
                 languageFilterNonLatinThreshold = 50,
+                classifierEnabled = false,
+                adultMode = "drop",
+                adultHideThreshold = 0.75,
+                adultDropThreshold = 0.9,
                 bloomCapacity = 12_000_000,
                 failureBloomCapacity = 12_000_000,
                 bloomErrorRate = 0.002,
@@ -236,6 +240,10 @@ class ConfigStoreTest {
         assertEquals(2500, c.treePeersQueueCapacity)
         assertFalse(c.pornFilterEnabled)
         assertEquals(50, c.languageFilterNonLatinThreshold)
+        assertFalse(c.classifierEnabled)
+        assertEquals("drop", c.adultMode)
+        assertEquals(0.75, c.adultHideThreshold, 1e-6)
+        assertEquals(0.9, c.adultDropThreshold, 1e-6)
         assertEquals(12_000_000, c.bloomCapacity)
         assertEquals(12_000_000, c.failureBloomCapacity)
         assertEquals(0.002, c.bloomErrorRate, 1e-6)
@@ -261,6 +269,10 @@ class ConfigStoreTest {
         assertEquals(3000, c.treePeersQueueCapacity)
         assertTrue(c.pornFilterEnabled)
         assertEquals(33, c.languageFilterNonLatinThreshold)
+        assertTrue(c.classifierEnabled)
+        assertEquals("tag", c.adultMode)
+        assertEquals(0.917039, c.adultHideThreshold, 1e-6)
+        assertEquals(0.995516, c.adultDropThreshold, 1e-6)
         assertEquals(30_000_000, c.bloomCapacity)
         assertEquals(30_000_000, c.failureBloomCapacity)
         assertEquals(0.001, c.bloomErrorRate, 1e-6)
@@ -273,12 +285,22 @@ class ConfigStoreTest {
     @Test fun snapshotAndRestoreCrawlerLastKnownGood() {
         val s = store()
         assertNull(s.restoreCrawlerLastKnownGood())
-        s.snapshotCrawlerLastKnownGood(CrawlerSettings(enabled = true, numTrees = 32, logLevel = "WARN"))
+        s.snapshotCrawlerLastKnownGood(
+            CrawlerSettings(
+                enabled = true, numTrees = 32, logLevel = "WARN",
+                classifierEnabled = false, adultMode = "drop",
+                adultHideThreshold = 0.8, adultDropThreshold = 0.95,
+            )
+        )
         val restored = s.restoreCrawlerLastKnownGood()
         assertNotNull(restored)
         assertTrue(restored!!.enabled)
         assertEquals(32, restored.numTrees)
         assertEquals("WARN", restored.logLevel)
+        assertFalse(restored.classifierEnabled)
+        assertEquals("drop", restored.adultMode)
+        assertEquals(0.8, restored.adultHideThreshold, 1e-6)
+        assertEquals(0.95, restored.adultDropThreshold, 1e-6)
     }
 
     @Test fun clearCrawlerLastKnownGood_removesSnapshot() {

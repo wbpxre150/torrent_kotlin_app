@@ -46,6 +46,25 @@ class WizardSubmitTest {
         assertTrue(WizardSubmit.submit(validForm().copy(crawlerEnabled = true)).crawlerEnabled)
     }
 
+    @Test fun crawlerAdultModeDefaultsToTag() {
+        val o = WizardSubmit.submit(validForm())
+        assertTrue(o.ok)
+        assertEquals("tag", o.crawlerAdultMode)
+    }
+
+    @Test fun crawlerAdultModeDropIsPassedThroughNormalised() {
+        val o = WizardSubmit.submit(validForm().copy(crawlerAdultMode = " DROP "))
+        assertTrue(o.ok)
+        assertEquals("drop", o.crawlerAdultMode)
+    }
+
+    @Test fun crawlerAdultModeInvalidFailsValidation() {
+        val o = WizardSubmit.submit(validForm().copy(crawlerAdultMode = "hide"))
+        assertFalse(o.ok)
+        assertNull(o.transmission)
+        assertTrue(o.errors.any { it.contains("adult mode", true) })
+    }
+
     @Test fun zeroPortFailsValidation() {
         val o = WizardSubmit.submit(validForm().copy(ftpPort = 0))
         assertFalse(o.ok)

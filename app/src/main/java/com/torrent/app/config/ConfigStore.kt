@@ -40,6 +40,14 @@ class ConfigStore(context: Context) {
             treePeersQueueCapacity = prefs.getInt(KEY_CRAWLER_PEERS_QUEUE, ConfigDefaults.CRAWLER.treePeersQueueCapacity),
             pornFilterEnabled = prefs.getBoolean(KEY_CRAWLER_PORN_FILTER, ConfigDefaults.CRAWLER.pornFilterEnabled),
             languageFilterNonLatinThreshold = prefs.getInt(KEY_CRAWLER_LANG_THRESHOLD, ConfigDefaults.CRAWLER.languageFilterNonLatinThreshold),
+            classifierEnabled = prefs.getBoolean(KEY_CRAWLER_CLASSIFIER_ENABLED, ConfigDefaults.CRAWLER.classifierEnabled),
+            adultMode = prefs.getString(KEY_CRAWLER_ADULT_MODE, ConfigDefaults.CRAWLER.adultMode)!!,
+            // Thresholds are stored as text so the calibrated decimals survive the
+            // round trip exactly (a Float would render as 0.9170390405654907 in the form).
+            adultHideThreshold = prefs.getString(KEY_CRAWLER_ADULT_HIDE_THRESHOLD, null)?.toDoubleOrNull()
+                ?: ConfigDefaults.CRAWLER.adultHideThreshold,
+            adultDropThreshold = prefs.getString(KEY_CRAWLER_ADULT_DROP_THRESHOLD, null)?.toDoubleOrNull()
+                ?: ConfigDefaults.CRAWLER.adultDropThreshold,
             bloomCapacity = prefs.getInt(KEY_CRAWLER_BLOOM_CAPACITY, ConfigDefaults.CRAWLER.bloomCapacity),
             failureBloomCapacity = prefs.getInt(KEY_CRAWLER_FAILURE_BLOOM_CAPACITY, ConfigDefaults.CRAWLER.failureBloomCapacity),
             bloomErrorRate = prefs.getFloat(KEY_CRAWLER_BLOOM_ERROR_RATE, ConfigDefaults.CRAWLER.bloomErrorRate.toFloat()).toDouble(),
@@ -114,6 +122,10 @@ class ConfigStore(context: Context) {
             .putInt(KEY_CRAWLER_PEERS_QUEUE, s.treePeersQueueCapacity)
             .putBoolean(KEY_CRAWLER_PORN_FILTER, s.pornFilterEnabled)
             .putInt(KEY_CRAWLER_LANG_THRESHOLD, s.languageFilterNonLatinThreshold)
+            .putBoolean(KEY_CRAWLER_CLASSIFIER_ENABLED, s.classifierEnabled)
+            .putString(KEY_CRAWLER_ADULT_MODE, s.adultMode)
+            .putString(KEY_CRAWLER_ADULT_HIDE_THRESHOLD, s.adultHideThreshold.toString())
+            .putString(KEY_CRAWLER_ADULT_DROP_THRESHOLD, s.adultDropThreshold.toString())
             .putInt(KEY_CRAWLER_BLOOM_CAPACITY, s.bloomCapacity)
             .putInt(KEY_CRAWLER_FAILURE_BLOOM_CAPACITY, s.failureBloomCapacity)
             .putFloat(KEY_CRAWLER_BLOOM_ERROR_RATE, s.bloomErrorRate.toFloat())
@@ -212,6 +224,10 @@ class ConfigStore(context: Context) {
             .putInt(KEY_LKG_CRAWLER_PEERS_QUEUE, s.treePeersQueueCapacity)
             .putBoolean(KEY_LKG_CRAWLER_PORN_FILTER, s.pornFilterEnabled)
             .putInt(KEY_LKG_CRAWLER_LANG_THRESHOLD, s.languageFilterNonLatinThreshold)
+            .putBoolean(KEY_LKG_CRAWLER_CLASSIFIER_ENABLED, s.classifierEnabled)
+            .putString(KEY_LKG_CRAWLER_ADULT_MODE, s.adultMode)
+            .putString(KEY_LKG_CRAWLER_ADULT_HIDE_THRESHOLD, s.adultHideThreshold.toString())
+            .putString(KEY_LKG_CRAWLER_ADULT_DROP_THRESHOLD, s.adultDropThreshold.toString())
             .putInt(KEY_LKG_CRAWLER_BLOOM_CAPACITY, s.bloomCapacity)
             .putInt(KEY_LKG_CRAWLER_FAILURE_BLOOM_CAPACITY, s.failureBloomCapacity)
             .putFloat(KEY_LKG_CRAWLER_BLOOM_ERROR_RATE, s.bloomErrorRate.toFloat())
@@ -240,6 +256,12 @@ class ConfigStore(context: Context) {
             treePeersQueueCapacity = prefs.getInt(KEY_LKG_CRAWLER_PEERS_QUEUE, ConfigDefaults.CRAWLER.treePeersQueueCapacity),
             pornFilterEnabled = prefs.getBoolean(KEY_LKG_CRAWLER_PORN_FILTER, ConfigDefaults.CRAWLER.pornFilterEnabled),
             languageFilterNonLatinThreshold = prefs.getInt(KEY_LKG_CRAWLER_LANG_THRESHOLD, ConfigDefaults.CRAWLER.languageFilterNonLatinThreshold),
+            classifierEnabled = prefs.getBoolean(KEY_LKG_CRAWLER_CLASSIFIER_ENABLED, ConfigDefaults.CRAWLER.classifierEnabled),
+            adultMode = prefs.getString(KEY_LKG_CRAWLER_ADULT_MODE, ConfigDefaults.CRAWLER.adultMode)!!,
+            adultHideThreshold = prefs.getString(KEY_LKG_CRAWLER_ADULT_HIDE_THRESHOLD, null)?.toDoubleOrNull()
+                ?: ConfigDefaults.CRAWLER.adultHideThreshold,
+            adultDropThreshold = prefs.getString(KEY_LKG_CRAWLER_ADULT_DROP_THRESHOLD, null)?.toDoubleOrNull()
+                ?: ConfigDefaults.CRAWLER.adultDropThreshold,
             bloomCapacity = prefs.getInt(KEY_LKG_CRAWLER_BLOOM_CAPACITY, ConfigDefaults.CRAWLER.bloomCapacity),
             failureBloomCapacity = prefs.getInt(KEY_LKG_CRAWLER_FAILURE_BLOOM_CAPACITY, ConfigDefaults.CRAWLER.failureBloomCapacity),
             bloomErrorRate = prefs.getFloat(KEY_LKG_CRAWLER_BLOOM_ERROR_RATE, ConfigDefaults.CRAWLER.bloomErrorRate.toFloat()).toDouble(),
@@ -284,6 +306,10 @@ class ConfigStore(context: Context) {
         private const val KEY_CRAWLER_PEERS_QUEUE = "crawler_tree_peers_queue_capacity"
         private const val KEY_CRAWLER_PORN_FILTER = "crawler_porn_filter_enabled"
         private const val KEY_CRAWLER_LANG_THRESHOLD = "crawler_language_filter_non_latin_threshold"
+        private const val KEY_CRAWLER_CLASSIFIER_ENABLED = "crawler_classifier_enabled"
+        private const val KEY_CRAWLER_ADULT_MODE = "crawler_adult_mode"
+        private const val KEY_CRAWLER_ADULT_HIDE_THRESHOLD = "crawler_adult_hide_threshold"
+        private const val KEY_CRAWLER_ADULT_DROP_THRESHOLD = "crawler_adult_drop_threshold"
         private const val KEY_CRAWLER_BLOOM_CAPACITY = "crawler_bloom_capacity"
         private const val KEY_CRAWLER_FAILURE_BLOOM_CAPACITY = "crawler_failure_bloom_capacity"
         private const val KEY_CRAWLER_BLOOM_ERROR_RATE = "crawler_bloom_error_rate"
@@ -319,6 +345,10 @@ class ConfigStore(context: Context) {
         private const val KEY_LKG_CRAWLER_PEERS_QUEUE = "lkg_crawler_tree_peers_queue_capacity"
         private const val KEY_LKG_CRAWLER_PORN_FILTER = "lkg_crawler_porn_filter_enabled"
         private const val KEY_LKG_CRAWLER_LANG_THRESHOLD = "lkg_crawler_language_filter_non_latin_threshold"
+        private const val KEY_LKG_CRAWLER_CLASSIFIER_ENABLED = "lkg_crawler_classifier_enabled"
+        private const val KEY_LKG_CRAWLER_ADULT_MODE = "lkg_crawler_adult_mode"
+        private const val KEY_LKG_CRAWLER_ADULT_HIDE_THRESHOLD = "lkg_crawler_adult_hide_threshold"
+        private const val KEY_LKG_CRAWLER_ADULT_DROP_THRESHOLD = "lkg_crawler_adult_drop_threshold"
         private const val KEY_LKG_CRAWLER_BLOOM_CAPACITY = "lkg_crawler_bloom_capacity"
         private const val KEY_LKG_CRAWLER_FAILURE_BLOOM_CAPACITY = "lkg_crawler_failure_bloom_capacity"
         private const val KEY_LKG_CRAWLER_BLOOM_ERROR_RATE = "lkg_crawler_bloom_error_rate"

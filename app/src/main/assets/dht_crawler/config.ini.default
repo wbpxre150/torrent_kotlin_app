@@ -59,6 +59,21 @@ rclone_bookmark_path=data/rclone_backup_ids.txt
 porn_filter_enabled=1
 porn_filter_keyword_file=porn_filter_keywords.txt
 
+# ==== Ingest-Time Classifier & Adult Handling ====
+# Ingest-time fastText classifier (models/v1). The app stages the model files and
+# the hard-block list next to this file; both path keys below are app-managed.
+classifier_enabled=1
+classifier_model_dir=models/v1
+# adult_mode: tag (store adult rows; hidden at or above adult_hide_threshold) or
+# drop (discard rows at or above adult_drop_threshold). The hard-block list always drops.
+adult_mode=tag
+# 0 = take the threshold from models/v1/manifest.json (the app always writes a value).
+adult_hide_threshold=0.917039
+# Only used by adult_mode=drop.
+adult_drop_threshold=0.995516
+# Always-on name-substring block list (app-managed path key).
+hard_block_file=hard_block.txt
+
 # ==== Language Filter ====
 # Filter torrents where non-Latin characters exceed this percentage
 # of the total characters in the name and file list. (0=disabled, default: 33)

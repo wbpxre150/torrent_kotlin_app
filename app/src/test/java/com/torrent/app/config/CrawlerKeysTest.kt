@@ -47,7 +47,10 @@ class CrawlerKeysTest {
 
     @Test fun parseAdvanced_rejectsPathKeys() {
         // (backup_path is also a backup key and is covered by the backup test)
-        for (key in listOf("db_path", "bloom_path", "bep51_cache_path", "porn_filter_keyword_file")) {
+        for (key in listOf(
+            "db_path", "bloom_path", "bep51_cache_path", "porn_filter_keyword_file",
+            "classifier_model_dir", "hard_block_file"
+        )) {
             val r = CrawlerKeys.parseAdvanced("$key=/tmp/x")
             assertFalse("$key must be rejected", r.ok)
             assertTrue(r.errors.any { it.contains(key) && it.contains("path key") })
@@ -63,7 +66,10 @@ class CrawlerKeysTest {
     }
 
     @Test fun parseAdvanced_rejectsFormManagedKeysWithFormHint() {
-        for (key in listOf("http_port", "http_bind", "num_trees", "bloom_capacity", "log_level")) {
+        for (key in listOf(
+            "http_port", "http_bind", "num_trees", "bloom_capacity", "log_level",
+            "classifier_enabled", "adult_mode", "adult_hide_threshold", "adult_drop_threshold"
+        )) {
             val r = CrawlerKeys.parseAdvanced("$key=1")
             assertFalse("$key must be rejected", r.ok)
             assertTrue(r.errors.any { it.contains(key) && it.contains("form", true) })
@@ -80,6 +86,30 @@ class CrawlerKeysTest {
         val r = CrawlerKeys.parseAdvanced("batch_size=100\nbatch_size=200\n")
         assertTrue(r.ok)
         assertEquals("200", r.entries["batch_size"])
+    }
+
+    @Test fun knownKeys_includeStageSixClassifierAndAdultKeys() {
+        // Every key the C crawler's config_load_file accepts must be known here,
+        // else parseAdvanced would report it as an unknown key.
+        for (key in listOf(
+            "classifier_enabled", "classifier_model_dir", "adult_mode",
+            "adult_hide_threshold", "adult_drop_threshold", "hard_block_file"
+        )) {
+            assertTrue("$key must be known", key in CrawlerKeys.KNOWN_KEYS)
+        }
+    }
+
+    @Test fun classifierAndAdultKeys_areNotAdvancedOverridable() {
+        // classifier_model_dir / hard_block_file are app-owned paths, the rest are
+        // rendered by the settings form — none may be set from the textarea.
+        for (key in listOf(
+            "classifier_enabled", "classifier_model_dir", "adult_mode",
+            "adult_hide_threshold", "adult_drop_threshold", "hard_block_file"
+        )) {
+            assertFalse("$key must not be advanced-overridable", key in CrawlerKeys.ALLOWED_ADVANCED_KEYS)
+        }
+        assertEquals("tag", CrawlerKeys.ADULT_MODES.first())
+        assertEquals(listOf("tag", "drop"), CrawlerKeys.ADULT_MODES)
     }
 
     @Test fun allowedAdvancedKeys_excludePathBackupAndFormKeys() {

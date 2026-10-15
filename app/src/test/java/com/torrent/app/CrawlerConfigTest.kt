@@ -133,6 +133,13 @@ class CrawlerConfigTest {
         assertEquals("50", ini["tree_metadata_workers"])
         assertEquals("8081", ini["http_port"])
         assertEquals("127.0.0.1", ini["http_bind"])
+        // Stage 6 adult handling: classifier + calibrated thresholds + hard-block list
+        assertEquals("1", ini["classifier_enabled"])
+        assertEquals("models/v1", ini["classifier_model_dir"])
+        assertEquals("tag", ini["adult_mode"])
+        assertEquals("0.917039", ini["adult_hide_threshold"])
+        assertEquals("0.995516", ini["adult_drop_threshold"])
+        assertEquals("hard_block.txt", ini["hard_block_file"])
         assertNull(ini["backup_path"])
         assertNull(ini["ssh_host"])
         assertNull(ini["ssh_user"])
@@ -141,6 +148,15 @@ class CrawlerConfigTest {
         for ((key, value) in ini) {
             assertFalse("value for $key must not contain a desktop path: $value", value.contains("/home"))
         }
+    }
+
+    @Test fun checkedInCrawlerHardBlockList_isPresentForTheAssetCopy() {
+        // copyDhtCrawlerAssets copies this file from the crawler source root into
+        // assets/dht_crawler/hard_block.txt; a missing file silently disables the
+        // hard-block list on device, so the source must be part of the checkout.
+        val src = File("src/main/cpp/dht_crawler/hard_block.txt")
+        assertTrue("expected the checked-in crawler hard-block list at $src", src.isFile)
+        assertTrue("the hard-block list must not be empty", src.length() > 0)
     }
 
     // --- Robolectric: full seeding ---
@@ -159,6 +175,7 @@ class CrawlerConfigTest {
             val fixture = File(tmp.root, "assets/dht_crawler").apply { mkdirs() }
             File(fixture, "porn_filter_keywords.txt").writeText("keyword-a\nkeyword-b\n")
             File(fixture, "torrent_search_keywords.txt").writeText("strip-a\n")
+            File(fixture, "hard_block.txt").writeText("blocked-word\n")
             val defaultAsset = File("src/main/assets/dht_crawler/config.ini.default")
             assertTrue("checked-in default asset must exist", defaultAsset.exists())
             File(fixture, "config.ini.default").writeText(defaultAsset.readText())
@@ -181,6 +198,11 @@ class CrawlerConfigTest {
                 val f = File(cfg.workDir, name)
                 assertTrue("$name should be copied from assets", f.exists() && f.length() > 0)
             }
+            assertEquals(
+                "the hard-block list is staged verbatim next to config.ini",
+                "blocked-word\n",
+                File(cfg.workDir, CrawlerConfig.HARD_BLOCK_FILE).readText()
+            )
             assertTrue("version stamp should be written", File(cfg.workDir, CrawlerConfig.STAMP_FILE).exists())
 
             // Second run is a no-op: files unchanged, no failure.
@@ -265,6 +287,7 @@ class CrawlerConfigTest {
             val fixture = File(tmp.root, "assets/dht_crawler").apply { mkdirs() }
             File(fixture, "porn_filter_keywords.txt").writeText("keyword-a\n")
             File(fixture, "torrent_search_keywords.txt").writeText("strip-a\n")
+            File(fixture, "hard_block.txt").writeText("blocked-word\n")
             val defaultAsset = File("src/main/assets/dht_crawler/config.ini.default")
             assertTrue("checked-in default asset must exist", defaultAsset.exists())
             File(fixture, "config.ini.default").writeText(defaultAsset.readText())
@@ -333,24 +356,44 @@ class CrawlerConfigTest {
             assertEquals("0", ini["rclone_backup_enabled"])
         }
 
-        @Test fun renderManaged_keepsHandAddedClassifierKeys() {
+        @Test fun ensureLayout_seedsAdultHandlingDefaults() {
             val cfg = configWithRealDefaultAsset()
             cfg.ensureLayout()
-            // Stage 6 exposes these in the form; until then a hand-edited pair in
-            // the device's config.ini must survive every app-side rewrite: they
-            // are not managed keys, so setKeys() leaves them untouched.
-            cfg.configFile.writeText(
-                cfg.configFile.readText() +
-                    "\nclassifier_enabled = 1\nclassifier_model_dir = models/v1\n"
-            )
 
-            cfg.applySettings(CrawlerSettings(numTrees = 8))
             val ini = CrawlerConfig.parseIni(cfg.configFile.readText())
-
-            assertTrue("the pin pass must not drop foreign keys",
-                cfg.configFile.readText().contains("classifier_enabled = 1"))
             assertEquals("1", ini["classifier_enabled"])
-            assertEquals("models/v1", ini["classifier_model_dir"])
+            assertEquals(CrawlerConfig.MODELS_SUBDIR, ini["classifier_model_dir"])
+            assertEquals("tag", ini["adult_mode"])
+            assertEquals("0.917039", ini["adult_hide_threshold"])
+            assertEquals("0.995516", ini["adult_drop_threshold"])
+            assertEquals(CrawlerConfig.HARD_BLOCK_FILE, ini["hard_block_file"])
+        }
+
+        @Test fun renderManaged_writesAdultHandlingKeysAndKeepsForeignKeys() {
+            val cfg = configWithRealDefaultAsset()
+            cfg.ensureLayout()
+            // A hand-added key the app does not manage must survive every rewrite.
+            cfg.configFile.writeText(cfg.configFile.readText() + "\ntree_parallel_peers = 6\n")
+
+            cfg.applySettings(
+                CrawlerSettings(
+                    classifierEnabled = false, adultMode = "DROP",
+                    adultHideThreshold = 0.75, adultDropThreshold = 0.9,
+                )
+            )
+            val text = cfg.configFile.readText()
+            val ini = CrawlerConfig.parseIni(text)
+
+            assertEquals("0", ini["classifier_enabled"])
+            // The C crawler compares adult_mode case-sensitively: the writer normalises it.
+            assertEquals("drop", ini["adult_mode"])
+            assertEquals("0.75", ini["adult_hide_threshold"])
+            assertEquals("0.9", ini["adult_drop_threshold"])
+            assertEquals("6", ini["tree_parallel_peers"])
+            // App-owned path keys are re-asserted on every write (existing installs
+            // seeded before Stage 6 get them too).
+            assertEquals(CrawlerConfig.MODELS_SUBDIR, ini["classifier_model_dir"])
+            assertEquals(CrawlerConfig.HARD_BLOCK_FILE, ini["hard_block_file"])
         }
 
         @Test fun renderManaged_seedsFromAssetWhenFileMissing() {

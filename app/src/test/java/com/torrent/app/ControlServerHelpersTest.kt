@@ -59,7 +59,8 @@ class ControlServerHelpersTest {
                 + "&numTrees=8&treeFindNodeWorkers=2&treeBep51Workers=5&treeGetPeersWorkers=12&treeMetadataWorkers=40"
                 + "&treeInfohashQueueCapacity=100&treePeersQueueCapacity=200&pornFilterEnabled="
                 + "&languageFilterNonLatinThreshold=50&bloomCapacity=1000&failureBloomCapacity=2000"
-                + "&bloomErrorRate=0.005&advancedOverrides=bep51_cache_capacity=77&proxyPort=8090&crawlerHttpPort=8091")
+                + "&bloomErrorRate=0.005&advancedOverrides=bep51_cache_capacity=77&proxyPort=8090&crawlerHttpPort=8091"
+                + "&classifierEnabled=&adultMode=drop&adultHideThreshold=0.9&adultDropThreshold=0.995")
         val s = ControlServer.crawlerSettingsFromForm(m, CrawlerSettings())
         assertTrue(s.enabled)
         assertTrue(s.wifiOnly)
@@ -82,6 +83,32 @@ class ControlServerHelpersTest {
         assertEquals("bep51_cache_capacity=77", s.advancedOverrides)
         assertEquals(8090, s.proxyPort)
         assertEquals(8091, s.crawlerHttpPort)
+        assertTrue(s.classifierEnabled)
+        assertEquals("drop", s.adultMode)
+        assertEquals(0.9, s.adultHideThreshold, 0.0)
+        assertEquals(0.995, s.adultDropThreshold, 0.0)
+    }
+
+    @Test fun crawlerSettingsFromForm_adultFieldsFallBackToCurrent() {
+        val current = CrawlerSettings(
+            classifierEnabled = true, adultMode = "drop",
+            adultHideThreshold = 0.5, adultDropThreshold = 0.6)
+        val s = ControlServer.crawlerSettingsFromForm(
+            mapOf(
+                "adultMode" to "",
+                "adultHideThreshold" to "not-a-number",
+                "adultDropThreshold" to "",
+            ),
+            current)
+        assertFalse("checkbox absence means off, like the other toggles", s.classifierEnabled)
+        assertEquals("drop", s.adultMode)
+        assertEquals(0.5, s.adultHideThreshold, 0.0)
+        assertEquals(0.6, s.adultDropThreshold, 0.0)
+    }
+
+    @Test fun crawlerSettingsFromForm_adultModeIsNormalised() {
+        val s = ControlServer.crawlerSettingsFromForm(mapOf("adultMode" to " DROP "), CrawlerSettings())
+        assertEquals("drop", s.adultMode)
     }
 
     @Test fun crawlerSettingsFromForm_keepsCurrentWhenBlankOrMissing() {

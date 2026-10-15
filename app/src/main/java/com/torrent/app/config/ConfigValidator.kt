@@ -64,9 +64,34 @@ object ConfigValidator {
         if (s.treePeersQueueCapacity <= 0) errors.add("peers queue capacity must be > 0")
         if (s.bloomCapacity <= 0) errors.add("bloom capacity must be > 0")
         if (s.failureBloomCapacity <= 0) errors.add("failure bloom capacity must be > 0")
+        errors.addAll(validateAdultMode(s.adultMode).errors)
+        errors.addAll(validateFraction("adult hide threshold", s.adultHideThreshold))
+        errors.addAll(validateFraction("adult drop threshold", s.adultDropThreshold))
         errors.addAll(CrawlerKeys.parseAdvanced(s.advancedOverrides).errors)
+
         return errors
     }
+
+    /**
+     * `adult_mode` is `tag` or `drop` (the C crawler compares case-sensitively
+     * and keeps the previous value on a mismatch, so the input is normalised
+     * here and by the config writer).
+     */
+    fun validateAdultMode(raw: String): ValidationResult {
+        val v = raw.trim().lowercase()
+        return if (v in CrawlerKeys.ADULT_MODES) ValidationResult(true, emptyList())
+        else ValidationResult(false, listOf("adult mode must be one of ${CrawlerKeys.ADULT_MODES.joinToString(", ")}"))
+    }
+
+    /**
+     * Adult probability thresholds must be inside `(0, 1]`. 0 is rejected: for
+     * `adult_hide_threshold` it is the crawler's hidden "use the manifest"
+     * escape hatch and for `adult_drop_threshold` it would discard every
+     * classified row — neither is something the form should write.
+     */
+    fun validateFraction(name: String, value: Double): List<String> =
+        if (value > 0.0 && value <= 1.0) emptyList()
+        else listOf("$name must be > 0 and <= 1")
 
 
     /**

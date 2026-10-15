@@ -662,6 +662,9 @@ class ControlServer(
         val levelOptions = CrawlerKeys.LOG_LEVELS.joinToString("") { l ->
             """<option value="$l"${if (l == s.logLevel) " selected" else ""}>$l</option>"""
         }
+        val adultModeOptions = CrawlerKeys.ADULT_MODES.joinToString("") { m ->
+            """<option value="$m"${if (m == s.adultMode.trim().lowercase()) " selected" else ""}>$m</option>"""
+        }
         val rebuildBox = if (rebuildBloom) """
             <div class="warn">Bloom filter settings changed — the persisted filters are now stale.
             <form method="post" action="/crawler/maintenance/rebuild-bloom-filter"
@@ -705,6 +708,15 @@ class ControlServer(
               <fieldset><legend>Filters</legend>
                 <label class="row"><input type="checkbox" name="pornFilterEnabled" ${checked(s.pornFilterEnabled)}> Porn filter</label>
                 <label>Non-Latin language threshold (0..100)<input name="languageFilterNonLatinThreshold" value="${s.languageFilterNonLatinThreshold}"></label>
+              </fieldset>
+              <fieldset><legend>Adult content handling</legend>
+                <label class="row"><input type="checkbox" name="classifierEnabled" ${checked(s.classifierEnabled)}> Ingest-time classifier (on by default)</label>
+                <label>Adult mode<select name="adultMode">$adultModeOptions</select></label>
+                <label>Adult hide threshold (0..1; only used by tag mode)<input type="number" step="any" name="adultHideThreshold" value="${s.adultHideThreshold}"></label>
+                <label>Adult drop threshold (0..1; only used by drop mode)<input type="number" step="any" name="adultDropThreshold" value="${s.adultDropThreshold}"></label>
+                <p class="meta">The hard-block list (<code>hard_block.txt</code>) always drops matching names. <em>tag</em> stores
+                adult rows (hidden above the hide threshold); <em>drop</em> discards rows at or above the drop threshold. The
+                keyword porn filter above only runs while the classifier cannot decide (disabled, or its models are missing).</p>
               </fieldset>
               <fieldset><legend>Bloom filters (changing these invalidates the persisted filters)</legend>
                 <label>Bloom capacity<input name="bloomCapacity" value="${s.bloomCapacity}"></label>
@@ -1395,6 +1407,10 @@ class ControlServer(
             treePeersQueueCapacity = form["treePeersQueueCapacity"]?.toIntOrNull() ?: current.treePeersQueueCapacity,
             pornFilterEnabled = form.containsKey("pornFilterEnabled"),
             languageFilterNonLatinThreshold = form["languageFilterNonLatinThreshold"]?.toIntOrNull() ?: current.languageFilterNonLatinThreshold,
+            classifierEnabled = form.containsKey("classifierEnabled"),
+            adultMode = form["adultMode"]?.takeIf { it.isNotEmpty() }?.trim()?.lowercase() ?: current.adultMode,
+            adultHideThreshold = form["adultHideThreshold"]?.toDoubleOrNull() ?: current.adultHideThreshold,
+            adultDropThreshold = form["adultDropThreshold"]?.toDoubleOrNull() ?: current.adultDropThreshold,
             bloomCapacity = form["bloomCapacity"]?.toIntOrNull() ?: current.bloomCapacity,
             failureBloomCapacity = form["failureBloomCapacity"]?.toIntOrNull() ?: current.failureBloomCapacity,
             bloomErrorRate = form["bloomErrorRate"]?.toDoubleOrNull() ?: current.bloomErrorRate,

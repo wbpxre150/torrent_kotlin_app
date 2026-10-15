@@ -361,6 +361,7 @@ class DaemonService : Service() {
         fun completeWizard() = this@DaemonService.completeWizard()
         fun lastApplyRolledBack(): Boolean = this@DaemonService.lastApplyRolledBack
         fun setCrawlerEnabled(enabled: Boolean) = this@DaemonService.setCrawlerEnabled(enabled)
+        fun setCrawlerAdultMode(mode: String) = this@DaemonService.setCrawlerAdultMode(mode)
     }
 
     override fun onBind(intent: Intent?): IBinder = LocalBinder()
@@ -1355,6 +1356,32 @@ class DaemonService : Service() {
     fun setCrawlerEnabled(enabled: Boolean) {
         configStore.saveCrawler(configStore.load().crawler.copy(enabled = enabled))
         if (enabled) startCrawlerIfEnabled()
+    }
+
+    /**
+     * Persists the first-run wizard's adult-mode choice (Stage 6) and writes it
+     * into `config.ini`. The write is queued on the crawler-control executor, so
+     * a [setCrawlerEnabled] start queued right after it (same serialized
+     * executor) already launches the crawler with the chosen mode — the crawler
+     * reads `adult_mode` only at startup.
+     */
+    fun setCrawlerAdultMode(mode: String) {
+        val next = configStore.load().crawler.copy(adultMode = mode)
+        configStore.saveCrawler(next)
+        try {
+            crawlerControlExecutor.execute {
+                try {
+                    val crawlerConfig = CrawlerConfig(this)
+                    crawlerConfig.ensureLayout()
+                    crawlerConfig.applySettings(next)
+                } catch (e: Exception) {
+                    android.util.Log.e("DaemonService", "crawler adult-mode write failed", e)
+                }
+            }
+        } catch (e: RejectedExecutionException) {
+            // Service shutting down: the store write above still lands and the
+            // next apply renders it into config.ini.
+        }
     }
 
     /** True when the crawler's /stats answers on loopback (~2 s timeout). */

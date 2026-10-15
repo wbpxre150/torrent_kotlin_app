@@ -144,6 +144,54 @@ class ConfigValidatorTest {
         assertFalse(ConfigValidator.validateCrawler(validCrawler().copy(treePeersQueueCapacity = 0)).isEmpty())
     }
 
+    @Test fun crawlerAdultModeValidCaseInsensitively_passes() {
+        for (mode in listOf("tag", "TAG", "Tag", "drop", "DROP", " Drop ")) {
+            assertTrue(
+                "\"$mode\" must be accepted",
+                ConfigValidator.validateCrawler(validCrawler().copy(adultMode = mode)).isEmpty()
+            )
+        }
+    }
+
+    @Test fun crawlerAdultModeInvalid_failsListingValidValues() {
+        val errors = ConfigValidator.validateCrawler(validCrawler().copy(adultMode = "hide"))
+        assertTrue(errors.any { it.contains("adult mode") && it.contains(" tag") && it.contains("drop") })
+    }
+
+    @Test fun validateAdultMode_rejectsBlank() {
+        assertFalse(ConfigValidator.validateAdultMode("").ok)
+        assertFalse(ConfigValidator.validateAdultMode("   ").ok)
+    }
+
+    @Test fun validateFraction_acceptsOpenClosedUnitInterval() {
+        assertTrue(ConfigValidator.validateFraction("x", 1.0).isEmpty())
+        assertTrue(ConfigValidator.validateFraction("x", 0.5).isEmpty())
+        assertTrue(ConfigValidator.validateFraction("x", 0.917039).isEmpty())
+        assertTrue(ConfigValidator.validateFraction("x", 0.995516).isEmpty())
+    }
+
+    @Test fun validateFraction_rejectsZeroAboveOneAndNegative() {
+        for (v in listOf(0.0, -0.1, 1.000001, 2.0)) {
+            assertFalse("$v must be rejected", ConfigValidator.validateFraction("x", v).isEmpty())
+        }
+        assertEquals(listOf("x must be > 0 and <= 1"), ConfigValidator.validateFraction("x", 0.0))
+    }
+
+    @Test fun crawlerAdultThresholdsOutOfRange_fail() {
+        // 0 is the crawler's hidden "use the manifest threshold" escape hatch: never written by the form.
+        val hide = ConfigValidator.validateCrawler(validCrawler().copy(adultHideThreshold = 0.0))
+        assertTrue(hide.any { it.contains("adult hide threshold") })
+        val drop = ConfigValidator.validateCrawler(validCrawler().copy(adultDropThreshold = 1.5))
+        assertTrue(drop.any { it.contains("adult drop threshold") })
+    }
+
+    @Test fun crawlerDefaults_includeAdultHandling() {
+        assertTrue(validCrawler().classifierEnabled)
+        assertEquals("tag", validCrawler().adultMode)
+        assertEquals(0.917039, validCrawler().adultHideThreshold, 0.0)
+        assertEquals(0.995516, validCrawler().adultDropThreshold, 0.0)
+    }
+
     @Test fun crawlerAdvancedWithBackupKey_fails() {
         val errors = ConfigValidator.validateCrawler(validCrawler().copy(advancedOverrides = "rclone_backup_enabled=1"))
         assertTrue(errors.any { it.contains("backup") })

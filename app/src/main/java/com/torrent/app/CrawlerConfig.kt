@@ -102,6 +102,11 @@ class CrawlerConfig(
         "tree_peers_queue_capacity" to s.treePeersQueueCapacity.toString(),
         "porn_filter_enabled" to (if (s.pornFilterEnabled) "1" else "0"),
         "language_filter_non_latin_threshold" to s.languageFilterNonLatinThreshold.toString(),
+        "classifier_enabled" to (if (s.classifierEnabled) "1" else "0"),
+        // The C crawler compares adult_mode case-sensitively; normalise here.
+        "adult_mode" to s.adultMode.trim().lowercase(),
+        "adult_hide_threshold" to s.adultHideThreshold.toString(),
+        "adult_drop_threshold" to s.adultDropThreshold.toString(),
         "bloom_capacity" to s.bloomCapacity.toString(),
         "failure_bloom_capacity" to s.failureBloomCapacity.toString(),
         "bloom_error_rate" to s.bloomErrorRate.toString(),
@@ -162,8 +167,14 @@ class CrawlerConfig(
         const val CONFIG_INI_DEFAULT = "config.ini.default"
         const val STAMP_FILE = ".assets_version"
 
-        /** Keyword files shipped under `assets/dht_crawler/` and kept in the work dir. */
-        val KEYWORD_FILES = listOf("porn_filter_keywords.txt", "torrent_search_keywords.txt")
+        /**
+         * Text list files shipped under `assets/dht_crawler/` and kept in the work
+         * dir: the keyword lists plus the always-on hard-block list (Stage 6).
+         */
+        val KEYWORD_FILES = listOf("porn_filter_keywords.txt", "torrent_search_keywords.txt", HARD_BLOCK_FILE)
+
+        /** Hard-block list file name (`hard_block_file`), staged in the work dir. */
+        const val HARD_BLOCK_FILE = "hard_block.txt"
 
         /** Classifier model dir, work-dir relative (mirrors crawler `classifier_model_dir`). */
         const val MODELS_SUBDIR = "models/v1"
@@ -177,11 +188,17 @@ class CrawlerConfig(
         /** Buffer size for the binary-safe asset copy (streamed, never decoded). */
         const val BINARY_COPY_BUFFER = 64 * 1024
 
-        /** Keys the config writer always forces to `0` (backups are off on Android). */
+        /**
+         * Keys the config writer always forces to a fixed value: the backup flags
+         * (backups are off on Android) and the app-owned path keys pointing at the
+         * assets the app itself stages (`classifier_model_dir`, `hard_block_file`).
+         */
         val PINNED_KEYS = linkedMapOf(
             "backup_enabled" to "0",
             "ssh_backup_enabled" to "0",
             "rclone_backup_enabled" to "0",
+            "classifier_model_dir" to MODELS_SUBDIR,
+            "hard_block_file" to HARD_BLOCK_FILE,
         )
 
         /**

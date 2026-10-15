@@ -273,6 +273,7 @@ fun WizardScreen(
     var ftpPort by remember { mutableStateOf((cfg?.ftp?.port ?: 2121).toString()) }
     var ftpWifiOnly by remember { mutableStateOf(cfg?.ftp?.wifiOnly ?: ConfigDefaults.FTP.wifiOnly) }
     var crawlerEnabled by remember { mutableStateOf(cfg?.crawler?.enabled ?: false) }
+    var crawlerAdultDrop by remember { mutableStateOf((cfg?.crawler?.adultMode ?: "tag") == "drop") }
     var r2Endpoint by remember { mutableStateOf(cfg?.backup?.r2Endpoint ?: "") }
     var r2Bucket by remember { mutableStateOf(cfg?.backup?.r2Bucket ?: "") }
     var r2ObjectKey by remember { mutableStateOf(cfg?.backup?.r2ObjectKey ?: ConfigDefaults.BACKUP_OBJECT_KEY) }
@@ -317,6 +318,10 @@ fun WizardScreen(
             Switch(checked = crawlerEnabled, onCheckedChange = { crawlerEnabled = it })
             Spacer(Modifier.width(8.dp)); Text("Enable DHT crawler (default on)")
         }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Switch(checked = crawlerAdultDrop, onCheckedChange = { crawlerAdultDrop = it })
+            Spacer(Modifier.width(8.dp)); Text("Drop adult content (default: tag only)")
+        }
 
         Text("5. Backup & Bootstrap (optional)", style = MaterialTheme.typography.titleMedium)
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -358,6 +363,7 @@ fun WizardScreen(
                     ftpPort = ftpPort.toIntOrNull() ?: 0,
                     ftpWifiOnly = ftpWifiOnly,
                     crawlerEnabled = crawlerEnabled,
+                    crawlerAdultMode = if (crawlerAdultDrop) "drop" else "tag",
                     r2Endpoint = r2Endpoint,
                     r2Bucket = r2Bucket,
                     r2ObjectKey = r2ObjectKey,
@@ -387,6 +393,9 @@ fun WizardScreen(
                 val txR = svc.applyTransmissionSettings(newCfg, liveOnly = false)
                 val ftpR = svc.applyFtpSettings(newCfg.ftp)
                 if (txR.ok && ftpR.ok) {
+                    // Written before the start below (same serialized executor), so the
+                    // first crawler launch already sees the chosen adult_mode.
+                    svc.setCrawlerAdultMode(outcome.crawlerAdultMode)
                     if (outcome.crawlerEnabled) svc.setCrawlerEnabled(true)
                     svc.completeWizard(); onFinished()
                 }
