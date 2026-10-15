@@ -38,3 +38,11 @@ Stage 3 (`models/v1/{adult,category}.ftz` + manifest) and Stage 1 (tparse).
 ## Commit
 
 `classifier-model: stage 4 — ftc fastText C wrapper, host parity, arm64 phone benchmark`
+
+## Results (recorded 2026-10-15, via dev-workflow)
+
+Commits in `classifier-model`: `827b11c` (stage 4a — wrapper + host bench + parity), `ee8be76` (stage 4 — NDK build script), `e6f0f56` (stage 4 fix — review fix-ups + streaming rows).
+
+1. **Parity: PASS.** 10,000 rows (first 10k of `data/samples/s120000_42.jsonl`), both models: top-1 labels identical to `fasttext predict-prob`, max |Δprob| = 1e-6 ≤ 1e-5 (host, `scripts/ftc_parity.sh`). Feature texts byte-identical to the tparse CLI; TOL=0 negative control fails (gate not vacuous).
+2. **Phone latency: PASS at p50.** OPPO CPH2305 (arm64-v8a, API 35), `build/ftc-ndk/ftc_bench`, 10k rows, warmup 1000, second warm run: **p50 = 134.4 µs/item** (run 2: 134.9), mean = 140.5 µs/item, **p99 = 247.4 µs/item** (run 2: 257.6). Target < 200 µs/item including tparse is met at p50; p99 is recorded as tail data (operator ruling 2026-10-15: the 200 µs target applies to typical cost; p99 is record-only, tail comes from large rows).
+3. **Peak RSS: NOT MET, accepted as honest miss.** Measured **41,480–41,536 KB VmHWM (~40.5 MiB)** on the phone. Root cause: two resident models dominate — a 1-row floor run with both models loaded measures 41,300 KB (~19 MB per 8.9 MB `.ftz`); the bench itself adds only ~0.2 MB (rows are streamed, not buffered). No ftc_bench-side change can reach < 40 MB with both models resident on this device (operator ruling 2026-10-15: record the miss; footprint work would be a separate stage if the app budget requires it).
