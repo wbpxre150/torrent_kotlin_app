@@ -106,9 +106,10 @@ set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/ftc/ftc.cc
 
 # Stage 5.1 gating define for the crawler sources: a later stage's
 # src/classifier.c compiles inert without it, and the upstream host Makefile
-# build (which does not use this file) stays plain C. It is a directory-wide
-# definition, so the vendored tparse/ftc sources see it as well -- neither
-# tests it.
+# build (which does not use this file) stays plain C. Directory scope means it
+# reaches the targets created after this call and nothing else: tparse/ftc are
+# added above, only the dhtcrawler target below is defined after it, so the
+# vendored sources never see CLF_ENABLED.
 add_compile_definitions(CLF_ENABLED)
 add_executable(dhtcrawler
     ${CRAWLER_SOURCES}

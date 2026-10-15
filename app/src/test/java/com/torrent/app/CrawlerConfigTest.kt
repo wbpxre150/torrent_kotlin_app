@@ -333,6 +333,26 @@ class CrawlerConfigTest {
             assertEquals("0", ini["rclone_backup_enabled"])
         }
 
+        @Test fun renderManaged_keepsHandAddedClassifierKeys() {
+            val cfg = configWithRealDefaultAsset()
+            cfg.ensureLayout()
+            // Stage 6 exposes these in the form; until then a hand-edited pair in
+            // the device's config.ini must survive every app-side rewrite: they
+            // are not managed keys, so setKeys() leaves them untouched.
+            cfg.configFile.writeText(
+                cfg.configFile.readText() +
+                    "\nclassifier_enabled = 1\nclassifier_model_dir = models/v1\n"
+            )
+
+            cfg.applySettings(CrawlerSettings(numTrees = 8))
+            val ini = CrawlerConfig.parseIni(cfg.configFile.readText())
+
+            assertTrue("the pin pass must not drop foreign keys",
+                cfg.configFile.readText().contains("classifier_enabled = 1"))
+            assertEquals("1", ini["classifier_enabled"])
+            assertEquals("models/v1", ini["classifier_model_dir"])
+        }
+
         @Test fun renderManaged_seedsFromAssetWhenFileMissing() {
             val cfg = configWithRealDefaultAsset()
             cfg.workDir.mkdirs()
