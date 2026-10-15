@@ -6,12 +6,12 @@ complete cold-start packet: goal, target repo, dependencies, scope, constraints,
 exit criteria with verification methods, and the planned commit message.
 
 - Index, measured facts, and order/effort table: **`plan/classifier-stages/README.md`**
-- Stage files: `stage-00-data-foundations.md` … `stage-10-feedback-loop.md`
+- Stage files: `stage-03-train-student.md` … `stage-10-feedback-loop.md` (stages 0–2 are complete; packets removed 2026-10-15)
 
-Stages 0–4 target repo **`~/apps/classifier-model`**; stages 5–10 target **this app**.
+Stages 3–4 target repo **`~/apps/classifier-model`**; stages 5–10 target **this app**.
 
 **Hard constraint (all stages):** any step that sends torrent data to the llama.cpp teacher
 (`http://192.168.0.24:8081/v1`) is executed directly by the parent session itself — never by implementer or
-explorer subagents (applies to Stage 2, Stage 10, and any ad-hoc teacher probe).
+explorer subagents (applies to Stage 10 and any ad-hoc teacher probe; Stage 2's teacher runs are done).
 
 Companion design/research doc: `plan/classifier.md`.

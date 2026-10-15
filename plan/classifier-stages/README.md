@@ -2,7 +2,12 @@
 
 Per-stage implementation packets live here, one file per stage, implemented **one at a time** via
 `/dev <stage file>` (dev-workflow). `plan/classifier.md` is the design/research doc; `plan/classifier-stages.md`
-is a stub pointing here. Stages 0–4 target repo **`~/apps/classifier-model`**; stages 5–10 target **this app**.
+is a stub pointing here. Stages 3–4 target repo **`~/apps/classifier-model`**; stages 5–10 target **this app**.
+
+**Stages 0–2 are complete** and their packets were removed (2026-10-15). Stage 2's gold pass was
+dropped — the user hand-checked the teacher's `adult` labels and accepted them — so the ~53k
+teacher labels are the training/evaluation reference, and the 120k label run stays resumable
+for a later retrain.
 
 Each stage file is a complete, cold-start task packet: goal, repo, dependencies, scope, constraints,
 build/validate commands, exit criteria with verification methods, and the planned commit message.
@@ -13,8 +18,8 @@ Any step that sends torrent data (from `~/torrents.db`, its samples, or DB expor
 at `http://192.168.0.24:8081/v1` (aliases `FASTx1` / `FASTx2` / `SLOW`) is executed **directly by the parent
 session itself** — never by an implementer or explorer subagent. Implementers may *write* the labelling code
 (`cm label`, `labeler.py`, prompts, retry/resume logic, evaluation tooling), but the parent runs the actual
-labelling/probe/gold-prelabel requests against the model. Explorers never call the endpoint.
-This applies to Stages 2 and 10 (and any ad-hoc teacher probe done along the way).
+labelling/probe requests against the model. Explorers never call the endpoint.
+This applies to Stage 10 (and any ad-hoc teacher probe; it applied to Stage 2 while its teacher runs were live).
 
 ## Facts established 2026-10-14 (they replace the estimates in classifier.md)
 
@@ -35,9 +40,6 @@ This applies to Stages 2 and 10 (and any ad-hoc teacher probe done along the way
 
 | Stage | File | Where | Effort | Blocking wait |
 |---|---|---|---|---|
-| 0 Data | `stage-00-data-foundations.md` | classifier-model | S | — |
-| 1 tparse | `stage-01-tparse.md` | classifier-model | M–L | — |
-| 2 Labels + gold | `stage-02-teacher-labels-gold.md` | classifier-model | M | ~10 h teacher run + ~3 h human review |
 | 3 Train | `stage-03-train-student.md` | classifier-model | S–M | — |
 | 4 ftc + phone bench | `stage-04-ftc-phone-bench.md` | classifier-model | M | phone on USB |
 | 5 Ingest | `stage-05-ingest-classification.md` | app | L | phone on USB |
@@ -47,5 +49,3 @@ This applies to Stages 2 and 10 (and any ad-hoc teacher probe done along the way
 | 9 PC backfill | `stage-09-pc-backfill.md` | classifier-model | M | long run (measure first) |
 | 10 Feedback | `stage-10-feedback-loop.md` | both | M | — |
 
-Stages 0 and 1 can overlap. The Stage 2 teacher run can start on name-only prompts once Stage 0 is done, but
-then `tv_kind` labels will be weaker, so prefer waiting for tparse hints.

@@ -127,10 +127,10 @@ so one linear model sees both lexical and structural signals. Train separate mod
    - `json_schema` / `response_format` for `{adult, category, tv_kind, notes}`.
    - Use `-np 8..16` parallel slots (continuous batching is on by default). Put a shared system prompt first so it is prefix-cached. Pack 10–20 torrents per request, as sqlite-jev does with 40.
    - **Throughput [EST]:** roughly 5–30 torrents/s, so 300k takes hours to about a day. Measure on 1k rows first.
-3. **Gold set:** hand-label about 1–2k rows, including JA/ZH/RU titles, JAV codes and Scunthorpe traps (`Sussex`, `Analysis`, `Essex`). Use it to measure the teacher, the current keyword filter and the student. Keep it frozen.
+3. **Gold set — dropped (2026-10-15):** no separate hand-labelled gold set. The user hand-checked the teacher's `adult` labels and accepted them, so measure the teacher, the current keyword filter and the student on a held-out split of the teacher labels instead.
 4. **Quality filtering:** keep teacher labels that pass the schema, and that either agree with the parser or are confirmed by a second prompt or model.
 5. **Train the student:** fastText `supervised -minn 2 -maxn 5 -wordNgrams 2`, autotune on validation, then `quantize -qnorm -retrain -cutoff`. Training takes minutes on the Ryzen.
-6. **Calibrate** per-label thresholds on the gold set. Adult needs high precision for the "hide" mode, and recall matters for "drop" mode, so allow separate thresholds per mode. Report precision and recall against the old keyword filter as the acceptance bar.
+6. **Calibrate** per-label thresholds on a held-out split of the teacher labels. Adult needs high precision for the "hide" mode, and recall matters for "drop" mode, so allow separate thresholds per mode. Report precision and recall against the old keyword filter as the acceptance bar.
 7. **Ship** `adult.ftz` and `category.ftz` as crawler assets, the same way the keyword files are copied by `copyDhtCrawlerAssets`, along with a `model_version`/sha256.
 8. **Iterate:** periodically export low-confidence rows plus user corrections, re-label them with the teacher, retrain, bump `clf_ver`, and re-classify (§8).
 
@@ -208,9 +208,9 @@ Keep the existing keyword filter as a fallback when model files are missing. Its
 
 ## 10. Phased roadmap (for when we implement)
 
-1. **Measure:** export a 500k sample. Hand-label a 1–2k gold set. Score the current keyword filter on it to get a baseline.
+1. **Measure:** export a 500k sample. Score the current keyword filter on the teacher labels to get a baseline.
 2. **Parser:** C release-name and file-list parser with unit tests (host build, like `ftp-server/host`). Add the `torrent_class` table. Classify at ingest using parser output only.
-3. **Teacher run** on the V100 → fastText student → calibrate → beat the baseline on the gold set.
+3. **Teacher run** on the V100 → fastText student → calibrate → beat the baseline on a held-out split of the teacher labels.
 4. **fastText in the crawler:** NDK CMake, assets, `adult_mode` config, `/search` filters, dashboard UI.
 5. **Backfill** on the phone (maintenance mode, thermal-aware), plus progress in stats.
 6. **Feedback loop:** "mark as wrong" in the dashboard, then periodic retraining.
@@ -220,7 +220,7 @@ Keep the existing keyword filter as a fallback when model files are missing. Its
 ## 11. Risks and open questions
 
 - **No measured numbers** for fastText or e5 on the Snapdragon, or for teacher throughput on the V100. Step 1 must benchmark them.
-- **Teacher refusal or bias** on adult content; abliterated models are unvalidated. Check against the gold set and pick the best model.
+- **Teacher refusal or bias on adult content:** checked 2026-10-15 — the user hand-reviewed the teacher's `adult` labels and accepted them (abliterated models remain unvalidated; no gold set involved).
 - **Training-data skew:** adult rows were dropped historically (§2), so a tag-mode collection period is needed.
 - **anitomy-c** requires C++23 and its license is unverified. A small hand-written anime regex set may be simpler.
 - **JAV-code pattern** (2–5 letters, hyphen, 3–5 digits) has no authoritative source. It is a feature, not a rule, because it collides with part numbers and software versions.

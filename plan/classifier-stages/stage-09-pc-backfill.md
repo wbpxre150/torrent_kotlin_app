@@ -39,7 +39,7 @@ the phone — parity between the two paths is the point).
 ## Exit criteria
 
 1. 100% of the 34.4M rows have a `torrent_class` row at the current `clf_ver`.
-2. Spot-check 200 random rows against a gold-style review: ≥ 90% agree.
+2. Spot-check 200 random rows against the teacher labels (`cm label` re-run on those ids, run by the parent session): ≥ 90% agree.
 3. The original `~/torrents.db` is unchanged (same mtime and size) unless `--write` was used.
 4. The import procedure is tested on the new phone with a 1M-row slice (verify counts + a sample of labels
    on-device after import).
