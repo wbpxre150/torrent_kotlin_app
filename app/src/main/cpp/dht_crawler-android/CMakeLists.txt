@@ -10,7 +10,7 @@
 # third-party deps static (same shape as libtransmissiond.so). Gradle
 # copies/renames the binary to src/main/jniLibs/arm64-v8a/libdhtcrawler.so.
 cmake_minimum_required(VERSION 3.16)
-project(dhtcrawler C)
+project(dhtcrawler C CXX)
 
 set(DHT_CRAWLER_SRC "" CACHE PATH "Patched dht_crawler source tree")
 set(SQLITE_DIR "" CACHE PATH "SQLite amalgamation directory (sqlite3.c, sqlite3.h)")
@@ -25,6 +25,91 @@ endif()
 
 file(GLOB CRAWLER_SOURCES ${DHT_CRAWLER_SRC}/src/*.c)
 
+# ---------------------------------------------------------------------------
+# Stage 5.1: vendored classifier libraries (tparse + ftc over fastText 0.9.2).
+#
+# Linked into the crawler executable but not called yet: a later stage's
+# src/classifier.c uses them behind -DCLF_ENABLED. Sources are copied verbatim
+# from the classifier-model repo (native/tparse, native/ftc and
+# native/third_party/fastText at v0.9.2, MIT -- see fasttext/LICENSE).
+# ---------------------------------------------------------------------------
+
+# tparse: libc-only C11 release-name / file-list parser. Compiles as C so the
+# crawler's own C sources can call it directly.
+add_library(tparse STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/tparse/tparse.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/tparse/name.c
+)
+target_include_directories(tparse PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/tparse)
+set_target_properties(tparse PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED ON
+    # -std=c11, as the reference builds it (not the toolchain's gnu11).
+    C_EXTENSIONS OFF
+    # Linked into the PIE crawler executable.
+    POSITION_INDEPENDENT_CODE ON
+)
+
+# ftc: tiny C ABI over the fastText inference path (C++11). The training/CLI
+# fastText sources (main.cc, autotune.cc) are deliberately absent: this
+# library predicts, it never trains. meter.cc is still compiled because
+# fasttext.cc keeps FastText::test(), which references Meter.
+set(FTC_FASTTEXT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/fasttext)
+set(FTC_FASTTEXT_SOURCES
+    ${FTC_FASTTEXT_DIR}/args.cc
+    ${FTC_FASTTEXT_DIR}/densematrix.cc
+    ${FTC_FASTTEXT_DIR}/dictionary.cc
+    ${FTC_FASTTEXT_DIR}/fasttext.cc
+    ${FTC_FASTTEXT_DIR}/loss.cc
+    ${FTC_FASTTEXT_DIR}/matrix.cc
+    ${FTC_FASTTEXT_DIR}/meter.cc
+    ${FTC_FASTTEXT_DIR}/model.cc
+    ${FTC_FASTTEXT_DIR}/productquantizer.cc
+    ${FTC_FASTTEXT_DIR}/quantmatrix.cc
+    ${FTC_FASTTEXT_DIR}/utils.cc
+    ${FTC_FASTTEXT_DIR}/vector.cc
+)
+
+find_package(Threads REQUIRED)
+
+add_library(ftc STATIC
+    ${FTC_FASTTEXT_SOURCES}
+    ${CMAKE_CURRENT_SOURCE_DIR}/ftc/ftc.cc
+)
+target_include_directories(ftc
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/ftc
+    # The vendored fastText sources include each other by bare name.
+    PRIVATE ${FTC_FASTTEXT_DIR}
+    # taxonomy.h: the generated label-name tables that turn `__label__tv`
+    # into an int.
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tparse
+)
+set_target_properties(ftc PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    CXX_STANDARD 11
+    CXX_STANDARD_REQUIRED ON
+    # -std=c++11, as the reference builds it (not the toolchain's gnu++11).
+    CXX_EXTENSIONS OFF
+)
+# fastText's inference path is const, but fasttext.cc still references
+# std::thread, so the library carries the threads dependency to its users.
+target_link_libraries(ftc PUBLIC Threads::Threads)
+
+# fastText 0.9.2 predates today's libc++ header hygiene: args.cc uses uint64_t
+# without including <cstdint>. Force the include from the build description
+# rather than patching the pinned third-party tree.
+target_compile_options(ftc PRIVATE -include cstdint)
+# ftc.cc is ours and stays warning-clean; the pinned fastText sources are not
+# (sign-compare et al.), so -Wall -Wextra goes on the wrapper file only.
+set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/ftc/ftc.cc
+    PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra")
+
+# Stage 5.1 gating define for the crawler sources: a later stage's
+# src/classifier.c compiles inert without it, and the upstream host Makefile
+# build (which does not use this file) stays plain C. It is a directory-wide
+# definition, so the vendored tparse/ftc sources see it as well -- neither
+# tests it.
+add_compile_definitions(CLF_ENABLED)
 add_executable(dhtcrawler
     ${CRAWLER_SOURCES}
     ${DHT_CRAWLER_SRC}/lib/bencode-c/bencode.c
@@ -38,6 +123,9 @@ add_executable(dhtcrawler
 set_target_properties(dhtcrawler PROPERTIES
     POSITION_INDEPENDENT_CODE ON
     C_STANDARD 99
+    # The executable carries C++11 objects (ftc/fastText): link it with the C++
+    # driver so the c++_static runtime is resolved and initialised.
+    LINKER_LANGUAGE CXX
 )
 
 # Match the upstream Makefile: -Wall -Wextra -O2 -std=c99
@@ -94,6 +182,12 @@ target_include_directories(dhtcrawler PRIVATE
 # Static third-party deps, then Bionic system libs. pthread lives in
 # Bionic libc; -llog for __android_log_write (civetweb).
 target_link_libraries(dhtcrawler PRIVATE
+    tparse
+    ftc
+    # The crawler is C and ftc is C++11: c++_static (the NDK's default STL)
+    # keeps the PIE binary self-contained, exactly as the reference NDK build
+    # (classifier-model scripts/build_ftc_ndk.sh) does.
+    c++_static
     ${LIBUV_INSTALL}/lib/libuv.a
     ${MBEDTLS_INSTALL}/lib/libmbedcrypto.a
     m
