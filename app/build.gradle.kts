@@ -430,12 +430,21 @@ tasks.register("prepareDhtCrawlerSrc") {
 }
 
 tasks.register<Copy>("copyDhtCrawlerAssets") {
-    description = "Copy dht_crawler keyword files into generated assets (Stage 09)"
+    description = "Copy dht_crawler keyword files + classifier models into generated assets (Stage 09/5)"
     // Same source-resolution logic as prepareDhtCrawlerSrc
     val crawlerSrc = providers.gradleProperty("dhtCrawlerSrc").orNull?.let { file(it).absoluteFile }
         ?: file("src/main/cpp/dht_crawler")
     from(crawlerSrc) {
         include("porn_filter_keywords.txt", "torrent_search_keywords.txt")
+    }
+    // Stage 5: fastText classifier model files. Binary — the Copy task is byte-exact
+    // (no text filtering / charset conversion), so a plain copy is correct here.
+    // `into("models")` is relative to the task destination above, giving the asset
+    // path dht_crawler/models/v1/<file> (the crawler's default classifier_model_dir).
+    val modelSrc = file("src/main/cpp/dht_crawler-android/models")
+    from(modelSrc) {
+        include("v1/**")
+        into("models")
     }
     into(file("build/generated/assets/dht_crawler/dht_crawler"))
 }

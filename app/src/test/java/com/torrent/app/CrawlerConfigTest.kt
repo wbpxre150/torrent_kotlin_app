@@ -1,6 +1,8 @@
 package com.torrent.app
 
 import com.torrent.app.config.CrawlerSettings
+import org.json.JSONObject
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -12,6 +14,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import java.io.File
+import java.security.MessageDigest
 
 class CrawlerConfigTest {
 
@@ -159,6 +162,7 @@ class CrawlerConfigTest {
             val defaultAsset = File("src/main/assets/dht_crawler/config.ini.default")
             assertTrue("checked-in default asset must exist", defaultAsset.exists())
             File(fixture, "config.ini.default").writeText(defaultAsset.readText())
+            copyClassifierModelAssets(fixture)
             val cfg = CrawlerConfig(context) { path -> File(tmp.root, "assets/$path").inputStream() }
             cfg.ensureLayout()
 
@@ -184,6 +188,78 @@ class CrawlerConfigTest {
             assertTrue(cfg.configFile.exists())
         }
 
+        // --- Stage 5: classifier model staging into workDir/models/v1 ---
+
+        @Test fun ensureLayout_stagesClassifierModelsByteIdenticalToAssets() {
+            val cfg = configWithRealDefaultAsset()
+            cfg.ensureLayout()
+
+            val declared = JSONObject(File(MODEL_SRC_DIR, "manifest.json").readText())
+                .getJSONObject("models")
+            for (name in CrawlerConfig.MODEL_FILES) {
+                val source = File(MODEL_SRC_DIR, name)
+                val staged = File(cfg.modelsDir, name)
+                assertTrue("$name must be staged into ${cfg.modelsDir}", staged.isFile)
+                assertEquals("$name size must match the asset", source.length(), staged.length())
+                assertArrayEquals(
+                    "$name must be copied byte-for-byte", source.readBytes(), staged.readBytes()
+                )
+
+                val stagedHash = sha256Hex(staged)
+                assertEquals("$name staged hash", sha256Hex(source), stagedHash)
+                for (key in declared.keys()) {
+                    val entry = declared.getJSONObject(key)
+                    if (entry.getString("file") == name) {
+                        assertEquals("manifest bytes for $name", entry.getLong("bytes"), staged.length())
+                        assertEquals("manifest sha256 for $name", entry.getString("sha256"), stagedHash)
+                    }
+                }
+            }
+
+            // The legacy text staging path (readBytes().toString(UTF_8)) would inflate and
+            // corrupt these files; assert that so the byte-for-byte copy is what is proven.
+            val adult = File(MODEL_SRC_DIR, "adult.ftz").readBytes()
+            assertFalse(
+                "adult.ftz must not survive a UTF-8 round trip, else this test proves nothing",
+                adult.contentEquals(adult.toString(Charsets.UTF_8).toByteArray(Charsets.UTF_8))
+            )
+            assertEquals(
+                "no partial copies may remain",
+                emptyList<String>(),
+                cfg.modelsDir.listFiles()!!.map { it.name }.filter { it.endsWith(".tmp") }
+            )
+        }
+
+        @Test fun ensureAssets_doesNotRewriteModelsWhenVersionStampMatches() {
+            val cfg = configWithRealDefaultAsset()
+            cfg.ensureLayout()
+            val staged = File(cfg.modelsDir, "adult.ftz")
+            val firstBytes = staged.readBytes()
+            assertTrue(staged.setLastModified(0L))
+
+            cfg.ensureAssets()
+
+            assertEquals("staging must be a no-op when the stamp matches", 0L, staged.lastModified())
+            assertArrayEquals("staged bytes must be unchanged", firstBytes, staged.readBytes())
+        }
+
+        @Test fun ensureAssets_restagesModelsWhenVersionStampChanges() {
+            val cfg = configWithRealDefaultAsset()
+            cfg.ensureLayout()
+            val staged = File(cfg.modelsDir, "adult.ftz")
+            staged.writeBytes(byteArrayOf(1, 2, 3)) // simulate an interrupted copy
+            val stamp = File(cfg.workDir, CrawlerConfig.STAMP_FILE)
+            assertTrue(stamp.delete())
+
+            cfg.ensureAssets()
+
+            assertArrayEquals(
+                "a version change must repair the staged model",
+                File(MODEL_SRC_DIR, "adult.ftz").readBytes(), staged.readBytes()
+            )
+            assertTrue("the stamp is rewritten", stamp.exists())
+        }
+
         private fun configWithRealDefaultAsset(): CrawlerConfig {
             val context = RuntimeEnvironment.getApplication()
             val fixture = File(tmp.root, "assets/dht_crawler").apply { mkdirs() }
@@ -192,8 +268,26 @@ class CrawlerConfigTest {
             val defaultAsset = File("src/main/assets/dht_crawler/config.ini.default")
             assertTrue("checked-in default asset must exist", defaultAsset.exists())
             File(fixture, "config.ini.default").writeText(defaultAsset.readText())
+            copyClassifierModelAssets(fixture)
             return CrawlerConfig(context) { path -> File(tmp.root, "assets/$path").inputStream() }
         }
+
+        /** Checked-in model assets (read-only source of truth for the staging tests). */
+        private val MODEL_SRC_DIR = File("src/main/cpp/dht_crawler-android/models/v1")
+
+        /**
+         * Mirrors `assets/dht_crawler/models/v1/` into the asset fixture with the real
+         * checked-in model files, so byte fidelity is asserted against real binaries.
+         */
+        private fun copyClassifierModelAssets(assetDir: File) {
+            assertTrue("checked-in model dir must exist: $MODEL_SRC_DIR", MODEL_SRC_DIR.isDirectory)
+            val dst = File(assetDir, CrawlerConfig.MODELS_SUBDIR).apply { mkdirs() }
+            MODEL_SRC_DIR.listFiles()!!.forEach { it.copyTo(File(dst, it.name), overwrite = true) }
+        }
+
+        private fun sha256Hex(file: File): String =
+            MessageDigest.getInstance("SHA-256").digest(file.readBytes())
+                .joinToString("") { "%02x".format(it) }
 
         @Test fun renderManaged_setsFormKeysInPlaceAndKeepsComments() {
             val cfg = configWithRealDefaultAsset()

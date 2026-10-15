@@ -6,6 +6,7 @@ import com.torrent.app.config.CrawlerSettings
 import android.content.pm.PackageManager
 import android.os.Build
 import java.io.File
+import java.io.FileOutputStream
 import java.io.InputStream
 import java.nio.channels.FileChannel
 import java.nio.file.AtomicMoveNotSupportedException
@@ -15,7 +16,8 @@ import java.nio.file.StandardOpenOption
 
 /**
  * Owns the dht_crawler's working dir under internal storage: `filesDir/crawler/`
- * (contains `config.ini`, `data/`, and the keyword files). Stage 09 (internal
+ * (contains `config.ini`, `data/`, the keyword files, and `models/v1/` with the
+ * classifier model files). Stage 09 (internal
  * storage only); the crawler process itself is started by a later supervisor step.
  */
 class CrawlerConfig(
@@ -30,7 +32,10 @@ class CrawlerConfig(
     /** Last-known-good copy of `config.ini` for apply/rollback. */
     val lkgConfigFile: File = File(workDir, "config.ini.lkg")
 
-    /** Creates the crawler layout and seeds the keyword assets + config.ini. */
+    /** Classifier model dir (the crawler's `classifier_model_dir` default); holds the `.ftz` files. */
+    val modelsDir: File = File(workDir, MODELS_SUBDIR)
+
+    /** Creates the crawler layout and seeds the keyword + model assets and config.ini. */
     fun ensureLayout() {
         workDir.mkdirs()
         dataDir.mkdirs()
@@ -39,8 +44,11 @@ class CrawlerConfig(
     }
 
     /**
-     * Copies the keyword files from `assets/dht_crawler/` into [workDir] when missing
-     * or when the app version code differs from the `.assets_version` stamp.
+     * Copies the keyword files from `assets/dht_crawler/` into [workDir], and the
+     * classifier model files from `assets/dht_crawler/models/v1/` into [modelsDir],
+     * when missing or when the app version code differs from the `.assets_version`
+     * stamp. The models are binary (`fastText` `.ftz`); they are streamed byte-for-byte
+     * — see [copyBinaryAtomically].
      */
     fun ensureAssets() {
         val version = currentVersionCode()
@@ -51,6 +59,11 @@ class CrawlerConfig(
             if (stampMatches && target.exists()) continue
             val text = openAsset("$ASSET_DIR/$name").use { it.readBytes().toString(Charsets.UTF_8) }
             writeAtomically(target, text)
+        }
+        for (name in MODEL_FILES) {
+            val target = File(modelsDir, name)
+            if (stampMatches && target.exists()) continue
+            openAsset("$ASSET_DIR/$MODELS_SUBDIR/$name").use { copyBinaryAtomically(it, target) }
         }
         if (!stampMatches) stamp.writeText(version.toString())
     }
@@ -152,6 +165,18 @@ class CrawlerConfig(
         /** Keyword files shipped under `assets/dht_crawler/` and kept in the work dir. */
         val KEYWORD_FILES = listOf("porn_filter_keywords.txt", "torrent_search_keywords.txt")
 
+        /** Classifier model dir, work-dir relative (mirrors crawler `classifier_model_dir`). */
+        const val MODELS_SUBDIR = "models/v1"
+
+        /**
+         * Binary model assets shipped under `assets/dht_crawler/models/v1/` and staged
+         * into `workDir/models/v1/`, where the crawler resolves them by default.
+         */
+        val MODEL_FILES = listOf("adult.ftz", "category.ftz", "tv_kind.ftz", "manifest.json")
+
+        /** Buffer size for the binary-safe asset copy (streamed, never decoded). */
+        const val BINARY_COPY_BUFFER = 64 * 1024
+
         /** Keys the config writer always forces to `0` (backups are off on Android). */
         val PINNED_KEYS = linkedMapOf(
             "backup_enabled" to "0",
@@ -223,6 +248,37 @@ class CrawlerConfig(
             val tmp = File(file.parentFile, ".${file.name}.tmp")
             tmp.writeText(text, Charsets.UTF_8)
             FileChannel.open(tmp.toPath(), StandardOpenOption.WRITE).use { it.force(true) }
+            if (!tmp.renameTo(file)) {
+                try {
+                    Files.move(
+                        tmp.toPath(), file.toPath(),
+                        StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING
+                    )
+                } catch (e: AtomicMoveNotSupportedException) {
+                    Files.move(tmp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                }
+            }
+        }
+
+        /**
+         * Streams [input] to [file] without any text decoding: 64 KiB chunks into a
+         * temp file in the same directory, fsync, then rename (atomic move, falling
+         * back to a plain replace). Model files are binary — a UTF-8 round-trip would
+         * corrupt them, so they must never go through [writeAtomically].
+         */
+        fun copyBinaryAtomically(input: InputStream, file: File) {
+            file.parentFile?.mkdirs()
+            val tmp = File(file.parentFile, ".${file.name}.tmp")
+            FileOutputStream(tmp).use { out ->
+                val buf = ByteArray(BINARY_COPY_BUFFER)
+                while (true) {
+                    val n = input.read(buf)
+                    if (n < 0) break
+                    out.write(buf, 0, n)
+                }
+                out.flush()
+                out.fd.sync()
+            }
             if (!tmp.renameTo(file)) {
                 try {
                     Files.move(
