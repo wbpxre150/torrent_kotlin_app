@@ -9,7 +9,8 @@ import org.junit.Test
  * single inline raw string, so these pin its behavioural contract: the
  * live websocket feed path, the reconnect/backoff logic, the top-level
  * summary strip, the "not running" fallback, the expand/collapse state
- * persistence, and the no-external-assets rule.
+ * persistence, the stage-8 classifier.backfill cell, and the
+ * no-external-assets rule.
  */
 class ControlServerStatsPageTest {
 
@@ -36,6 +37,39 @@ class ControlServerStatsPageTest {
         for (id in listOf("s-version", "s-uptime", "s-torrents", "s-files", "s-last-hour", "s-timestamp")) {
             assertTrue("missing summary strip cell $id", page.contains("id=\"$id\""))
         }
+    }
+
+    /**
+     * Stage 8: the crawler's resumable backfill/re-classify job reports itself
+     * at `classifier.backfill`, and the summary strip carries a cell fed
+     * straight from it. These tests have no JS engine to run the page's inline
+     * script, so — like the rest of this file — the contract is pinned as page
+     * source: the render function reads classifier.backfill and formats the
+     * running / complete / idle states exactly like this.
+     */
+    @Test fun page_backfillCellRendersProgressFromClassifierStats() {
+        assertTrue(page.contains("data.classifier ? data.classifier.backfill : null"))
+        assertTrue(page.contains("function fmtInt(v)"))
+        assertTrue(page.contains("text = 'running \\u2014 ' + fmtInt(bf.done) + '/' + fmtInt(bf.total)"))
+        assertTrue(page.contains("' rows' + (typeof bf.rate_rows_s === 'number'"))
+        assertTrue(page.contains("Math.round(bf.rate_rows_s).toLocaleString() + ' rows/s)'"))
+        assertTrue(page.contains("text = 'complete \\u2014 ' + fmtInt(bf.done) + '/' + fmtInt(bf.total) + ' rows'"))
+        assertTrue(page.contains("text = bf.state;"))
+        assertTrue(page.contains("out.textContent = text;"))
+        assertTrue(page.contains("renderBackfill(data);"))
+    }
+
+    /**
+     * The backfill cell degrades to nothing when the field is absent: an older
+     * crawler binary, an unusable classifier (available:false), or a
+     * malformed/empty state all leave the cell hidden rather than showing a
+     * misleading number.
+     */
+    @Test fun page_hidesBackfillCellWhenAbsentOrUnavailable() {
+        assertTrue(page.contains("<div id=\"bf-cell\" style=\"display:none\">"))
+        assertTrue(page.contains("if (!bf || typeof bf !== 'object' || bf.available === false ||"))
+        assertTrue(page.contains("typeof bf.state !== 'string' || bf.state === ''"))
+        assertTrue(page.contains("cell.style.display = 'none';"))
     }
 
     @Test fun page_handlesNotRunningFallback() {
