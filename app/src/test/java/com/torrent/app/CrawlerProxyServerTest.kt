@@ -40,6 +40,7 @@ class CrawlerProxyServerTest {
             "Connection" to "close",
             "Transfer-Encoding" to "chunked",
             "Authorization" to "Basic abc",
+            "Authorization" to "Bearer x",
             "Accept" to "text/html",
             "User-Agent" to "JUnit",
         )
@@ -47,7 +48,7 @@ class CrawlerProxyServerTest {
         assertNull(out["Host"])
         assertNull(out["Connection"])
         assertNull(out["Transfer-Encoding"])
-        assertNull(out["Authorization"])
+        assertTrue(out.getAll("Authorization").isNullOrEmpty())
         assertEquals(listOf("text/html"), out.getAll("Accept"))
         assertEquals(listOf("JUnit"), out.getAll("User-Agent"))
     }
@@ -108,6 +109,14 @@ class CrawlerProxyServerTest {
         assertEquals("a=1", CrawlerProxyServer.stripTokenFromQuery("a=1&TOKEN=x"))
     }
 
+    @Test fun stripTokenFromQuery_preservesSearchFilterParamsInOrder() {
+        assertEquals(
+            "q=ubuntu&category=tv&tv_kind=season_pack&adult=only&min_conf=0.8",
+            CrawlerProxyServer.stripTokenFromQuery(
+                "token=SECRET&q=ubuntu&category=tv&tv_kind=season_pack" +
+                    "&adult=only&min_conf=0.8"))
+    }
+
     @Test fun unauthorizedPage_containsLoginLink() {
         val html = CrawlerProxyServer.unauthorizedPage("http://192.168.1.5:8090/login")
         assertTrue(html.contains("http://192.168.1.5:8090/login"))
@@ -131,8 +140,12 @@ class CrawlerProxyServerTest {
 
     private fun freePort(): Int = ServerSocket(0).use { it.localPort }
 
-    /** Minimal raw-socket upstream: 200 + echo of `METHOD target`. */
-    private fun startUpstream(): ServerSocket {
+    /**
+     * Minimal raw-socket upstream: 200 + echo of `METHOD target`. When
+     * [echoAuthorization] is set the body is prefixed with `auth:<value|none>`
+     * read from the request headers, so a test can prove a header never arrives.
+     */
+    private fun startUpstream(echoAuthorization: Boolean = false): ServerSocket {
         val server = ServerSocket(0)
         Thread {
             while (true) {
@@ -161,9 +174,17 @@ class CrawlerProxyServerTest {
                             }
                         }
                         val fields = (header.lineSequence().firstOrNull() ?: "").split(' ')
-                        val body =
-                            ("upstream:${fields.getOrNull(0) ?: "GET"} " +
-                                "${fields.getOrNull(1) ?: "/"}").toByteArray()
+                        val echo = StringBuilder()
+                        if (echoAuthorization) {
+                            val auth = header.lineSequence()
+                                .firstOrNull { it.startsWith("Authorization:", ignoreCase = true) }
+                                ?.substringAfter(':')?.trim() ?: "none"
+                            echo.append("auth:").append(auth).append('\n')
+                        }
+                        echo.append(
+                            "upstream:${fields.getOrNull(0) ?: "GET"} " +
+                                "${fields.getOrNull(1) ?: "/"}")
+                        val body = echo.toString().toByteArray()
                         val responseHeaders =
                             "HTTP/1.1 200 OK\r\n" +
                                 "Content-Type: text/plain; charset=utf-8\r\n" +
@@ -195,11 +216,15 @@ class CrawlerProxyServerTest {
     }
 
     /** GET with a short retry so the CIO listener has a beat to come up. */
-    private fun httpGet(url: String): Pair<Int, String> {
+    private fun httpGet(
+        url: String,
+        requestHeaders: Map<String, String> = emptyMap(),
+    ): Pair<Int, String> {
         var last: Exception? = null
         repeat(40) {
             try {
                 val conn = URL(url).openConnection() as HttpURLConnection
+                requestHeaders.forEach { (k, v) -> conn.setRequestProperty(k, v) }
                 val code = conn.responseCode
                 val stream = if (code in 200..399) conn.inputStream else conn.errorStream
                 val body = stream?.bufferedReader()?.readText() ?: ""
@@ -255,6 +280,71 @@ class CrawlerProxyServerTest {
             // (The JDK's HttpURLConnection forces POST when doOutput is set,
             // so the echoed method is not asserted.)
             assertTrue(body.endsWith(" /search?q=x&format=html"))
+        } finally {
+            proxy.stop()
+            upstream.close()
+        }
+    }
+
+    // ── stage 7: crawler search/browse filter params pass through verbatim ─
+
+    @Test fun proxyForwardsSearchFilterParamsVerbatim_andStripsToken() {
+        val upstream = startUpstream()
+        val proxy = CrawlerProxyServer(
+            tokenManagerWith(TOKEN), { upstream.localPort }, freePort())
+        proxy.start()
+        try {
+            val (code, body) = httpGet(
+                "http://127.0.0.1:${proxy.port}/search?token=$TOKEN&q=ubuntu" +
+                    "&category=tv&tv_kind=season_pack&adult=only&min_conf=0.8")
+            assertEquals(200, code)
+            assertTrue(
+                "expected verbatim filter query, got: $body",
+                body.endsWith(
+                    " /search?q=ubuntu&category=tv&tv_kind=season_pack" +
+                        "&adult=only&min_conf=0.8"))
+            assertFalse("token must be stripped, got: $body", body.contains("token="))
+        } finally {
+            proxy.stop()
+            upstream.close()
+        }
+    }
+
+    @Test fun proxyForwardsBrowseSortAndCategoryVerbatim_andStripsToken() {
+        val upstream = startUpstream()
+        val proxy = CrawlerProxyServer(
+            tokenManagerWith(TOKEN), { upstream.localPort }, freePort())
+        proxy.start()
+        try {
+            val (code, body) = httpGet(
+                "http://127.0.0.1:${proxy.port}/browse" +
+                    "?sort=peers&category=movie&token=$TOKEN")
+            assertEquals(200, code)
+            assertTrue(
+                "expected verbatim browse query, got: $body",
+                body.endsWith(" /browse?sort=peers&category=movie"))
+            assertFalse("token must be stripped, got: $body", body.contains("token="))
+        } finally {
+            proxy.stop()
+            upstream.close()
+        }
+    }
+
+    @Test fun proxyNeverForwardsAuthorizationHeaderToUpstream() {
+        val upstream = startUpstream(echoAuthorization = true)
+        val proxy = CrawlerProxyServer(
+            tokenManagerWith(TOKEN), { upstream.localPort }, freePort())
+        proxy.start()
+        try {
+            val (code, body) = httpGet(
+                "http://127.0.0.1:${proxy.port}/search?q=x&token=$TOKEN",
+                mapOf("Authorization" to "Bearer x"))
+            assertEquals(200, code)
+            assertTrue("upstream must echo its auth view, got: $body", body.startsWith("auth:"))
+            assertTrue(
+                "Authorization must not reach the crawler, got: $body",
+                body.startsWith("auth:none"))
+            assertFalse("Bearer must not reach the crawler, got: $body", body.contains("Bearer"))
         } finally {
             proxy.stop()
             upstream.close()
