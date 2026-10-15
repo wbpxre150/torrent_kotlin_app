@@ -24,7 +24,7 @@ The **[EST]** tag marks unmeasured estimates. Measure these before committing to
    - **Tier 2, a V100 teacher, offline only.** A larger LLM on llama.cpp (`json_schema`-constrained output) labels a few hundred thousand torrents. That set is the training data for the fastText student. The teacher can optionally re-label low-confidence leftovers. It is **not** on the ingest path, so the phone works when the PC is off.
 3. **Porn handling becomes configurable.** The default is store + tag + hide at query time. There is an option to drop at ingest (today's behaviour). A small, separately reviewed **hard-block** list (e.g. CSAM terms) always drops at ingest regardless of the setting.
 4. **New search:** a `torrent_class` table with partial and covering indexes. FTS5 `MATCH` runs first, then a rowid join filters by category, TV kind and adult. This adds new `/search` parameters and lets the dashboard offer "TV → complete seasons only" and similar.
-5. **Backfill:** a resumable keyset (`id > last`) loop with a checkpoint table. On the phone, with fastText, all 10M rows take roughly **hours, dominated by SQLite I/O [EST]**, run while charging and paused when the phone gets hot.
+5. **Backfill:** a resumable keyset (`id > last`) loop with a checkpoint table. On the phone, with fastText, all 10M rows take roughly **hours, dominated by SQLite I/O [EST]**, run as an always-on background job.
 
 ---
 
@@ -108,7 +108,7 @@ None of these publish accuracy figures, so we need our own labelled test set eit
 | Option | Size | Per-item latency | 10M backfill on phone | NDK effort | Multilingual / obfuscation | Verdict |
 |---|---|---|---|---|---|---|
 | **fastText supervised**, char n-grams, `.ftz` | a few MB [EST] | µs-range [EST] | **≈0.1–0.5 h of compute; SQLite I/O dominates [EST]** | Low: C++ lib, MIT, small `extern "C"` shim | Good with `minn/maxn` char n-grams; works on CJK bytes and leetspeak | **Recommended** |
-| multilingual-e5-small (118M, 384-d) + logistic head | 113 MB int8 ONNX; GGUF Q8 ≈ same | tens of ms [EST] | ≈10–30 h, thermal-limited [EST] | High: ONNX Runtime Mobile or llama.cpp embedding | Strong (100 langs) | Fallback if fastText fails on non-English titles |
+| multilingual-e5-small (118M, 384-d) + logistic head | 113 MB int8 ONNX; GGUF Q8 ≈ same | tens of ms [EST] | ≈10–30 h [EST] | High: ONNX Runtime Mobile or llama.cpp embedding | Strong (100 langs) | Fallback if fastText fails on non-English titles |
 | Small LLM (Qwen3-0.6B, Gemma3-1B) via llama.cpp + GBNF | 0.4–0.8 GB | ~1–2 s per item (15–30 tok/s generation) | **months** | Medium | OK | Not viable on the phone; teacher only |
 | GBDT on handcrafted features | KB | µs | trivial | Low | Poor | Use those features as *inputs* to fastText instead |
 | sqlite-vec + embeddings (kNN) | 10M × 384: f32 15.4 GB / int8 3.8 GB / 1-bit 0.48 GB | — | — | Medium | — | Not worth it on the phone. Only consider it later, for semantic "more like this" on a subset. |
@@ -183,7 +183,6 @@ CREATE TABLE classifier_meta (key TEXT PRIMARY KEY, value TEXT);   -- model hash
   ```
 
   Classify the batch, then UPSERT the results and the checkpoint in one short transaction (WAL plus `busy_timeout`, so the crawler writer is never blocked for long).
-- Throttle on the thermal status (`AThermal_getCurrentThermalStatus` / `PowerManager`). Optionally run only while charging, controlled from Kotlin.
 - Expose progress in `/stats`.
 - File lists are the expensive part of the read, since `torrent_files` is much larger than `torrents`. Read only the first N filenames, count by extension in SQL, and use `idx_files_torrent`.
 
@@ -212,7 +211,7 @@ Keep the existing keyword filter as a fallback when model files are missing. Its
 2. **Parser:** C release-name and file-list parser with unit tests (host build, like `ftp-server/host`). Add the `torrent_class` table. Classify at ingest using parser output only.
 3. **Teacher run** on the V100 → fastText student → calibrate → beat the baseline on a held-out split of the teacher labels.
 4. **fastText in the crawler:** NDK CMake, assets, `adult_mode` config, `/search` filters, dashboard UI.
-5. **Backfill** on the phone (maintenance mode, thermal-aware), plus progress in stats.
+5. **Backfill** on the phone (maintenance mode), plus progress in stats.
 6. **Feedback loop:** "mark as wrong" in the dashboard, then periodic retraining.
 
 ---
@@ -240,4 +239,3 @@ Keep the existing keyword filter as a fallback when model files are missing. Its
 - guessit — https://guessit.readthedocs.io/en/latest/properties.html · Sonarr Parser.cs — https://github.com/Sonarr/Sonarr/blob/develop/src/NzbDrone.Core/Parser/Parser.cs · Anitomy — https://github.com/erengy/anitomy, https://github.com/Xtansia/anitomy-c
 - Scunthorpe problem — https://en.wikipedia.org/wiki/Scunthorpe_problem · Jackett categories — https://github.com/Jackett/Jackett/wiki/Jackett-Categories
 - SQLite FTS5 — https://www.sqlite.org/fts5.html · sqlite-vec vec0 — https://alexgarcia.xyz/sqlite-vec/features/vec0.html · sqlite-lembed — https://github.com/asg017/sqlite-lembed
-- Android thermal — https://developer.android.com/ndk/reference/group/thermal

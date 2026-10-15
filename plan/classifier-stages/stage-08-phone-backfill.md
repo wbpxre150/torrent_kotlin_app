@@ -19,8 +19,7 @@ Stage 5 (ingest-time classification, `torrent_class` + `classifier_meta` tables,
    - Keyset loop (`id > :ckpt`) with the checkpoint in `classifier_meta`, batches of 2k, ≤ 50 files read per
      torrent (file reads are the expensive part; use `idx_files_torrent` and read only the first N filenames).
    - One short UPSERT transaction per batch (WAL + `busy_timeout` — the crawler writer is never blocked long).
-   - Pauses when the thermal status is ≥ SEVERE (`AThermal_getCurrentThermalStatus` NDK / `PowerManager`),
-     and optionally when not charging (Kotlin passes the state, or `CrawlerMaintenance` controls start/stop).
+   - Always runs — no gating on charging, battery, or thermal state.
 2. Progress (`done/total`, rate) is exposed in `/stats` and on the dashboard.
 3. Re-classifies rows where `clf_ver < current`.
 
@@ -39,10 +38,9 @@ Stage 5 (ingest-time classification, `torrent_class` + `classifier_meta` tables,
 2. Kill the crawler mid-run and restart: it resumes from the checkpoint with no duplicates and no gaps.
 3. Crawling continues throughout (ingest rate within 10% of the pre-job rate).
 4. Measured rows/s recorded in this stage file.
-5. `/stats` and the dashboard show backfill progress; the job pauses when a hot thermal status is forced
-   (verify by holding the device under load or stubbing the status in a unit test).
+5. `/stats` and the dashboard show backfill progress.
 6. `./gradlew :app:testDebugUnitTest` passes.
 
 ## Commit
 
-`crawler: stage 8 — resumable thermal-aware backfill job + progress in /stats`
+`crawler: stage 8 — resumable backfill job + progress in /stats`
