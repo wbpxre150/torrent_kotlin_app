@@ -119,7 +119,7 @@ tree_parallel_peers = 4
 # TCP connection establishment timeout in milliseconds
 tree_tcp_connect_timeout_ms = 2000
 # Process-wide UDP send rate limit in packets/sec (0 = unlimited)
-udp_rate_limit_pps = 1500
+udp_rate_limit_pps = 2500
 # Fresh-peer re-lookup retries in the metadata failure path before a failure strike (0 = disable)
 tree_metadata_fresh_peer_retries = 1
 # Metadata fetch deadline per tree in milliseconds (5000-600000)
