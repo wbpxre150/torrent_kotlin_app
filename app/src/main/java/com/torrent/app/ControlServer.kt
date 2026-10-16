@@ -15,6 +15,7 @@ import java.net.URLDecoder
 import java.net.URLEncoder
 import java.util.Base64
 import java.util.concurrent.TimeUnit
+import org.json.JSONObject
 import com.torrent.app.config.TransmissionApplyMode
 import com.torrent.app.config.CrawlerKeys
 import com.torrent.app.config.CrawlerSettings
@@ -74,6 +75,9 @@ class ControlServer(
     private val crawlerRestoreDbStatus: () -> com.torrent.app.backup.DbRestoreStatus =
         { com.torrent.app.backup.DbRestoreStatus() },
     private val port: Int = 8090,
+    // Search-dashboard stage 2: same-origin POST /api/transmission/add (mirrors
+    // CrawlerProxyServer's route); null = the route answers 503.
+    private val addHandler: CrawlerAddHandler? = null,
 ) {
     @Volatile private var server: EmbeddedServer<*, *>? = null
 
@@ -132,6 +136,12 @@ class ControlServer(
                     // the stats websocket below; the page never polls.
                     get("stats") {
                         call.respondText(buildStatsPage(), ContentType.Text.Html)
+                    }
+
+                    // Search-dashboard stage 2: throwaway stub page proving the
+                    // /search/ws round-trip; replaced by the real UI later.
+                    get("search") {
+                        call.respondText(buildSearchPageStub(), ContentType.Text.Html)
                     }
 
                     get("api/status") { call.respondText(buildStatusJson(), ContentType.Application.Json) }
@@ -268,6 +278,28 @@ class ControlServer(
                         call.respondText(crawlerStatsPayload(), ContentType.Application.Json)
                     }
 
+                    // Same-origin magnet add (search-dashboard stage 2): mirrors
+                    // CrawlerProxyServer's route so the :8090 dashboard can add a
+                    // crawler-DB torrent without going through the proxy port.
+                    // Auth is the route interceptor above; there is no second check.
+                    post("api/transmission/add") {
+                        val handler = addHandler
+                        if (handler == null) {
+                            call.respondText(
+                                """{"ok":false,"error":"db_unavailable"}""",
+                                ContentType.Application.Json,
+                                HttpStatusCode.ServiceUnavailable,
+                            )
+                        } else {
+                            val outcome = handler.add(call.request.queryParameters["hash"] ?: "")
+                            call.respondText(
+                                outcome.toJson(),
+                                ContentType.Application.Json,
+                                HttpStatusCode.fromValue(outcome.httpStatus),
+                            )
+                        }
+                    }
+
                     // Live stats feed (webui stage 1): the crawler's CivetWeb has no
                     // websocket support, so the WS terminates here and we poll the
                     // loopback /stats ourselves. The interceptor above already
@@ -295,6 +327,41 @@ class ControlServer(
                                 break // the socket went away; stop pushing
                             }
                             delay(wsPushPeriodMs)
+                        }
+                    }
+
+                    // Search feed (search-dashboard stage 2): request/response over
+                    // one socket. The client sends {"id":N,"type":"search|browse|random",
+                    // ...filters}; we validate, build a loopback path from enumerated
+                    // values only, fetch the crawler JSON and reply with the raw body
+                    // spliced verbatim under key "payload". It never throws on a
+                    // malformed frame or a half-open socket.
+                    webSocket("search/ws") {
+                        val (token, _) = resolveAuthToken(
+                            call.request.headers["Cookie"],
+                            call.request.queryParameters["token"],
+                            call.request.headers["Authorization"],
+                            tokenManager::validate,
+                        )
+                        if (token == null) {
+                            close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, "unauthorized"))
+                            return@webSocket
+                        }
+                        for (frame in incoming) {
+                            if (frame !is Frame.Text) continue
+                            val reply = try {
+                                handleSearchFrame(frame.readText())
+                            } catch (e: Exception) {
+                                // Defensive: a reply is mandatory, never a crash.
+                                """{"id":0,"ok":false,"error":"bad_request"}"""
+                            }
+                            try {
+                                send(Frame.Text(reply))
+                            } catch (e: kotlinx.coroutines.CancellationException) {
+                                throw e // coroutine cancelled (client gone)
+                            } catch (e: Exception) {
+                                break // the socket went away; stop the loop
+                            }
                         }
                     }
 
@@ -508,6 +575,7 @@ class ControlServer(
               <a class="cfg" href="/settings/storage">Storage</a>
               <a class="cfg" href="/settings/crawler">Crawler</a>
               <a class="cfg" href="/stats">Crawler Stats</a>
+              <a class="cfg" href="/search">Search</a>
             </p>
             <h2>Daemons</h2>
             <table><tr><th>Name</th><th>State</th><th>PID</th><th>Uptime</th><th>Restarts</th><th>Control</th></tr>
@@ -968,26 +1036,88 @@ class ControlServer(
     private fun crawlerStatsPayload(): String {
         val crawler = daemonStatuses()
             .firstOrNull { it.label == DaemonService.CRAWLER_LABEL }
-        val body = if (crawler?.state == ProcessState.RUNNING) fetchCrawlerStats(crawlerHttpPort()) else null
+        val body = if (crawler?.state == ProcessState.RUNNING) fetchCrawlerStats() else null
         return crawlerStatsJson(body, crawler?.state)
     }
 
     /**
-     * Fetches the crawler's own /stats JSON over loopback with a short
-     * timeout. Returns null when the crawler is unreachable — the caller
-     * responds with the clean "not running" fallback.
+     * Fetches the crawler's own /stats JSON over loopback. Returns null when
+     * the crawler is unreachable — the caller responds with the clean
+     * "not running" fallback.
      */
-    private fun fetchCrawlerStats(port: Int): String? {
+    private fun fetchCrawlerStats(): String? = fetchCrawlerJson("/stats")
+
+    /**
+     * Loopback GET of the crawler's JSON API ([pathAndQuery] must start with
+     * `/`). Returns the raw body on 200, null on any error/non-200. The read
+     * timeout is generous (15s) because search/browse queries can be slow;
+     * the connect timeout stays short so a down crawler fails fast.
+     */
+    private fun fetchCrawlerJson(pathAndQuery: String): String? {
         return try {
-            val conn = (java.net.URL("http://127.0.0.1:$port/stats").openConnection() as java.net.HttpURLConnection).apply {
+            val url = "http://127.0.0.1:${crawlerHttpPort()}$pathAndQuery"
+            val conn = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
                 connectTimeout = 2000
-                readTimeout = 2000
+                readTimeout = 15_000
                 instanceFollowRedirects = false
             }
             if (conn.responseCode == 200) conn.inputStream.bufferedReader().use { it.readText() } else null
         } catch (e: Exception) {
             null
         }
+    }
+
+    /**
+     * Answers one /search/ws text frame. Never throws: an unparseable frame
+     * yields `bad_request` (id 0), a missing/invalid `id` or `type` yields
+     * `bad_request: <field>`, an unreachable crawler yields `unavailable`, a
+     * non-object body yields `db_error`, and success carries the crawler's raw
+     * JSON body verbatim under `payload` (so escaping stays the crawler's).
+     */
+    private fun handleSearchFrame(text: String): String {
+        val obj: JSONObject = try {
+            JSONObject(text)
+        } catch (e: Exception) {
+            return """{"id":0,"ok":false,"error":"bad_request"}"""
+        }
+        val rawId = obj.opt("id")
+        val id = when (rawId) {
+            is Int -> rawId
+            is Long -> rawId.toInt()
+            else -> return """{"id":0,"ok":false,"error":"bad_request: id"}"""
+        }
+        val result = buildCrawlerQuery(
+            type = searchField(obj, "type"),
+            q = searchField(obj, "q"),
+            category = searchField(obj, "category"),
+            tvKind = searchField(obj, "tv_kind"),
+            adult = searchField(obj, "adult"),
+            sort = searchField(obj, "sort"),
+            page = searchField(obj, "page"),
+        )
+        return when (result) {
+            is CrawlerQueryResult.Bad ->
+                "{\"id\":$id,\"ok\":false,\"error\":\"bad_request: ${result.field}\"}"
+            is CrawlerQueryResult.Ok -> {
+                val body = fetchCrawlerJson(result.path)
+                    ?: return "{\"id\":$id,\"ok\":false,\"error\":\"unavailable\"}"
+                val isObject = try {
+                    JSONObject(body)
+                    true
+                } catch (e: Exception) {
+                    false
+                }
+                if (!isObject) "{\"id\":$id,\"ok\":false,\"error\":\"db_error\"}"
+                else "{\"id\":$id,\"ok\":true,\"payload\":$body}"
+            }
+        }
+    }
+
+    /** Reads a text field from a parsed frame; JSON null and absent keys are null. */
+    private fun searchField(obj: JSONObject, key: String): String? {
+        val v = obj.opt(key) ?: return null
+        if (v == JSONObject.NULL) return null
+        return v.toString()
     }
 
     private fun urlEnc(s: String): String = URLEncoder.encode(s, "UTF-8")
@@ -1016,6 +1146,107 @@ class ControlServer(
         internal fun esc(s: String): String =
             s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 .replace("\"", "&quot;")
+
+        /** One /search/ws query-builder outcome (search-dashboard stage 2). */
+        internal sealed interface CrawlerQueryResult {
+            data class Ok(val path: String) : CrawlerQueryResult
+            data class Bad(val field: String) : CrawlerQueryResult
+        }
+
+        private val SEARCH_CATEGORIES = setOf(
+            "unknown", "movie", "tv", "anime", "music", "audiobook",
+            "ebook", "comic", "software", "game", "image", "other")
+        private val SEARCH_TV_KINDS = setOf(
+            "none", "episode", "multi_episode", "season_pack",
+            "multi_season", "complete_series", "daily")
+        private val SEARCH_ADULT_MODES = setOf("hide", "show", "only")
+        private val SEARCH_SORTS = setOf("peers", "added", "size")
+
+        /**
+         * Validates one /search/ws request and builds the crawler loopback path
+         * (+query) for it, or reports the single offending field. The path is
+         * built only from enumerated/parsed values with a deterministic param
+         * order; absent optional params are omitted so the crawler defaults
+         * apply. `q` is percent-encoded (URLEncoder, UTF-8). Pure: no Android,
+         * no network, so it is unit-testable.
+         */
+        internal fun buildCrawlerQuery(
+            type: String?,
+            q: String?,
+            category: String?,
+            tvKind: String?,
+            adult: String?,
+            sort: String?,
+            page: String?,
+        ): CrawlerQueryResult {
+            if (type != "search" && type != "browse" && type != "random") {
+                return CrawlerQueryResult.Bad("type")
+            }
+            val cat = category?.takeIf { it.isNotEmpty() }
+            if (cat != null && cat !in SEARCH_CATEGORIES) return CrawlerQueryResult.Bad("category")
+            val tv = tvKind?.takeIf { it.isNotEmpty() }
+            if (tv != null && tv !in SEARCH_TV_KINDS) return CrawlerQueryResult.Bad("tv_kind")
+            val ad = adult?.takeIf { it.isNotEmpty() }
+            if (ad != null && ad !in SEARCH_ADULT_MODES) return CrawlerQueryResult.Bad("adult")
+
+            val parts = mutableListOf<String>()
+            if (type == "search") {
+                if (q.isNullOrBlank()) return CrawlerQueryResult.Bad("q")
+                parts += "q=" + URLEncoder.encode(q, "UTF-8")
+            }
+            if (cat != null) parts += "category=$cat"
+            if (tv != null) parts += "tv_kind=$tv"
+            if (ad != null) parts += "adult=$ad"
+            if (type == "browse") {
+                val s = sort?.takeIf { it.isNotEmpty() }
+                if (s != null && s !in SEARCH_SORTS) return CrawlerQueryResult.Bad("sort")
+                if (s != null) parts += "sort=$s"
+            }
+            if (type == "random") parts += "min_peers=10"
+            if (type != "random") {
+                // page applies to search/browse only; absent -> crawler default 1.
+                val raw = page?.takeIf { it.isNotEmpty() }
+                if (raw != null) {
+                    val n = raw.toIntOrNull()
+                    if (n == null || n < 1) return CrawlerQueryResult.Bad("page")
+                    parts += "page=$n"
+                }
+            }
+            val base = "/$type"
+            return CrawlerQueryResult.Ok(
+                if (parts.isEmpty()) base else "$base?" + parts.joinToString("&"))
+        }
+
+        /**
+         * Throwaway /search page (search-dashboard stage 2): proves the
+         * /search/ws round-trip. Replies are written with `textContent`, never
+         * `innerHTML`, so the crawler payload can never inject markup.
+         */
+        internal fun buildSearchPageStub(): String = """
+            <!doctype html><html><head><meta charset="utf-8">
+            <title>Search (stub)</title>
+            <style>body{font-family:system-ui,sans-serif;max-width:720px;margin:2em auto;padding:0 1em}
+            input,button{padding:6px;margin:.3em 0} pre{background:#111;color:#0f0;padding:1em;overflow:auto;max-height:60vh}</style>
+            </head><body>
+            <h1>Search (throwaway stub)</h1>
+            <p><input id="q" placeholder="query (search)"><button onclick="send('search')">search</button></p>
+            <p><button onclick="send('browse',{category:'music'})">browse music</button>
+            <button onclick="send('random',{category:'music'})">random music</button></p>
+            <pre id="out"></pre>
+            <script>
+            var seq=0;
+            var ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/search/ws'+location.search);
+            ws.onmessage=function(e){document.getElementById('out').textContent+=e.data+"\n";};
+            ws.onerror=function(){document.getElementById('out').textContent+="[ws error]\n";};
+            function send(type,extra){
+              var m={id:++seq,type:type};
+              if(type==='search'){m.q=document.getElementById('q').value;}
+              if(extra){for(var k in extra){m[k]=extra[k];}}
+              ws.send(JSON.stringify(m));
+            }
+            </script>
+            </body></html>
+        """.trimIndent()
 
         /** Shared CSS for the simple settings/display pages. */
         private val panelCss = """

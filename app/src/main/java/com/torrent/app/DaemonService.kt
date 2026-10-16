@@ -144,6 +144,10 @@ class DaemonService : Service() {
     // Stage 5: in-memory rate limit for failed BEP51 bootstrap attempts —
     // a failure is not retried (on a later start) for at least one hour.
     @Volatile private var bep51BootstrapFailureAt: Long? = null
+    // Search-dashboard stage 2: one add handler shared by the :8090
+    // /api/transmission/add route and the crawler-proxy route; built once in
+    // onCreate (needs configStore + gateway).
+    @Volatile private var crawlerAddHandler: CrawlerAddHandler? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -287,6 +291,11 @@ class DaemonService : Service() {
         // loopback as a placeholder) so it is always listed in the daemons
         // table; the wifi gate rebinds it to the real IP before any start.
         registerFtpSupervisor("127.0.0.1")
+        crawlerAddHandler = CrawlerAddHandler(
+            store = configStore,
+            gateway = { gateway },
+            crawlerDbFile = { File(filesDir, "crawler/data/torrents.db") },
+        )
         controlServer = ControlServer(
             tokenManager = tokenManager,
             serviceState = _state,
@@ -318,6 +327,7 @@ class DaemonService : Service() {
             crawlerBackupDbUpload = { dbBackup.uploadNow(manual = true).message },
             crawlerBackupDbStatus = { dbBackup.status },
             crawlerRestoreDb = { dbRestore.restoreNow().message },
+            addHandler = crawlerAddHandler,
             crawlerRestoreDbStatus = { dbRestore.status },
 )
         wifiGateMonitor = WifiGateMonitor(this)
@@ -787,13 +797,10 @@ class DaemonService : Service() {
         val existing = crawlerProxy
         if (existing != null && existing.port == s.proxyPort) return
         existing?.stop()
-        // Plan 11 D2: magnet add endpoint. The DB file is the same one
-        // [crawlerDbSize] reads (filesDir/crawler/data per CrawlerConfig).
-        val addHandler = CrawlerAddHandler(
-            store = configStore,
-            gateway = { gateway },
-            crawlerDbFile = { File(filesDir, "crawler/data/torrents.db") },
-        )
+        // Plan 11 D2: magnet add endpoint. The handler is shared with the
+        // :8090 ControlServer route and built once in onCreate. The DB file is
+        // the same one [crawlerDbSize] reads (filesDir/crawler/data).
+        val addHandler = crawlerAddHandler ?: return
         val proxy = CrawlerProxyServer(
             tokenManager = tokenManager,
             crawlerHttpPort = ::crawlerHttpPort,
