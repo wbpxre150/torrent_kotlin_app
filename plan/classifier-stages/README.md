@@ -2,7 +2,9 @@
 
 Per-stage implementation packets live here, one file per stage, implemented **one at a time** via
 `/dev <stage file>` (dev-workflow). `plan/classifier.md` is the design/research doc; `plan/classifier-stages.md`
-is a stub pointing here. Stages 3–4 target repo **`~/apps/classifier-model`**; stages 5–10 target **this app**.
+is a stub pointing here. Stages 3–4 target repo **`~/apps/classifier-model`**; stages 5–8 target **this app**;
+Stage 9 targets `~/apps/classifier-model` (PC); Stage 10 targets `~/apps/classifier-model` + the vendored
+`~/apps/dht_crawler` (PC — no phone).
 
 **Stages 0–2 are complete** and their packets were removed (2026-10-15). Stage 2's gold pass was
 dropped — the user hand-checked the teacher's `adult` labels and accepted them — so the ~53k
@@ -47,5 +49,5 @@ This applies to Stage 10 (and any ad-hoc teacher probe; it applied to Stage 2 wh
 | 7 Search/UI | `stage-07-search-dashboard.md` | app | M–L | — |
 | 8 Phone backfill | `stage-08-phone-backfill.md` | app | M | — |
 | 9 PC backfill | `stage-09-pc-backfill.md` | classifier-model | M | long run (measure first) |
-| 10 Feedback | `stage-10-feedback-loop.md` | both | M | — |
+| 10 Teacher audit | `stage-10-feedback-loop.md` | classifier-model + dht_crawler | M | ~3 h teacher run (parent) |
 

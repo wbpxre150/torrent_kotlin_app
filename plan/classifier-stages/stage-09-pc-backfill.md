@@ -47,3 +47,23 @@ the phone — parity between the two paths is the point).
 ## Commit
 
 `classifier-model: stage 9 — tclassify-db host backfill of the 34M DB + phone import procedure`
+
+## Measurement (recorded 2026-10-16, by parent before the full run)
+
+- **DB reality check:** the stage-0 facts were stale. `~/torrents.db` has `MAX(id) = 34,398,754`
+  (that figure was the id ceiling, not the live count) and **7,765,374 live torrents** (~78% of
+  ids deleted by spam cleanup) with **401,752,919 live file rows** (not 1.41B).
+- Copy via online backup API (`sqlite3 ~/torrents.db ".backup ~/torrents-classified.db"`),
+  79 GB in ~4.5 min; `torrent_class`/`classifier_meta` created on the copy with the crawler's
+  exact stage-5 DDL (the original predates the classifier schema). Original bit-untouched
+  (size 83,770,822,656, mtime 2026-10-13 16:15:12 — re-verified after every run).
+- **1M-row measure:** single-process **~1,200–1,330 rows/s** (kill-test segment: 72,000 rows in
+  60 s; two full --limit 1000000 passes: 1,329.5 and 1,301.1 rows/s). Kill -9 + restart resumed
+  from checkpoint with **zero missing/duplicate rows** (coverage verified by SQL: every live id
+  ≤ ckpt has exactly one class row; count == distinct). An accidental concurrent double-run
+  (kill hit the wrapping subshell, not the binary) stressed the upsert: both instances wrote
+  idempotently, final state 1,114,000 distinct rows ≤ ckpt 2,252,565, 0 strays, 0 tparse rejects.
+- **Extrapolated full run:** 6,651,374 rows remaining at ~1,300 rows/s ≈ **85–90 min** (row work
+  dominates over the sparse-id scan; later ranges are ~21% live density, so allow up to ~2 h).
+- Phone import procedure (criterion 4) is deferred: stage 8 proved the phone import machinery;
+  the 34M DB stays on the PC (this stage's audit consumer).
