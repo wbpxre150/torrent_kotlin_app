@@ -49,6 +49,7 @@ object CrawlerKeys {
         "tree_get_peers_timeout_ms", "tree_metadata_workers", "tree_tcp_connect_timeout_ms",
         "tree_parallel_peers", "udp_rate_limit_pps",
         "tree_metadata_fresh_peer_retries",
+        "tree_metadata_timeout_ms",
         // Rate-based respawn
         "min_metadata_rate", "dynamic_rate_margin", "tree_rate_check_interval_sec",
         "tree_rate_grace_period_sec", "tree_min_lifetime_minutes", "tree_require_empty_queue",

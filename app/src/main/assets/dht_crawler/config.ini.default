@@ -122,6 +122,8 @@ tree_tcp_connect_timeout_ms = 2000
 udp_rate_limit_pps = 1500
 # Fresh-peer re-lookup retries in the metadata failure path before a failure strike (0 = disable)
 tree_metadata_fresh_peer_retries = 1
+# Metadata fetch deadline per tree in milliseconds (5000-600000)
+tree_metadata_timeout_ms = 60000
 
 # ==== Rate-Based Respawn ====
 min_metadata_rate = 0.005

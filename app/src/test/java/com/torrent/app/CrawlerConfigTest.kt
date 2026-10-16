@@ -136,6 +136,7 @@ class CrawlerConfigTest {
         assertEquals("127.0.0.1", ini["http_bind"])
         assertEquals("1500", ini["udp_rate_limit_pps"])
         assertEquals("1", ini["tree_metadata_fresh_peer_retries"])
+        assertEquals("60000", ini["tree_metadata_timeout_ms"])
         // Stage 6 adult handling: classifier + calibrated thresholds + hard-block list
         assertEquals("1", ini["classifier_enabled"])
         assertEquals("models/v1", ini["classifier_model_dir"])
@@ -331,6 +332,24 @@ class CrawlerConfigTest {
             // Comments and unrelated keys are preserved
             assertTrue(text.contains("# DHT Crawler Configuration File"))
             assertEquals("data/torrents.db", ini["db_path"])
+        }
+
+        @Test fun renderManaged_advancedOverrideLandsTreeMetadataTimeoutMs() {
+            val cfg = configWithRealDefaultAsset()
+            cfg.ensureLayout()
+
+            cfg.applySettings(
+                CrawlerSettings(advancedOverrides = "tree_metadata_timeout_ms=5000")
+            )
+            val ini = CrawlerConfig.parseIni(cfg.configFile.readText())
+            assertEquals("5000", ini["tree_metadata_timeout_ms"])
+            // An unknown key is still rejected and never written through.
+            cfg.applySettings(
+                CrawlerSettings(advancedOverrides = "not_a_real_key=1")
+            )
+            val after = CrawlerConfig.parseIni(cfg.configFile.readText())
+            assertNull(after["not_a_real_key"])
+            assertFalse(after.containsKey("not_a_real_key"))
         }
 
         @Test fun renderManaged_lanDirectBindsAllInterfacesOnProxyPort() {

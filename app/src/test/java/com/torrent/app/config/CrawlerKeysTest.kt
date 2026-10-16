@@ -95,6 +95,14 @@ class CrawlerKeysTest {
         assertTrue("tree_metadata_fresh_peer_retries must be advanced-overridable", "tree_metadata_fresh_peer_retries" in CrawlerKeys.ALLOWED_ADVANCED_KEYS)
         assertFalse("tree_metadata_fresh_peer_retries must not be form-managed", "tree_metadata_fresh_peer_retries" in CrawlerKeys.FORM_MANAGED_KEYS)
     }
+    @Test fun parseAdvanced_allowsTreeMetadataTimeoutMsKey() {
+        val r = CrawlerKeys.parseAdvanced("tree_metadata_timeout_ms=5000")
+        assertTrue(r.ok)
+        assertEquals("5000", r.entries["tree_metadata_timeout_ms"])
+        assertTrue("tree_metadata_timeout_ms must be known", "tree_metadata_timeout_ms" in CrawlerKeys.KNOWN_KEYS)
+        assertTrue("tree_metadata_timeout_ms must be advanced-overridable", "tree_metadata_timeout_ms" in CrawlerKeys.ALLOWED_ADVANCED_KEYS)
+        assertFalse("tree_metadata_timeout_ms must not be form-managed", "tree_metadata_timeout_ms" in CrawlerKeys.FORM_MANAGED_KEYS)
+    }
 
     @Test fun parseAdvanced_laterDuplicatesWin() {
         val r = CrawlerKeys.parseAdvanced("batch_size=100\nbatch_size=200\n")
