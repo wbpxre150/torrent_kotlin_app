@@ -135,6 +135,7 @@ class CrawlerConfigTest {
         assertEquals("8081", ini["http_port"])
         assertEquals("127.0.0.1", ini["http_bind"])
         assertEquals("1500", ini["udp_rate_limit_pps"])
+        assertEquals("1", ini["tree_metadata_fresh_peer_retries"])
         // Stage 6 adult handling: classifier + calibrated thresholds + hard-block list
         assertEquals("1", ini["classifier_enabled"])
         assertEquals("models/v1", ini["classifier_model_dir"])

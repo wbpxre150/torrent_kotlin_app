@@ -203,6 +203,9 @@ class ConfigValidatorTest {
     @Test fun crawlerAdvancedUdpRateLimit_passes() {
         assertTrue(ConfigValidator.validateCrawler(validCrawler().copy(advancedOverrides = "udp_rate_limit_pps=800")).isEmpty())
     }
+    @Test fun crawlerAdvancedTreeMetadataFreshPeerRetries_passes() {
+        assertTrue(ConfigValidator.validateCrawler(validCrawler().copy(advancedOverrides = "tree_metadata_fresh_peer_retries=2")).isEmpty())
+    }
 
     private fun validBackup() = BackupSettings(
         r2Endpoint = "https://acme.r2.cloudflarestorage.com",

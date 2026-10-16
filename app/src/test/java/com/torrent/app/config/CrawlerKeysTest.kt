@@ -88,6 +88,13 @@ class CrawlerKeysTest {
         assertTrue("udp_rate_limit_pps must be advanced-overridable", "udp_rate_limit_pps" in CrawlerKeys.ALLOWED_ADVANCED_KEYS)
         assertFalse("udp_rate_limit_pps must not be form-managed", "udp_rate_limit_pps" in CrawlerKeys.FORM_MANAGED_KEYS)
     }
+    @Test fun parseAdvanced_allowsTreeMetadataFreshPeerRetriesKey() {
+        val r = CrawlerKeys.parseAdvanced("tree_metadata_fresh_peer_retries=2")
+        assertTrue(r.ok)
+        assertEquals("2", r.entries["tree_metadata_fresh_peer_retries"])
+        assertTrue("tree_metadata_fresh_peer_retries must be advanced-overridable", "tree_metadata_fresh_peer_retries" in CrawlerKeys.ALLOWED_ADVANCED_KEYS)
+        assertFalse("tree_metadata_fresh_peer_retries must not be form-managed", "tree_metadata_fresh_peer_retries" in CrawlerKeys.FORM_MANAGED_KEYS)
+    }
 
     @Test fun parseAdvanced_laterDuplicatesWin() {
         val r = CrawlerKeys.parseAdvanced("batch_size=100\nbatch_size=200\n")
