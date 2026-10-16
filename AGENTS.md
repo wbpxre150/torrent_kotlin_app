@@ -46,7 +46,7 @@ torrent_kotlin_app/
 │       │   │   ├── transmission-fork/     # apply_fork.py + SAF fork sources (tests/)
 │       │   │   └── ftp-server/            # hand-written C11 FTP daemon (+ host/ test build)
 │       │   ├── assets/dht_crawler/config.ini.default   # sanitized crawler config template
-│       │   └── jniLibs/arm64-v8a/    # checked-in lib*.so (native binaries, exec'd not dlopen'd)
+│       │   └── jniLibs/arm64-v8a/    # gitignored lib*.so build outputs (exec'd not dlopen'd)
 │       └── test/java/com/torrent/app/ # unit tests mirroring main packages (NO androidTest)
 └── tools/
     ├── ftp-host-test.sh              # host smoke test for the FTP daemon
@@ -139,8 +139,9 @@ See the vendored repo's `CLAUDE.md` for its architecture (thread trees, bloom fi
    `transmission-fork/apply_fork.py` (idempotent, marker-gated) or its fork files.
 3. **Exec binaries in place** from `nativeLibraryDir` — do not extract to a writable work dir
    (W^X / SELinux `apk_data_file`); both `ProcessSupervisor` and `OneShotRunner` rely on this.
-4. **`jniLibs/arm64-v8a/*.so` are checked in.** After native source changes, re-run the Gradle build
-   tasks to regenerate them.
+4. **`jniLibs/arm64-v8a/*.so` are gitignored build outputs** (only `.gitkeep` is tracked);
+   `mergeDebugJniLibFolders` depends on `buildTransmission`/`buildDhtCrawler`/`buildFtpServer`,
+   so every build regenerates them — after native source changes, re-run the Gradle build tasks.
 5. **`mergeSettingsJson` overwrites only app-managed keys**; daemon-owned session keys must be
    preserved verbatim (a full overwrite would reset live state).
 6. **SAF locking:** per-path `ReentrantLock` always acquired descendant→ancestor; all SAF access
