@@ -81,6 +81,13 @@ class CrawlerKeysTest {
         assertTrue(r.ok)
         assertEquals("40", r.entries["porn_filter_non_latin_threshold"])
     }
+    @Test fun parseAdvanced_allowsUdpRateLimitKey() {
+        val r = CrawlerKeys.parseAdvanced("udp_rate_limit_pps=800")
+        assertTrue(r.ok)
+        assertEquals("800", r.entries["udp_rate_limit_pps"])
+        assertTrue("udp_rate_limit_pps must be advanced-overridable", "udp_rate_limit_pps" in CrawlerKeys.ALLOWED_ADVANCED_KEYS)
+        assertFalse("udp_rate_limit_pps must not be form-managed", "udp_rate_limit_pps" in CrawlerKeys.FORM_MANAGED_KEYS)
+    }
 
     @Test fun parseAdvanced_laterDuplicatesWin() {
         val r = CrawlerKeys.parseAdvanced("batch_size=100\nbatch_size=200\n")
