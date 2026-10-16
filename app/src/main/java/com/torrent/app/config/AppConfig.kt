@@ -20,18 +20,18 @@ data class FtpSettings(
 
 data class CrawlerSettings(
     val enabled: Boolean = true,
-    /** Start/stop only on wifi (default on: the crawler is bandwidth heavy). */
-    val wifiOnly: Boolean = true,
+    /** Start/stop only on wifi (default off: the crawler may run on any network). */
+    val wifiOnly: Boolean = false,
     val logLevel: String = "INFO",
     val dhtPort: Int = 6881,
     val niceLevel: Int = 10,
-    val numTrees: Int = 16,
+    val numTrees: Int = 32,
     val treeFindNodeWorkers: Int = 3,
-    val treeBep51Workers: Int = 5,
-    val treeGetPeersWorkers: Int = 8,
+    val treeBep51Workers: Int = 3,
+    val treeGetPeersWorkers: Int = 18,
     val treeMetadataWorkers: Int = 12,
-    val treeInfohashQueueCapacity: Int = 3000,
-    val treePeersQueueCapacity: Int = 3000,
+    val treeInfohashQueueCapacity: Int = 500,
+    val treePeersQueueCapacity: Int = 500,
     val pornFilterEnabled: Boolean = true,
     val languageFilterNonLatinThreshold: Int = 33,
     /** Ingest-time classifier (`classifier_enabled`; default on). */
@@ -50,7 +50,7 @@ data class CrawlerSettings(
     val failureBloomCapacity: Int = 30_000_000,
     val bloomErrorRate: Double = 0.001,
     /** Raw `key=value` advanced overrides, checked against the CrawlerKeys allow-list. */
-    val advancedOverrides: String = "",
+    val advancedOverrides: String = "tree_metadata_timeout_ms = 60000\nudp_rate_limit_pps = 2500",
     /** LAN port of the authenticated reverse proxy in front of the crawler UI. */
     val proxyPort: Int = 8080,
     /** Loopback HTTP port of the crawler itself. */

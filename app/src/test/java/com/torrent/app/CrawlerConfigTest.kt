@@ -128,10 +128,12 @@ class CrawlerConfigTest {
         assertEquals("0", ini["ssh_backup_enabled"])
         assertEquals("0", ini["rclone_backup_enabled"])
         assertEquals("10", ini["nice_level"])
-        assertEquals("16", ini["num_trees"])
-        assertEquals("5", ini["tree_bep51_workers"])
-        assertEquals("8", ini["tree_get_peers_workers"])
+        assertEquals("32", ini["num_trees"])
+        assertEquals("3", ini["tree_bep51_workers"])
+        assertEquals("18", ini["tree_get_peers_workers"])
         assertEquals("12", ini["tree_metadata_workers"])
+        assertEquals("500", ini["tree_infohash_queue_capacity"])
+        assertEquals("500", ini["tree_peers_queue_capacity"])
         assertEquals("8081", ini["http_port"])
         assertEquals("127.0.0.1", ini["http_bind"])
         assertEquals("2500", ini["udp_rate_limit_pps"])
@@ -196,8 +198,10 @@ class CrawlerConfigTest {
             assertEquals("0", ini["ssh_backup_enabled"])
             assertEquals("0", ini["rclone_backup_enabled"])
             assertEquals("10", ini["nice_level"])
-            assertEquals("16", ini["num_trees"])
+            assertEquals("32", ini["num_trees"])
 
+            assertEquals("500", ini["tree_infohash_queue_capacity"])
+            assertEquals("500", ini["tree_peers_queue_capacity"])
             for (name in CrawlerConfig.KEYWORD_FILES) {
                 val f = File(cfg.workDir, name)
                 assertTrue("$name should be copied from assets", f.exists() && f.length() > 0)
@@ -434,7 +438,7 @@ class CrawlerConfigTest {
             assertTrue(cfg.readIni().isEmpty())
             cfg.ensureLayout()
             val ini = cfg.readIni()
-            assertEquals("16", ini["num_trees"])
+            assertEquals("32", ini["num_trees"])
             assertEquals("127.0.0.1", ini["http_bind"])
         }
 

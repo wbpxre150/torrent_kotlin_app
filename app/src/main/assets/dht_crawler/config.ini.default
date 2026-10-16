@@ -90,7 +90,7 @@ global_bootstrap_timeout_sec = 600
 global_bootstrap_workers = 20
 
 # ==== Thread Tree Architecture ====
-num_trees = 16
+num_trees = 32
 use_keyspace_partitioning=1
 dead_partition_threshold = 3
 max_trees_per_partition = 4
@@ -99,19 +99,19 @@ max_trees_per_partition = 4
 # find_node workers per tree
 tree_find_node_workers = 3
 # BEP51 sample_infohashes workers per tree
-tree_bep51_workers = 5
+tree_bep51_workers = 3
 # get_peers workers per tree
-tree_get_peers_workers = 8
+tree_get_peers_workers = 18
 # Metadata workers per tree
 tree_metadata_workers = 12
 # Infohash queue capacity per tree
-tree_infohash_queue_capacity = 3000
+tree_infohash_queue_capacity = 500
 # BEP51 query interval in milliseconds
 tree_bep51_query_interval_ms = 5
 # BEP51 per-node query cooldown in seconds
 bep51_node_cooldown_sec = 3
 # Peers queue capacity per tree
-tree_peers_queue_capacity = 3000
+tree_peers_queue_capacity = 500
 # get_peers timeout per tree in milliseconds
 tree_get_peers_timeout_ms = 1500
 # Peers to attempt in parallel per infohash
