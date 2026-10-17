@@ -1223,10 +1223,10 @@ class ControlServer(
         /**
          * The /search page (search-dashboard stage 3a): a static, self-contained
          * blue phone search shell. All markup, CSS and JS are inline — no
-         * external assets, no CDN, no fonts. This stage ships only the shell
-         * plus one inert script placeholder; the search/browse/random/infinite
-         * scroll/add-button logic arrives in stage 3b, which will replace
-         * [SEARCH_JS] and wire it to the authenticated /search/ws feed.
+         * external assets, no CDN, no fonts. The search/browse/random/
+         * infinite-scroll/add-button interaction logic lives in [SEARCH_JS],
+         * wired to the authenticated /search/ws feed (token via
+         * `location.search`).
          * [proxyOrigin] is the crawler proxy origin (3b uses it for per-torrent
          * detail links); it defaults to the loopback address so the page stays
          * unit-testable without a running app.
@@ -1241,12 +1241,12 @@ class ControlServer(
             <style>$SEARCH_CSS</style>
             </head>
             <body>
-            <!-- Shell only: stage 3b wires this page to the authenticated /search/ws feed (token via location.search). -->
+            <!-- Search page: wired to the authenticated /search/ws feed (token via location.search). -->
             <div class="wrap">
             <header>
               <h1>Search</h1>
               <nav>
-                <a href="/stats">Dashboard</a>
+                <a href="/">Dashboard</a>
                 <a href="/stats">Crawler stats</a>
                 <span id="live" aria-label="live" title="live"></span>
               </nav>
@@ -1294,10 +1294,12 @@ class ControlServer(
               <button class="chip" type="button" data-adult="only" aria-pressed="false">Only</button>
             </div>
             <div id="results-status">Pick a category to browse</div>
+            <div id="banner" class="banner" hidden></div>
             <div id="spinner" hidden aria-hidden="true"></div>
             <div id="results"></div>
             <div id="sentinel"></div>
             <button id="load-more" class="btn secondary" type="button" hidden>Load more</button>
+            <div id="toast" class="toast" hidden></div>
             </div>
             <script>
             const proxyOrigin = '$proxyOrigin';
@@ -1351,14 +1353,471 @@ class ControlServer(
             #sentinel{height:1px}
             #load-more{display:inline-flex;margin:16px auto}
             #load-more[hidden]{display:none}
+            #live.wait{background:#f9ab00}
+            .hidden{display:none}
+            .banner{padding:.6em .8em;border-radius:8px;margin:8px 0;font-size:.9rem}
+            .banner[hidden]{display:none}
+            .banner.red{background:#fce8e6;color:#c5221f}
+            .banner.amber{background:#fef7e0;color:#7a5900}
+            .card{background:var(--card);border:1px solid #e3e7ee;border-radius:12px;padding:12px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+            .card .name{font-weight:700;cursor:pointer;overflow-wrap:anywhere}
+            .card .name:hover{color:var(--blue)}
+            .filelist{margin:8px 0 0;padding:8px;background:#f5f7fa;border-radius:8px;font-size:.85rem}
+            .filelist .frow{display:flex;justify-content:space-between;gap:8px}
+            .filelist .frow span:first-child{overflow-wrap:anywhere}
+            .filelist .more{color:var(--muted);margin-top:4px}
+            .meta{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin-top:8px;font-size:.85rem;color:var(--muted)}
+            .badge{background:var(--chip);color:var(--blue);border-radius:10px;padding:1px 8px;font-size:.78rem;font-weight:600}
+            .peers.hi{color:#188038}
+            .peers.mid{color:#b06000}
+            .peers.lo{color:#9aa0a6}
+            .actions{display:flex;align-items:center;gap:14px;margin-top:10px}
+            .add-btn{min-height:40px;padding:0 16px}
+            .detail{color:var(--blue);text-decoration:none;font-size:1.1rem;font-weight:700;padding:8px}
+            .toast{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom));transform:translateX(-50%);max-width:90vw;padding:10px 16px;border-radius:8px;background:#202124;color:#fff;font-size:.9rem;z-index:60;box-shadow:0 2px 8px rgba(0,0,0,.3)}
+            .toast[hidden]{display:none}
+            .toast.err{background:#c5221f}
         """.trimIndent()
 
         /**
-         * Stage 3a inert script placeholder. Stage 3b replaces this with the
-         * real search/browse/random/infinite-scroll logic.
+         * The /search page interaction logic (search-dashboard stage 3b): the
+         * authenticated /search/ws client, category/TV/adult/sort controls,
+         * result cards, infinite scroll and the add-to-transmission button.
          */
         private val SEARCH_JS = """
-            // JS lands in stage 3b.
+            (function () {
+              'use strict';
+              var ws = null;
+              var backoff = 1000;
+              var MAX_BACKOFF = 30000;
+
+              var sel = { category: 'unknown', tv_kind: null, adult: 'hide', sort: 'peers' };
+              var current = null;
+              var seq = 0;
+              var activeId = 0;
+              var loading = false;
+              var autoLoadMore = false;
+              var observer = null;
+              var pendingAppend = false;
+              var pendingReq = null;
+              var toastTimer = null;
+
+              function el(id) { return document.getElementById(id); }
+
+              function setLive(state, label) {
+                var s = el('live');
+                s.className = state === 'ok' ? 'on' : (state === 'wait' ? 'wait' : '');
+                if (label) s.title = label;
+              }
+
+              function statusText(t) { el('results-status').textContent = t; }
+
+              function setLoading(on) {
+                loading = !!on;
+                var sp = el('spinner');
+                if (on) sp.removeAttribute('hidden');
+                else sp.setAttribute('hidden', '');
+              }
+
+              function showBanner(kind, msg) {
+                var b = el('banner');
+                b.textContent = msg;
+                b.className = 'banner ' + kind;
+                b.removeAttribute('hidden');
+              }
+
+              function hideBanner() { el('banner').setAttribute('hidden', ''); }
+
+              function toast(msg, isErr) {
+                var t = el('toast');
+                t.textContent = msg;
+                t.className = 'toast' + (isErr ? ' err' : '');
+                t.removeAttribute('hidden');
+                if (toastTimer) clearTimeout(toastTimer);
+                toastTimer = setTimeout(function () { t.setAttribute('hidden', ''); }, 3000);
+              }
+
+              // Formatting helpers. All data reaches the DOM via textContent only.
+              function fmtBytes(b) {
+                if (typeof b !== 'number' || !isFinite(b)) return '—';
+                var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+                var i = 0;
+                while (b >= 1024 && i < units.length - 1) { b = b / 1024; i++; }
+                var v = i === 0 ? b : Math.round(b * 10) / 10;
+                return v + ' ' + units[i];
+              }
+
+              // `added` is an epoch-seconds or epoch-millis number; disambiguate
+              // by magnitude (current seconds ~1.7e9, millis ~1.7e12).
+              function relAge(added) {
+                if (typeof added !== 'number' || !isFinite(added) || added <= 0) return '';
+                var ms = added < 1e12 ? added * 1000 : added;
+                var d = Date.now() - ms;
+                if (d < 0) d = 0;
+                var s = Math.floor(d / 1000);
+                if (s < 60) return s + 's ago';
+                var m = Math.floor(s / 60);
+                if (m < 60) return m + 'm ago';
+                var h = Math.floor(m / 60);
+                if (h < 24) return h + 'h ago';
+                var dd = Math.floor(h / 24);
+                if (dd < 30) return dd + 'd ago';
+                var mo = Math.floor(dd / 30);
+                if (mo < 12) return mo + 'mo ago';
+                return Math.floor(mo / 12) + 'y ago';
+              }
+
+              function sortLabel(s) {
+                return s === 'added' ? 'newest' : (s === 'size' ? 'largest' : 'peers');
+              }
+
+              function badge(text) {
+                var b = document.createElement('span');
+                b.className = 'badge';
+                b.textContent = text;
+                return b;
+              }
+
+              function fillFilelist(box, r) {
+                var files = r.files || [];
+                var shown = Math.min(files.length, 10);
+                for (var i = 0; i < shown; i++) {
+                  var row = document.createElement('div');
+                  row.className = 'frow';
+                  var p = document.createElement('span');
+                  p.textContent = files[i].path != null ? String(files[i].path) : '';
+                  var sz = document.createElement('span');
+                  sz.textContent = files[i].size != null
+                    ? String(files[i].size) : fmtBytes(files[i].size_bytes);
+                  row.appendChild(p);
+                  row.appendChild(sz);
+                  box.appendChild(row);
+                }
+                var total = typeof r.num_files === 'number' ? r.num_files : files.length;
+                if (total > 10) {
+                  var more = document.createElement('div');
+                  more.className = 'more';
+                  more.textContent = '\u2026 and ' + (total - 10) + ' more';
+                  box.appendChild(more);
+                }
+              }
+
+              function buildCard(r) {
+                var card = document.createElement('div');
+                card.className = 'card';
+
+                var name = document.createElement('div');
+                name.className = 'name';
+                name.textContent = r.name != null ? String(r.name) : '(unnamed)';
+
+                var filelist = document.createElement('div');
+                filelist.className = 'filelist hidden';
+                var built = false;
+                name.onclick = function () {
+                  if (!built) { fillFilelist(filelist, r); built = true; }
+                  if (filelist.classList.contains('hidden')) filelist.classList.remove('hidden');
+                  else filelist.classList.add('hidden');
+                };
+                card.appendChild(name);
+                card.appendChild(filelist);
+
+                var meta = document.createElement('div');
+                meta.className = 'meta';
+                if (r.category) meta.appendChild(badge(String(r.category)));
+                if (r.tv_kind) meta.appendChild(badge(String(r.tv_kind)));
+
+                var size = document.createElement('span');
+                size.textContent = r.size != null ? String(r.size) : fmtBytes(r.size_bytes);
+                meta.appendChild(size);
+
+                var pc = typeof r.total_peers === 'number' ? r.total_peers : 0;
+                var peers = document.createElement('span');
+                peers.className = 'peers ' + (pc > 100 ? 'hi' : (pc > 10 ? 'mid' : 'lo'));
+                peers.textContent = pc + ' peers';
+                meta.appendChild(peers);
+
+                if (typeof r.added === 'number' && r.added > 0) {
+                  var age = document.createElement('span');
+                  age.textContent = relAge(r.added);
+                  meta.appendChild(age);
+                }
+
+                if (typeof r.confidence === 'number' && isFinite(r.confidence)) {
+                  var conf = document.createElement('span');
+                  var pct = r.confidence <= 1 ? r.confidence * 100 : r.confidence;
+                  conf.textContent = 'confidence ' + Math.round(pct) + '%';
+                  meta.appendChild(conf);
+                }
+                card.appendChild(meta);
+
+                var actions = document.createElement('div');
+                actions.className = 'actions';
+
+                var add = document.createElement('button');
+                add.type = 'button';
+                add.className = 'btn add-btn';
+                add.textContent = '\u2795 Add';
+                add.onclick = function () { addTorrent(r.info_hash, add); };
+                actions.appendChild(add);
+
+                var detail = document.createElement('a');
+                detail.className = 'detail';
+                detail.textContent = '\u2026';
+                detail.href = proxyOrigin + '/torrent?hash=' + encodeURIComponent(r.info_hash || '');
+                detail.target = '_blank';
+                detail.rel = 'noopener';
+                actions.appendChild(detail);
+
+                card.appendChild(actions);
+                return card;
+              }
+
+              function render(payload, wasAppend) {
+                hideBanner();
+                if (!payload || typeof payload !== 'object') {
+                  showBanner('red', 'Malformed response');
+                  return;
+                }
+                var req = pendingReq || {};
+                var box = el('results');
+                var results = payload.results || [];
+                if (!wasAppend) box.textContent = '';
+                for (var i = 0; i < results.length; i++) box.appendChild(buildCard(results[i]));
+
+                if (req.type === 'random') {
+                  current = null;
+                  statusText('Random pick');
+                  return;
+                }
+                var page = typeof payload.page === 'number' ? payload.page : (req.page || 1);
+                current = {
+                  type: req.type, q: req.q, category: req.category, tv_kind: req.tv_kind,
+                  adult: req.adult, sort: req.sort, page: page, has_more: !!payload.has_more
+                };
+                var n = typeof payload.total_count === 'number' ? payload.total_count : results.length;
+                var txt = n + (n === 1 ? ' result' : ' results');
+                if (req.type === 'browse') txt += ' \u00b7 sorted by ' + sortLabel(req.sort);
+                statusText(txt);
+              }
+
+              // A NEW query bumps activeId; a load-more append reuses it so the
+              // supersede marker stays stable across a multi-page result set.
+              function send(obj, append) {
+                if (!ws || ws.readyState !== 1) {
+                  setLoading(false);
+                  showBanner('amber', 'Not connected \u2014 reconnecting\u2026');
+                  return;
+                }
+                var id;
+                if (append && activeId) id = activeId;
+                else { id = ++seq; activeId = id; }
+                pendingAppend = !!append;
+                pendingReq = {
+                  type: obj.type, q: obj.q, category: obj.category,
+                  tv_kind: obj.tv_kind, adult: obj.adult, sort: obj.sort, page: obj.page
+                };
+                setLoading(true);
+                if (!append) statusText('Searching\u2026');
+                obj.id = id;
+                try { ws.send(JSON.stringify(obj)); }
+                catch (e) { setLoading(false); showBanner('red', 'Send failed'); }
+              }
+
+              function sendBrowse() {
+                send({
+                  type: 'browse', category: sel.category, tv_kind: sel.tv_kind,
+                  adult: sel.adult, sort: sel.sort, page: 1
+                }, false);
+              }
+
+              function loadMore() {
+                if (!current || !current.has_more || loading) return;
+                var c = current;
+                send({
+                  type: c.type, q: c.q, category: c.category, tv_kind: c.tv_kind,
+                  adult: c.adult, sort: c.sort, page: c.page + 1
+                }, true);
+              }
+
+              function handleError(err) {
+                err = err == null ? '' : String(err);
+                if (err === 'unavailable') {
+                  setLive('down', 'unavailable');
+                  showBanner('amber', 'Crawler is starting or stopped');
+                } else if (err === 'db_error') {
+                  showBanner('red', 'Crawler database error');
+                } else if (err.indexOf('bad_request') === 0) {
+                  var field = err.indexOf('bad_request:') === 0 ? err.slice(12).trim() : '';
+                  showBanner('red', field ? 'Bad request: ' + field : 'Bad request');
+                } else {
+                  showBanner('red', 'Request failed');
+                }
+              }
+
+              function onMessage(ev) {
+                var data;
+                try { data = JSON.parse(ev.data); } catch (e) { return; }
+                // Latest-reply-wins: drop any frame that has been superseded.
+                if (!data || typeof data.id !== 'number' || data.id !== activeId) return;
+                setLoading(false);
+                if (data.ok) {
+                  setLive('ok', 'live');
+                  render(data.payload, pendingAppend);
+                } else {
+                  if (pendingAppend) current = null;
+                  handleError(data.error);
+                }
+              }
+
+              function connect() {
+                var proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+                // Same-origin upgrade: the control_token cookie rides along and
+                // a ?token= in the page URL does too. Never inline the token.
+                ws = new WebSocket(proto + location.host + '/search/ws' + location.search);
+                ws.onopen = function () {
+                  backoff = 1000;
+                  setLive('ok', 'live');
+                  hideBanner();
+                  setLoading(false);
+                  if (!current) statusText('Live \u2014 pick a category to browse');
+                };
+                ws.onmessage = onMessage;
+                ws.onclose = function () {
+                  setLive('wait', 'reconnecting');
+                  setLoading(false);
+                  showBanner('amber', 'Connecting\u2026 (search feed unavailable)');
+                  var wait = backoff;
+                  backoff = Math.min(backoff * 2, MAX_BACKOFF);
+                  setTimeout(connect, wait);
+                };
+                ws.onerror = function () { try { ws.close(); } catch (e) {} };
+              }
+
+              function setupObserver() {
+                if (typeof window.IntersectionObserver !== 'function') {
+                  // Fallback: expose the explicit Load more button.
+                  var lm = el('load-more');
+                  lm.removeAttribute('hidden');
+                  lm.onclick = function () { loadMore(); };
+                  return;
+                }
+                observer = new IntersectionObserver(function (entries) {
+                  for (var i = 0; i < entries.length; i++) {
+                    if (entries[i].isIntersecting && current && current.has_more && !loading) {
+                      loadMore();
+                    }
+                  }
+                }, { rootMargin: '150px' });
+                observer.observe(el('sentinel'));
+              }
+
+              function addTorrent(hash, btn) {
+                if (!hash) { toast('Bad info hash', true); return; }
+                btn.disabled = true;
+                fetch('/api/transmission/add?hash=' + encodeURIComponent(hash), { method: 'POST' })
+                  .then(function (resp) { return resp.json(); })
+                  .then(function (d) {
+                    btn.disabled = false;
+                    if (!d || !d.ok) {
+                      var map = {
+                        bad_hash: 'Bad info hash',
+                        db_unavailable: 'Crawler DB unavailable',
+                        not_found: 'Torrent not found in the crawler DB',
+                        no_storage: 'No storage configured',
+                        insufficient_space: 'Not enough free space',
+                        rpc_failed: 'Transmission RPC error'
+                      };
+                      toast((d && map[d.error]) ? map[d.error] : 'Add failed', true);
+                      return;
+                    }
+                    toast(d.duplicate ? 'Already added (duplicate)' : 'Added to Transmission', false);
+                  })
+                  .catch(function () { btn.disabled = false; toast('Add failed', true); });
+              }
+
+              function selectOnly(row, chip) {
+                var chips = row.querySelectorAll('.chip');
+                for (var i = 0; i < chips.length; i++) {
+                  chips[i].setAttribute('aria-pressed', chips[i] === chip ? 'true' : 'false');
+                }
+              }
+
+              function clearResults() {
+                el('results').textContent = '';
+                current = null;
+              }
+
+              el('category-grid').onclick = function (ev) {
+                var t = ev.target;
+                var cat = t && t.getAttribute ? t.getAttribute('data-category') : null;
+                if (cat == null) return;
+                selectOnly(el('category-grid'), t);
+                sel.category = cat;
+                clearResults();
+                var tvRow = el('tv-kind-row');
+                if (cat === 'tv' || cat === 'anime') {
+                  tvRow.removeAttribute('hidden');
+                } else {
+                  tvRow.setAttribute('hidden', '');
+                  sel.tv_kind = null;
+                  selectOnly(tvRow, tvRow.querySelector('.chip[data-tv-kind="none"]'));
+                }
+                sendBrowse();
+              };
+
+              el('tv-kind-row').onclick = function (ev) {
+                var t = ev.target;
+                var k = t && t.getAttribute ? t.getAttribute('data-tv-kind') : null;
+                if (k == null) return;
+                selectOnly(el('tv-kind-row'), t);
+                sel.tv_kind = k === 'none' ? null : k;
+                clearResults();
+                sendBrowse();
+              };
+
+              el('adult-control').onclick = function (ev) {
+                var t = ev.target;
+                var a = t && t.getAttribute ? t.getAttribute('data-adult') : null;
+                if (a == null) return;
+                selectOnly(el('adult-control'), t);
+                sel.adult = a;
+                clearResults();
+                sendBrowse();
+              };
+
+              function doSearch() {
+                var v = el('search-input').value;
+                v = v == null ? '' : v.trim();
+                clearResults();
+                if (v === '') { sendBrowse(); return; }
+                send({
+                  type: 'search', q: v, category: sel.category,
+                  tv_kind: sel.tv_kind, adult: sel.adult, page: 1
+                }, false);
+              }
+
+              el('search-btn').onclick = doSearch;
+              el('search-input').onkeydown = function (ev) {
+                if (ev.key === 'Enter') { ev.preventDefault(); doSearch(); }
+              };
+
+              el('randomize-btn').onclick = function () {
+                clearResults();
+                send({
+                  type: 'random', category: sel.category,
+                  tv_kind: sel.tv_kind, adult: sel.adult
+                }, false);
+              };
+
+              el('sort').onchange = function () {
+                sel.sort = el('sort').value;
+                clearResults();
+                sendBrowse();
+              };
+
+              setupObserver();
+              connect();
+            })();
         """.trimIndent()
 
         /** Shared CSS for the simple settings/display pages. */

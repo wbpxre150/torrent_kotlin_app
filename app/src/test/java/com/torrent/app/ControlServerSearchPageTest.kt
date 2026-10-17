@@ -9,7 +9,9 @@ import org.junit.Test
  * The page is a single inline raw string, so these pin its static contract:
  * the frozen category taxonomy, the /search/ws feed reference, the spinner
  * and randomize controls, the TV/adult control rows, and the
- * no-external-assets rule. The interaction logic itself lands in stage 3b.
+ * no-external-assets rule. Stage 3b's interaction logic (infinite scroll,
+ * result paging, the add-to-transmission button) is pinned by the
+ * js_* tests below.
  */
 class ControlServerSearchPageTest {
 
@@ -48,5 +50,18 @@ class ControlServerSearchPageTest {
         assertFalse(page.contains("<script src"))
         assertFalse(page.contains("<link "))
         assertFalse(page.contains("cdn."))
+    }
+
+    @Test fun js_wiresInfiniteScroll() {
+        assertTrue(page.contains("IntersectionObserver"))
+        assertTrue(page.contains("#sentinel") || page.contains("sentinel"))
+    }
+
+    @Test fun js_tracksPaging() {
+        assertTrue(page.contains("has_more"))
+    }
+
+    @Test fun js_hasAddButton() {
+        assertTrue(page.contains("/api/transmission/add"))
     }
 }
