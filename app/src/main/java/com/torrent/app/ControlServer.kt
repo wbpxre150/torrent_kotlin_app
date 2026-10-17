@@ -138,10 +138,13 @@ class ControlServer(
                         call.respondText(buildStatsPage(), ContentType.Text.Html)
                     }
 
-                    // Search-dashboard stage 2: throwaway stub page proving the
-                    // /search/ws round-trip; replaced by the real UI later.
+                    // Search-dashboard stage 3a: the blue phone search UI
+                    // shell. Static markup/CSS only; the interaction logic
+                    // lands in stage 3b over the /search/ws feed.
                     get("search") {
-                        call.respondText(buildSearchPageStub(), ContentType.Text.Html)
+                        val proxyOrigin =
+                            "http://${wifiIp() ?: "127.0.0.1"}:${loadConfig().crawler.proxyPort}"
+                        call.respondText(buildSearchPage(proxyOrigin), ContentType.Text.Html)
                     }
 
                     get("api/status") { call.respondText(buildStatusJson(), ContentType.Application.Json) }
@@ -1218,34 +1221,144 @@ class ControlServer(
         }
 
         /**
-         * Throwaway /search page (search-dashboard stage 2): proves the
-         * /search/ws round-trip. Replies are written with `textContent`, never
-         * `innerHTML`, so the crawler payload can never inject markup.
+         * The /search page (search-dashboard stage 3a): a static, self-contained
+         * blue phone search shell. All markup, CSS and JS are inline — no
+         * external assets, no CDN, no fonts. This stage ships only the shell
+         * plus one inert script placeholder; the search/browse/random/infinite
+         * scroll/add-button logic arrives in stage 3b, which will replace
+         * [SEARCH_JS] and wire it to the authenticated /search/ws feed.
+         * [proxyOrigin] is the crawler proxy origin (3b uses it for per-torrent
+         * detail links); it defaults to the loopback address so the page stays
+         * unit-testable without a running app.
          */
-        internal fun buildSearchPageStub(): String = """
-            <!doctype html><html><head><meta charset="utf-8">
-            <title>Search (stub)</title>
-            <style>body{font-family:system-ui,sans-serif;max-width:720px;margin:2em auto;padding:0 1em}
-            input,button{padding:6px;margin:.3em 0} pre{background:#111;color:#0f0;padding:1em;overflow:auto;max-height:60vh}</style>
-            </head><body>
-            <h1>Search (throwaway stub)</h1>
-            <p><input id="q" placeholder="query (search)"><button onclick="send('search')">search</button></p>
-            <p><button onclick="send('browse',{category:'music'})">browse music</button>
-            <button onclick="send('random',{category:'music'})">random music</button></p>
-            <pre id="out"></pre>
+        internal fun buildSearchPage(proxyOrigin: String = "http://127.0.0.1:8080"): String = """
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+            <title>Search</title>
+            <style>$SEARCH_CSS</style>
+            </head>
+            <body>
+            <!-- Shell only: stage 3b wires this page to the authenticated /search/ws feed (token via location.search). -->
+            <div class="wrap">
+            <header>
+              <h1>Search</h1>
+              <nav>
+                <a href="/stats">Dashboard</a>
+                <a href="/stats">Crawler stats</a>
+                <span id="live" aria-label="live" title="live"></span>
+              </nav>
+            </header>
+            <div class="control-bar">
+              <div class="search-row">
+                <input id="search-input" type="search" placeholder="Search torrents…" autocomplete="off" enterkeyhint="search">
+                <button id="search-btn" class="btn" type="button">🔍 Search</button>
+              </div>
+              <div class="search-row">
+                <button id="randomize-btn" class="btn secondary" type="button">🎲 Randomize</button>
+                <select id="sort" aria-label="Sort">
+                  <option value="peers">Peers</option>
+                  <option value="added">Newest</option>
+                  <option value="size">Largest</option>
+                </select>
+              </div>
+            </div>
+            <div id="category-grid">
+              <button class="chip" type="button" data-category="unknown" aria-pressed="true">All</button>
+              <button class="chip" type="button" data-category="movie" aria-pressed="false">Movie</button>
+              <button class="chip" type="button" data-category="tv" aria-pressed="false">TV</button>
+              <button class="chip" type="button" data-category="anime" aria-pressed="false">Anime</button>
+              <button class="chip" type="button" data-category="music" aria-pressed="false">Music</button>
+              <button class="chip" type="button" data-category="audiobook" aria-pressed="false">Audiobook</button>
+              <button class="chip" type="button" data-category="ebook" aria-pressed="false">Ebook</button>
+              <button class="chip" type="button" data-category="comic" aria-pressed="false">Comic</button>
+              <button class="chip" type="button" data-category="software" aria-pressed="false">Software</button>
+              <button class="chip" type="button" data-category="game" aria-pressed="false">Game</button>
+              <button class="chip" type="button" data-category="image" aria-pressed="false">Image</button>
+              <button class="chip" type="button" data-category="other" aria-pressed="false">Other</button>
+            </div>
+            <div id="tv-kind-row" hidden>
+              <button class="chip" type="button" data-tv-kind="none" aria-pressed="true">None</button>
+              <button class="chip" type="button" data-tv-kind="episode" aria-pressed="false">Episodes</button>
+              <button class="chip" type="button" data-tv-kind="multi_episode" aria-pressed="false">Multi-episode</button>
+              <button class="chip" type="button" data-tv-kind="season_pack" aria-pressed="false">Season packs</button>
+              <button class="chip" type="button" data-tv-kind="multi_season" aria-pressed="false">Multi-season</button>
+              <button class="chip" type="button" data-tv-kind="complete_series" aria-pressed="false">Complete series</button>
+              <button class="chip" type="button" data-tv-kind="daily" aria-pressed="false">Daily</button>
+            </div>
+            <div id="adult-control" class="seg" role="group" aria-label="Adult results">
+              <button class="chip" type="button" data-adult="hide" aria-pressed="true">Hide</button>
+              <button class="chip" type="button" data-adult="show" aria-pressed="false">Show</button>
+              <button class="chip" type="button" data-adult="only" aria-pressed="false">Only</button>
+            </div>
+            <div id="results-status">Pick a category to browse</div>
+            <div id="spinner" hidden aria-hidden="true"></div>
+            <div id="results"></div>
+            <div id="sentinel"></div>
+            <button id="load-more" class="btn secondary" type="button" hidden>Load more</button>
+            </div>
             <script>
-            var seq=0;
-            var ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/search/ws'+location.search);
-            ws.onmessage=function(e){document.getElementById('out').textContent+=e.data+"\n";};
-            ws.onerror=function(){document.getElementById('out').textContent+="[ws error]\n";};
-            function send(type,extra){
-              var m={id:++seq,type:type};
-              if(type==='search'){m.q=document.getElementById('q').value;}
-              if(extra){for(var k in extra){m[k]=extra[k];}}
-              ws.send(JSON.stringify(m));
-            }
+            const proxyOrigin = '$proxyOrigin';
+            $SEARCH_JS
             </script>
-            </body></html>
+            </body>
+            </html>
+        """.trimIndent()
+
+        /**
+         * Shared CSS for the /search shell (search-dashboard stage 3a): the
+         * blue palette, a 640px centred phone column, ≥44px touch targets and
+         * safe-area padding on the sticky control bar. A `private val` (not
+         * `const val`) because it is a `trimIndent()` expression.
+         */
+        private val SEARCH_CSS = """
+            :root{--blue:#1a73e8;--blue-dark:#1557b0;--chip:#e8f0fe;--text:#1f2937;--muted:#5f6368;--card:#fff}
+            *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+            html,body{margin:0;padding:0}
+            body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;color:var(--text);font-size:16px;line-height:1.4;background:linear-gradient(180deg,#eef4fd,#f5f7fa);min-height:100vh}
+            .wrap{max-width:640px;margin:0 auto;padding:0 12px calc(24px + env(safe-area-inset-bottom))}
+            header{padding:16px 0 8px;display:flex;flex-wrap:wrap;align-items:center;gap:4px 16px}
+            h1{margin:0;font-size:1.5rem;color:var(--blue);flex:1}
+            nav{display:flex;align-items:center;flex-wrap:wrap;gap:16px}
+            nav a{color:var(--blue);text-decoration:none;font-weight:600;font-size:.95rem}
+            nav a:hover{color:var(--blue-dark)}
+            #live{display:inline-block;width:10px;height:10px;border-radius:50%;background:#c5221f}
+            #live.on{background:#188038}
+            .control-bar{position:sticky;top:0;z-index:20;background:var(--card);margin:0 -12px;padding:calc(8px + env(safe-area-inset-top)) calc(12px + env(safe-area-inset-right)) 8px calc(12px + env(safe-area-inset-left));box-shadow:0 1px 4px rgba(0,0,0,.12)}
+            .search-row{display:flex;align-items:center;gap:8px}
+            .search-row+.search-row{margin-top:8px}
+            #search-input{flex:1 1 auto;min-width:0;height:48px;padding:0 16px;font-size:1rem;color:var(--text);border:1px solid #dadce0;border-radius:24px;outline:none;background:#fff}
+            #search-input:focus{border-color:var(--blue);box-shadow:0 0 0 2px var(--chip)}
+            #sort{height:44px;min-width:44px;padding:0 12px;font-size:.95rem;color:var(--text);border:1px solid #dadce0;border-radius:22px;background:#fff;touch-action:manipulation}
+            .btn{display:inline-flex;align-items:center;justify-content:center;min-height:44px;min-width:44px;padding:0 18px;font-size:.95rem;font-weight:600;color:#fff;background:var(--blue);border:none;border-radius:22px;cursor:pointer;touch-action:manipulation}
+            .btn:hover{background:var(--blue-dark)}
+            .btn.secondary{background:var(--chip);color:var(--blue)}
+            .btn.secondary:hover{background:#d2e3fc}
+            #category-grid{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+            .chip{display:inline-flex;align-items:center;min-height:44px;padding:0 16px;font-size:.9rem;color:var(--text);background:var(--card);border:1px solid #dadce0;border-radius:22px;cursor:pointer;touch-action:manipulation}
+            .chip:hover{border-color:var(--blue)}
+            .chip[aria-pressed="true"]{background:var(--chip);border-color:var(--blue);color:var(--blue);font-weight:600}
+            #tv-kind-row{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 12px}
+            #tv-kind-row[hidden]{display:none}
+            .seg{display:inline-flex;flex-wrap:wrap;gap:8px;margin:0 0 12px}
+            #results-status{color:var(--muted);font-size:.9rem;margin:8px 0 4px}
+            #spinner{width:36px;height:36px;margin:24px auto;border:4px solid var(--chip);border-top-color:var(--blue);border-radius:50%;animation:spinseek .9s linear infinite}
+            #spinner[hidden]{display:none}
+            @keyframes spinseek{to{transform:rotate(360deg)}}
+            #results{display:grid;grid-template-columns:1fr;gap:12px}
+            #sentinel{height:1px}
+            #load-more{display:inline-flex;margin:16px auto}
+            #load-more[hidden]{display:none}
+        """.trimIndent()
+
+        /**
+         * Stage 3a inert script placeholder. Stage 3b replaces this with the
+         * real search/browse/random/infinite-scroll logic.
+         */
+        private val SEARCH_JS = """
+            // JS lands in stage 3b.
         """.trimIndent()
 
         /** Shared CSS for the simple settings/display pages. */
