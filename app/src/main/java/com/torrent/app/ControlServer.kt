@@ -644,7 +644,7 @@ class ControlServer(
 
     // ── settings panel builders ───────────────────────────────────────────
 
-    private fun buildTransmissionPanel(msg: String?, ok: Boolean): String {
+    internal fun buildTransmissionPanel(msg: String?, ok: Boolean): String {
         val cfg = loadConfig()
         val s = cfg.transmission
         val banner = if (msg != null)
@@ -673,7 +673,7 @@ class ControlServer(
         """.trimIndent()
     }
 
-    private fun buildFtpPanel(msg: String?, ok: Boolean): String {
+    internal fun buildFtpPanel(msg: String?, ok: Boolean): String {
         val s = loadConfig().ftp
         val banner = if (msg != null)
             """<div class="${if (ok) "ok" else "err"}">${esc(msg)}</div>""" else ""
@@ -697,7 +697,7 @@ class ControlServer(
         """.trimIndent()
     }
 
-    private fun buildStoragePanel(): String {
+    internal fun buildStoragePanel(): String {
         val s = safStatus()
         val free = usbFreeSpace()
         val f = ftpStatus()
@@ -718,7 +718,7 @@ class ControlServer(
         """.trimIndent()
     }
 
-    private fun buildCrawlerPanel(msg: String?, ok: Boolean, rebuildBloom: Boolean): String {
+    internal fun buildCrawlerPanel(msg: String?, ok: Boolean, rebuildBloom: Boolean): String {
         val s = loadConfig().crawler
         val sBackup = loadConfig().backup
         val banner = if (msg != null)
