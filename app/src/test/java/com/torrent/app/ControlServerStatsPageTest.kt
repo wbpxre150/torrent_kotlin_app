@@ -25,6 +25,24 @@ class ControlServerStatsPageTest {
         assertTrue(page.contains("--blue:#1a73e8"))
     }
 
+    /**
+     * Stage 7: the stats page rides the shared /search theme — accents come
+     * from the WEBUI_CSS custom properties rather than hard-coded greys.
+     */
+    @Test fun page_usesSharedAccentColors() {
+        assertTrue(page.contains("var(--blue)"))
+        assertTrue(page.contains("var(--muted)"))
+    }
+
+    /**
+     * The legacy grey #666 (old .strip b / .head .tri / .row .k) is gone, and
+     * long values wrap instead of overflowing their row.
+     */
+    @Test fun page_hasNoLegacyGreyOrOverflow() {
+        assertFalse(page.contains("#666"))
+        assertTrue(page.contains("overflow-wrap:anywhere"))
+    }
+
     @Test fun page_pointsAtTheStatsWebSocket() {
         assertTrue(page.contains("/stats/ws"))
         assertTrue(page.contains("location.host"))

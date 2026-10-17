@@ -1876,22 +1876,24 @@ class ControlServer(
             <!DOCTYPE html><html><head><title>Torrent App — Crawler Stats</title>
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <style>$WEBUI_CSS
-              body{max-width:820px;margin:0 auto;padding:0 12px}
-              a.cfg{display:inline-block;margin:.5em .5em .5em 0;padding:.4em .8em;background:#fff;border-radius:4px;text-decoration:none;border:1px solid #ddd}
-              .strip{display:flex;flex-wrap:wrap;gap:.4em 1.5em;margin:1em 0;background:#fff;border-radius:6px;padding:.75em 1em;box-shadow:0 1px 3px rgba(0,0,0,.1)}
-              .strip div{font-size:.95em}
-              .strip b{display:block;font-size:.7em;text-transform:uppercase;letter-spacing:.05em;color:#666;font-weight:600}
-              .live{padding:2px 8px;border-radius:4px;font-size:.85em;font-weight:600;white-space:nowrap}
-              .live.ok{background:#d4edda;color:#155724}.live.bad{background:#f8d7da;color:#721c24}
-              .banner.stop{background:#f8d7da;color:#721c24}
-              .banner.start{background:#fff3cd;color:#856404}
-              section{margin:0 0 .75em}
-              .head{cursor:pointer;user-select:none;background:#fff;border:1px solid #ddd;border-radius:4px;padding:.5em .9em;font-weight:600}
-              .head .tri{display:inline-block;width:1.2em;color:#666}
-              .body{border:1px solid #ddd;border-top:none;border-radius:0 0 4px 4px;padding:.25em .9em .6em;background:#fafafa}
+              body{max-width:640px;margin:0 auto;padding:0 12px}
+              a.cfg{display:inline-block;margin:.5em .5em .5em 0;padding:.4em .8em;background:var(--card);border-radius:8px;text-decoration:none;border:1px solid #dadce0;color:var(--blue);font-weight:600}
+              .strip{display:flex;flex-wrap:wrap;gap:.5em;margin:1em 0}
+              .strip div{background:var(--card);border:1px solid #e3e7ee;border-radius:12px;padding:.5em .8em;box-shadow:0 1px 3px rgba(0,0,0,.06);font-size:.95em}
+              .strip b{display:block;font-size:.7em;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600}
+              #live{display:inline-block;width:auto;height:auto;padding:2px 8px;border-radius:10px;font-size:.85em;font-weight:600;white-space:nowrap}
+              #live.ok{background:#e6f4ea;color:#137333}
+              #live.bad{background:#fce8e6;color:#c5221f}
+              .banner.stop{background:#fce8e6;color:#c5221f}
+              .banner.start{background:#fef7e0;color:#7a5900}
+              .banner:empty{display:none}
+              section{margin:0 0 .75em;background:var(--card);border:1px solid #e3e7ee;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+              .head{cursor:pointer;user-select:none;padding:.6em .9em;font-weight:600}
+              .head .tri{display:inline-block;width:1.2em;color:var(--blue)}
+              .body{padding:.25em .9em .6em}
               .row{display:flex;gap:.5em;padding:.15em 0;font-size:.95em}
-              .row .k{color:#666;min-width:11em;flex-shrink:0}
-              .row .v{overflow-wrap:anywhere}
+              .row .k{color:var(--muted);min-width:11em;flex-shrink:0}
+              .row .v{overflow-wrap:anywhere;color:var(--text)}
             </style></head><body>
             <h1>Crawler Stats</h1>
             <p>
