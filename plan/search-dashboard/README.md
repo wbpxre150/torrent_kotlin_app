@@ -87,6 +87,7 @@ startup answers `{ok:false,error:"unavailable"}` so the UI renders a clear statu
 | 2 | `stage-02-kotlin-search-backend.md` | app (Kotlin) | M | loopback client + WS + add route + wiring; minimal `/search` page |
 | 3 | `stage-03-kotlin-search-ui.md` | app (Kotlin) | L | full blue phone UI (replaces the minimal page) |
 | 4 | `stage-04-crawler-retire-html.md` | crawler submodule | M | delete C HTML builders + old `/random-*` |
+| 5 | `stage-05-webui-unified-theme.md` | app (Kotlin) | M | unify all `:8090` pages on the search blue theme + visible adult label on `/search` |
 
 Ordering keeps a working search path at every commit: the old proxied dashboard stays alive through
 stage 3 and is removed only in stage 4, after the Kotlin UI exists.
