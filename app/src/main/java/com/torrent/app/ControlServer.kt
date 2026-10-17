@@ -1266,7 +1266,7 @@ class ControlServer(
               </div>
             </div>
             <div id="category-grid">
-              <button class="chip" type="button" data-category="unknown" aria-pressed="true">All</button>
+              <button class="chip" type="button" data-category="" aria-pressed="true">All</button>
               <button class="chip" type="button" data-category="movie" aria-pressed="false">Movie</button>
               <button class="chip" type="button" data-category="tv" aria-pressed="false">TV</button>
               <button class="chip" type="button" data-category="anime" aria-pressed="false">Anime</button>
@@ -1391,7 +1391,7 @@ class ControlServer(
               var backoff = 1000;
               var MAX_BACKOFF = 30000;
 
-              var sel = { category: 'unknown', tv_kind: null, adult: 'hide', sort: 'peers' };
+              var sel = { category: null, tv_kind: null, adult: 'hide', sort: 'peers' };
               var current = null;
               var seq = 0;
               var activeId = 0;
@@ -1583,6 +1583,10 @@ class ControlServer(
                 var results = payload.results || [];
                 if (!wasAppend) box.textContent = '';
                 for (var i = 0; i < results.length; i++) box.appendChild(buildCard(results[i]));
+                // Appended cards can leave the sentinel still intersecting, so no
+                // new IntersectionObserver callback fires and infinite scroll stalls.
+                // Re-observe to force a fresh intersection evaluation.
+                if (observer) { observer.unobserve(el('sentinel')); observer.observe(el('sentinel')); }
 
                 if (req.type === 'random') {
                   current = null;
@@ -1641,6 +1645,7 @@ class ControlServer(
 
               function handleError(err) {
                 err = err == null ? '' : String(err);
+                statusText('');
                 if (err === 'unavailable') {
                   setLive('down', 'unavailable');
                   showBanner('amber', 'Crawler is starting or stopped');
@@ -1752,7 +1757,7 @@ class ControlServer(
                 var cat = t && t.getAttribute ? t.getAttribute('data-category') : null;
                 if (cat == null) return;
                 selectOnly(el('category-grid'), t);
-                sel.category = cat;
+                sel.category = cat === '' ? null : cat;
                 clearResults();
                 var tvRow = el('tv-kind-row');
                 if (cat === 'tv' || cat === 'anime') {
