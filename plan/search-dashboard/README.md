@@ -88,6 +88,9 @@ startup answers `{ok:false,error:"unavailable"}` so the UI renders a clear statu
 | 3 | `stage-03-kotlin-search-ui.md` | app (Kotlin) | L | full blue phone UI (replaces the minimal page) |
 | 4 | `stage-04-crawler-retire-html.md` | crawler submodule | M | delete C HTML builders + old `/random-*` |
 | 5 | `stage-05-webui-unified-theme.md` | app (Kotlin) | M | unify all `:8090` pages on the search blue theme + visible adult label on `/search` |
+| 6 | `stage-06-dashboard-phone-redesign.md` | app (Kotlin) | M | card daemons + horizontal controls + no horizontal scroll |
+| 7 | `stage-07-crawler-stats-theme.md` | app (Kotlin) | S | blue theme for `/stats`, drop grey `#666` |
+| 8 | `stage-08-settings-panels-theme.md` | app (Kotlin) | M | grouped themed card forms (crawler panel priority) |
 
 Ordering keeps a working search path at every commit: the old proxied dashboard stays alive through
 stage 3 and is removed only in stage 4, after the Kotlin UI exists.
