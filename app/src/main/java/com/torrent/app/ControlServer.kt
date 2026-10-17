@@ -465,28 +465,27 @@ class ControlServer(
     private fun buildSetupGate(): String = """
         <!DOCTYPE html><html><head><title>Torrent App — Setup required</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
-        <style>body{font-family:system-ui,sans-serif;max-width:640px;margin:2em auto;padding:0 1em}
-        .box{background:#fff3cd;border:1px solid #ffeeba;border-radius:6px;padding:1em}</style></head>
-        <body><h1>Setup required</h1>
+        <style>$WEBUI_CSS
+        .box{background:#fff3cd;border:1px solid #ffeeba;border-radius:8px;padding:1em}</style></head>
+        <body><div class="wrap"><h1>Setup required</h1>
         <div class="box"><p>Open the <strong>Torrent App</strong> on this Android device and complete
         the first-run wizard (grant the USB drive, set Transmission credentials).</p>
         <p>This control page becomes available once setup is finished.</p></div>
-        <p><a href="/login">Log in</a></p></body></html>
+        <p><a href="/login">Log in</a></p></div></body></html>
     """.trimIndent()
 
     private fun buildLoginPage(error: Boolean): String = """
         <!DOCTYPE html><html><head><title>Torrent App — Login</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
-        <style>body{font-family:system-ui,sans-serif;max-width:420px;margin:2em auto;padding:0 1em}
-        input{width:100%;padding:8px;margin:8px 0;box-sizing:border-box}
+        <style>$WEBUI_CSS
         .err{color:#721c24}</style></head>
-        <body><h1>Login</h1>
+        <body><div class="wrap"><h1>Login</h1>
         ${if (error) """<p class="err">Invalid token.</p>""" else ""}
         <form method="post" action="/login">
         <label>Control token:<input type="password" name="token" autofocus></label>
         <button type="submit">Log in</button>
         </form>
-        <p class="meta">The token is shown in the Android app's main screen.</p></body></html>
+        <p class="meta">The token is shown in the Android app's main screen.</p></div></body></html>
     """.trimIndent()
 
     private fun buildDashboard(): String {
@@ -511,9 +510,9 @@ class ControlServer(
               <td><span class="state ${d.state}">${d.state}</span></td>
               <td>${d.pid ?: "—"}</td><td>$uptime</td><td>${d.restartCount}</td>
               <td class="actions">
-                <form method="post" action="/daemon/$escapedLabel/start"><button>S</button></form>
-                <form method="post" action="/daemon/$escapedLabel/stop"><button>X</button></form>
-                <form method="post" action="/daemon/$escapedLabel/restart"><button>R</button></form>
+                <form method="post" action="/daemon/$escapedLabel/start"><button class="btn">Start</button></form>
+                <form method="post" action="/daemon/$escapedLabel/stop"><button class="btn">Stop</button></form>
+                <form method="post" action="/daemon/$escapedLabel/restart"><button class="btn">Restart</button></form>
               </td>
             </tr>
             <tr><td colspan="6"><pre class="loglines">$logs</pre></td></tr>
@@ -554,23 +553,17 @@ class ControlServer(
         return """
             <!DOCTYPE html><html><head><title>Torrent App — Control</title>
             <meta name="viewport" content="width=device-width, initial-scale=1">
-            <style>
-              body{font-family:system-ui,sans-serif;max-width:820px;margin:2em auto;padding:0 1em;background:#f5f5f5}
-              h1{margin-bottom:.25em} h2{margin-top:1.5em}
-              .state{padding:2px 8px;border-radius:4px;font-size:.85em;font-weight:600;white-space:nowrap}
-              .RUNNING{background:#d4edda;color:#155724}.STARTING{background:#fff3cd;color:#856404}
-              .STOPPING{background:#f8d7da;color:#721c24}.STOPPED{background:#e2e3e5;color:#383d41}
-              table{width:100%;border-collapse:collapse;margin:1em 0;background:#fff;border-radius:6px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.1)}
-              th{background:#eee;padding:8px 12px;text-align:left;font-size:.85em;text-transform:uppercase;letter-spacing:.05em}
-              td{padding:8px 12px;border-top:1px solid #eee;vertical-align:top}
-              th,td,code{overflow-wrap:anywhere}
+            <style>$WEBUI_CSS
+              h2{margin:1.5em 0 .4em}
               .tx td+td{overflow-wrap:normal}
-              pre.loglines{margin:4px 0 0 0;padding:8px;background:#fafafa;border-radius:4px;font-size:.8em;max-height:200px;overflow-y:auto;white-space:pre-wrap;word-break:break-all}
-              .meta{color:#666;font-size:.9em}.warn{background:#f8d7da;color:#721c24;padding:.6em;border-radius:4px;margin:1em 0}
-              .actions form{display:inline;margin:0}.actions button{padding:0 6px;margin:0 2px}
-              a.cfg{display:inline-block;margin:.5em .5em .5em 0;padding:.4em .8em;background:#fff;border-radius:4px;text-decoration:none;border:1px solid #ddd}
+              .actions{white-space:nowrap}
+              .actions form{display:inline;margin:0}
+              .actions .btn{min-height:36px;min-width:0;padding:0 10px;font-size:.8rem;margin:0 2px;border-radius:18px}
+              a.cfg{display:inline-block;margin:.5em .5em .5em 0;padding:.4em .8em;background:var(--card);border-radius:8px;text-decoration:none;border:1px solid #dadce0;color:var(--blue);font-weight:600}
+              .warn{background:#f8d7da;color:#721c24;padding:.6em;border-radius:8px;margin:1em 0}
             </style></head><body>
-            <h1>Torrent App Control</h1>
+            <div class="wrap wide">
+            <header><h1>Torrent App Control</h1><nav><a href="/">Dashboard</a><a href="/stats">Crawler stats</a><a href="/search">Search</a></nav></header>
             <p class="meta">Service: <span class="state $state">$state</span>$rollbackBanner</p>
             <p>
               <a class="cfg" href="/settings/transmission">Transmission settings</a>
@@ -592,6 +585,7 @@ class ControlServer(
             ${ftpStatusSection()}
             <h2>DHT Crawler</h2>
             ${crawlerSection()}
+            </div>
             </body></html>
         """.trimIndent()
     }
@@ -658,7 +652,7 @@ class ControlServer(
         return """
             <!DOCTYPE html><html><head><title>Transmission settings</title>
             <meta name="viewport" content="width=device-width, initial-scale=1">
-            <style>$panelCss</style></head><body>
+            <style>$WEBUI_CSS</style></head><body>
             <h1>Transmission settings</h1>$banner
             <form method="post" action="/settings/transmission">
               <label>RPC username<input name="username" value="${esc(s.username)}"></label>
@@ -687,7 +681,7 @@ class ControlServer(
         return """
             <!DOCTYPE html><html><head><title>FTP settings</title>
             <meta name="viewport" content="width=device-width, initial-scale=1">
-            <style>$panelCss</style></head><body>
+            <style>$WEBUI_CSS</style></head><body>
             <h1>FTP settings</h1>$banner
             <form method="post" action="/settings/ftp">
               <label>Username<input name="username" value="${esc(s.username)}"></label>
@@ -710,7 +704,7 @@ class ControlServer(
         return """
             <!DOCTYPE html><html><head><title>Storage</title>
             <meta name="viewport" content="width=device-width, initial-scale=1">
-            <style>$panelCss</style></head><body>
+            <style>$WEBUI_CSS</style></head><body>
             <h1>USB storage</h1>
             <p class="meta">Granted: <strong>${s.granted}</strong></p>
             <p class="meta">Tree: <code>${esc(s.treeUri ?: "—")}</code></p>
@@ -747,7 +741,7 @@ class ControlServer(
         return """
             <!DOCTYPE html><html><head><title>DHT crawler settings</title>
             <meta name="viewport" content="width=device-width, initial-scale=1">
-            <style>$panelCss
+            <style>$WEBUI_CSS
             .warn-num{color:#721c24;font-weight:700}
             #apply-status{background:#e7f1ff;padding:.6em;border-radius:4px;margin:1em 0;font-size:.9em}
             #apply-status.busy{background:#fff3cd}
@@ -1287,11 +1281,7 @@ class ControlServer(
               <button class="chip" type="button" data-tv-kind="complete_series" aria-pressed="false">Complete series</button>
               <button class="chip" type="button" data-tv-kind="daily" aria-pressed="false">Daily</button>
             </div>
-            <div id="adult-control" class="seg" role="group" aria-label="Adult results">
-              <button class="chip" type="button" data-adult="hide" aria-pressed="true">Hide</button>
-              <button class="chip" type="button" data-adult="show" aria-pressed="false">Show</button>
-              <button class="chip" type="button" data-adult="only" aria-pressed="false">Only</button>
-            </div>
+            <div class="seg-row"><span class="seg-label">Adult</span><div id="adult-control" class="seg" role="group" aria-label="Adult results"><button class="chip" type="button" data-adult="hide" aria-pressed="true">Hide</button><button class="chip" type="button" data-adult="show" aria-pressed="false">Show</button><button class="chip" type="button" data-adult="only" aria-pressed="false">Only</button></div></div>
             <div id="results-status">Pick a category to browse</div>
             <div id="banner" class="banner" hidden></div>
             <div id="spinner" hidden aria-hidden="true"></div>
@@ -1351,6 +1341,33 @@ class ControlServer(
             .toast{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom));transform:translateX(-50%);max-width:90vw;padding:10px 16px;border-radius:8px;background:#202124;color:#fff;font-size:.9rem;z-index:60;box-shadow:0 2px 8px rgba(0,0,0,.3)}
             .toast[hidden]{display:none}
             .toast.err{background:#c5221f}
+            .wrap.wide{max-width:860px}
+            label{display:block;margin:.6em 0}
+            label input,label select,label textarea{display:block;width:100%;margin-top:2px;padding:8px;font-size:1rem;color:var(--text);border:1px solid #dadce0;border-radius:8px;background:#fff;box-sizing:border-box;touch-action:manipulation}
+            label input[type="checkbox"],label input[type="radio"]{display:inline;width:auto;margin:0 6px 0 0}
+            fieldset{margin:.8em 0;border:1px solid #ddd;border-radius:8px}
+            legend{padding:0 6px;font-weight:600;color:var(--blue)}
+            fieldset label{display:inline-block;width:auto;vertical-align:middle}
+            fieldset input,fieldset select{display:inline;width:auto}
+            label.row{display:block}
+            button:not(.btn):not(.chip){display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:.5em 1.2em;margin-top:1em;font-size:.95rem;font-weight:600;color:#fff;background:var(--blue);border:none;border-radius:22px;cursor:pointer;touch-action:manipulation}
+            button:not(.btn):not(.chip):hover{background:var(--blue-dark)}
+            .ok{background:#d4edda;color:#155724;padding:.6em;border-radius:8px;margin:1em 0}
+            .err{background:#f8d7da;color:#721c24;padding:.6em;border-radius:8px;margin:1em 0}
+            .warn{background:#fff3cd;color:#856404;padding:.6em;border-radius:8px;margin:1em 0}
+            table{width:100%;border-collapse:collapse;margin:1em 0;background:var(--card);border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.1)}
+            th{background:var(--chip);color:var(--blue);padding:8px 12px;text-align:left;font-size:.85em;text-transform:uppercase;letter-spacing:.05em}
+            td{padding:8px 12px;border-top:1px solid #eee;vertical-align:top}
+            th,td,code{overflow-wrap:anywhere}
+            pre,code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+            pre{padding:8px;background:#fafafa;border-radius:8px;font-size:.8em;max-height:200px;overflow-y:auto;white-space:pre-wrap;word-break:break-all}
+            pre.loglines{margin:4px 0 0}
+            .state{display:inline-block;padding:2px 10px;border-radius:999px;font-size:.85em;font-weight:600;white-space:nowrap}
+            .state.RUNNING{background:#d4edda;color:#155724}
+            .state.STARTING{background:#fff3cd;color:#856404}
+            .state.STOPPING{background:#f8d7da;color:#721c24}
+            .state.STOPPED{background:#e2e3e5;color:#383d41}
+            .banner.ok{background:#e6f4ea;color:#137333}
         """.trimIndent()
 
         /**
@@ -1370,6 +1387,8 @@ class ControlServer(
             #tv-kind-row{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 12px}
             #tv-kind-row[hidden]{display:none}
             .seg{display:inline-flex;flex-wrap:wrap;gap:8px;margin:0 0 12px}
+            .seg-row{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:0 0 12px}
+            .seg-label{color:var(--muted);font-size:.9rem;font-weight:600}
             #results-status{color:var(--muted);font-size:.9rem;margin:8px 0 4px}
             #spinner{width:36px;height:36px;margin:24px auto;border:4px solid var(--chip);border-top-color:var(--blue);border-radius:50%;animation:spinseek .9s linear infinite}
             #spinner[hidden]{display:none}
@@ -1839,19 +1858,6 @@ class ControlServer(
             })();
         """.trimIndent()
 
-        /** Shared CSS for the simple settings/display pages. */
-        private val panelCss = """
-            body{font-family:system-ui,sans-serif;max-width:640px;margin:2em auto;padding:0 1em}
-            label{display:block;margin:.6em 0} input{display:block;width:100%;padding:6px;box-sizing:border-box;margin-top:2px}
-            fieldset{margin:.8em 0;border:1px solid #ddd;border-radius:4px}
-            fieldset label{display:inline-block;width:auto;vertical-align:middle} fieldset input{display:inline;width:auto}
-            label.row{display:block} .meta{color:#666;font-size:.9em}
-            .ok{background:#d4edda;color:#155724;padding:.6em;border-radius:4px;margin:1em 0}
-            .err{background:#f8d7da;color:#721c24;padding:.6em;border-radius:4px;margin:1em 0}
-            .warn{background:#fff3cd;color:#856404;padding:.6em;border-radius:4px;margin:1em 0}
-            button{padding:.5em 1em;margin-top:1em}
-        """.trimIndent()
-
         /**
          * The /stats page (webui stage 2): a live view of the crawler's
          * /stats JSON, pushed over the stats websocket (no polling). All
@@ -1869,15 +1875,14 @@ class ControlServer(
         internal fun buildStatsPage(): String = """
             <!DOCTYPE html><html><head><title>Torrent App — Crawler Stats</title>
             <meta name="viewport" content="width=device-width, initial-scale=1">
-            <style>$panelCss
-              body{max-width:820px}
+            <style>$WEBUI_CSS
+              body{max-width:820px;margin:0 auto;padding:0 12px}
               a.cfg{display:inline-block;margin:.5em .5em .5em 0;padding:.4em .8em;background:#fff;border-radius:4px;text-decoration:none;border:1px solid #ddd}
               .strip{display:flex;flex-wrap:wrap;gap:.4em 1.5em;margin:1em 0;background:#fff;border-radius:6px;padding:.75em 1em;box-shadow:0 1px 3px rgba(0,0,0,.1)}
               .strip div{font-size:.95em}
               .strip b{display:block;font-size:.7em;text-transform:uppercase;letter-spacing:.05em;color:#666;font-weight:600}
               .live{padding:2px 8px;border-radius:4px;font-size:.85em;font-weight:600;white-space:nowrap}
               .live.ok{background:#d4edda;color:#155724}.live.bad{background:#f8d7da;color:#721c24}
-              .banner{padding:.6em;border-radius:4px;margin:1em 0}
               .banner.stop{background:#f8d7da;color:#721c24}
               .banner.start{background:#fff3cd;color:#856404}
               section{margin:0 0 .75em}

@@ -21,6 +21,10 @@ class ControlServerStatsPageTest {
         assertTrue(page.contains("<h1>Crawler Stats</h1>"))
     }
 
+    @Test fun page_usesSharedWebuiTheme() {
+        assertTrue(page.contains("--blue:#1a73e8"))
+    }
+
     @Test fun page_pointsAtTheStatsWebSocket() {
         assertTrue(page.contains("/stats/ws"))
         assertTrue(page.contains("location.host"))

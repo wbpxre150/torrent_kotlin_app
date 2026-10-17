@@ -44,4 +44,17 @@ class ControlServerWebuiThemeTest {
         assertFalse(page.contains("<link "))
         assertFalse(page.contains("cdn."))
     }
+
+    @Test fun statsPage_usesSharedTheme() {
+        val stats = ControlServer.buildStatsPage()
+        assertTrue(stats.contains("--blue:#1a73e8"))
+        assertTrue(stats.contains(".wrap") || stats.contains(".btn"))
+    }
+
+    @Test fun statsPage_hasNoExternalAssets() {
+        val stats = ControlServer.buildStatsPage()
+        assertFalse(stats.contains("<script src"))
+        assertFalse(stats.contains("<link "))
+        assertFalse(stats.contains("cdn."))
+    }
 }

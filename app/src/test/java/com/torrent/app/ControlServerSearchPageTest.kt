@@ -44,6 +44,8 @@ class ControlServerSearchPageTest {
     @Test fun page_hasTvKindAndAdultControls() {
         assertTrue(page.contains("id=\"tv-kind-row\""))
         assertTrue(page.contains("id=\"adult-control\""))
+        assertTrue(page.contains("class=\"seg-label\""))
+        assertTrue(page.contains("Adult"))
     }
 
     @Test fun page_hasNoExternalAssets() {
