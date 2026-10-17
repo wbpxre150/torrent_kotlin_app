@@ -658,14 +658,14 @@ class ControlServer(
               <label>RPC username<input name="username" value="${esc(s.username)}"></label>
               <label>RPC password (leave blank to keep)<input type="password" name="password" placeholder="unchanged"></label>
               <label>Peer port<input name="peerPort" value="${s.peerPort}"></label>
-              <fieldset><legend>Speed limits (KB/s, 0 = unlimited)</legend>
+              <fieldset class="card"><legend>Speed limits (KB/s, 0 = unlimited)</legend>
                 <label>Down<input name="speedLimitDown" value="${s.speedLimitDown}"></label>
                 <label>Up<input name="speedLimitUp" value="${s.speedLimitUp}"></label>
                 <label>Alt down<input name="altSpeedDown" value="${s.altSpeedDown}"></label>
                 <label>Alt up<input name="altSpeedUp" value="${s.altSpeedUp}"></label>
               </fieldset>
               <label>Data directory (under USB root; blank = root)<input name="dataSubpath" value="${esc(cfg.dataSubpath)}"></label>
-              <button type="submit">Apply</button>
+              <button type="submit" class="btn">Apply</button>
             </form>
             <p class="meta">Speed-only changes apply live via RPC. Username/password/peer-port/data-directory changes restart transmission.</p>
             <p><a href="/">Back to dashboard</a></p>
@@ -684,13 +684,15 @@ class ControlServer(
             <style>$WEBUI_CSS</style></head><body>
             <h1>FTP settings</h1>$banner
             <form method="post" action="/settings/ftp">
-              <label>Username<input name="username" value="${esc(s.username)}"></label>
-              <label>Password (leave blank to keep)<input type="password" name="password" placeholder="unchanged"></label>
-              <label>Port<input name="port" value="${s.port}"></label>
-              <label class="row"><input type="checkbox" name="wifiOnly" $checked> WiFi only</label>
-              <label>Max download (KiB/s, 0 = unlimited)<input name="maxDownloadKiBps" value="${s.maxDownloadKiBps}"></label>
-              <p class="meta">The FTP root follows the shared data directory (Transmission settings).</p>
-              <button type="submit">Apply</button>
+              <fieldset class="card">
+                <label>Username<input name="username" value="${esc(s.username)}"></label>
+                <label>Password (leave blank to keep)<input type="password" name="password" placeholder="unchanged"></label>
+                <label>Port<input name="port" value="${s.port}"></label>
+                <label class="row"><input type="checkbox" name="wifiOnly" $checked> WiFi only</label>
+                <label>Max download (KiB/s, 0 = unlimited)<input name="maxDownloadKiBps" value="${s.maxDownloadKiBps}"></label>
+                <p class="meta">The FTP root follows the shared data directory (Transmission settings).</p>
+                <button type="submit" class="btn">Apply</button>
+              </fieldset>
             </form>
             <p><a href="/">Back to dashboard</a></p>
             </body></html>
@@ -706,10 +708,12 @@ class ControlServer(
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <style>$WEBUI_CSS</style></head><body>
             <h1>USB storage</h1>
-            <p class="meta">Granted: <strong>${s.granted}</strong></p>
-            <p class="meta">Tree: <code>${esc(s.treeUri ?: "—")}</code></p>
-            <p class="meta">Free: <strong>${free?.let { formatBytes(it) } ?: "unknown"}</strong></p>
-            <p class="meta">WiFi: <strong>${if (f.wifiUp) "up" else "down"}</strong></p>
+            <div class="card">
+              <p class="meta">Granted: <strong>${s.granted}</strong></p>
+              <p class="meta">Tree: <code>${esc(s.treeUri ?: "—")}</code></p>
+              <p class="meta">Free: <strong>${free?.let { formatBytes(it) } ?: "unknown"}</strong></p>
+              <p class="meta">WiFi: <strong>${if (f.wifiUp) "up" else "down"}</strong></p>
+            </div>
             <div class="warn">To re-grant or change the USB drive, open the Torrent App on the
             Android device and tap <strong>Grant USB</strong>. The data directory is set in
             <a href="/settings/transmission">Transmission settings</a>.</div>
@@ -734,7 +738,7 @@ class ControlServer(
             <div class="warn">Bloom filter settings changed — the persisted filters are now stale.
             <form method="post" action="/crawler/maintenance/rebuild-bloom-filter"
                   onsubmit="return confirm('Rebuild the bloom filter? The crawler is stopped while it runs (a few minutes).')">
-            <button type="submit">Run --rebuild-bloom-filter</button></form></div>""" else ""
+            <button type="submit" class="btn">Run --rebuild-bloom-filter</button></form></div>""" else ""
         val maintenanceSection = buildMaintenanceSection()
         val backupSection = buildBackupSection()
         val dbBackupSection = buildDbBackupSection()
@@ -742,25 +746,24 @@ class ControlServer(
             <!DOCTYPE html><html><head><title>DHT crawler settings</title>
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <style>$WEBUI_CSS
-            .warn-num{color:#721c24;font-weight:700}
-            #apply-status{background:#e7f1ff;padding:.6em;border-radius:4px;margin:1em 0;font-size:.9em}
-            #apply-status.busy{background:#fff3cd}
-            pre.apply-log{margin:.4em 0 0;padding:8px;background:#fafafa;border-radius:4px;font-size:.8em;max-height:200px;overflow-y:auto;white-space:pre-wrap;word-break:break-all}
+            .warn-num{color:#c5221f;font-weight:700}
+            #apply-status{background:#e6f4ea;color:#137333;padding:.6em .8em;border-radius:8px;margin:8px 0;font-size:.9rem}
+            #apply-status.busy{background:#fef7e0;color:#7a5900}
+            #maint-status{font-size:.9rem;padding:.4em .8em;border-radius:999px;background:var(--chip);color:var(--blue);display:inline-block}
+            #maint-status.busy{background:#fef7e0;color:#7a5900}
             #maint-btns form{display:inline-block;margin:0 .5em .5em 0}
             #maint-btns button{margin:0;padding:.4em .8em}
-            #maint-status{font-size:.9em}
-            #maint-status.busy{background:#fff3cd;padding:.4em;border-radius:4px}
             </style></head><body>
             <h1>DHT crawler</h1>$banner
             <form method="post" action="/settings/crawler">
-              <fieldset><legend>General</legend>
+              <fieldset class="card"><legend>General</legend>
                 <label class="row"><input type="checkbox" name="enabled" ${checked(s.enabled)}> Enabled (start with the service)</label>
                 <label class="row"><input type="checkbox" name="wifiOnly" ${checked(s.wifiOnly)}> WiFi only (pause when wifi is down)</label>
                 <label>Log level<select name="logLevel">$levelOptions</select></label>
                 <label>DHT port<input name="dhtPort" value="${s.dhtPort}"></label>
                 <label>Nice level (-20..19)<input name="niceLevel" value="${s.niceLevel}"></label>
               </fieldset>
-              <fieldset><legend>Resources</legend>
+              <fieldset class="card"><legend>Resources</legend>
                 <label>Tree count (1..64)<input id="numTrees" name="numTrees" value="${s.numTrees}"></label>
                 <label>Find-node workers<input id="treeFindNodeWorkers" name="treeFindNodeWorkers" value="${s.treeFindNodeWorkers}"></label>
                 <label>BEP51 workers<input id="treeBep51Workers" name="treeBep51Workers" value="${s.treeBep51Workers}"></label>
@@ -770,11 +773,11 @@ class ControlServer(
                 <label>Peers queue capacity<input name="treePeersQueueCapacity" value="${s.treePeersQueueCapacity}"></label>
                 <p class="meta">Estimated worker threads: <span id="est-threads"></span><span id="est-warn" style="display:none;color:#721c24"> — above ${CrawlerKeys.THREAD_WARN_THRESHOLD}; the default config uses ~1216</span></p>
               </fieldset>
-              <fieldset><legend>Filters</legend>
+              <fieldset class="card"><legend>Filters</legend>
                 <label class="row"><input type="checkbox" name="pornFilterEnabled" ${checked(s.pornFilterEnabled)}> Porn filter</label>
                 <label>Non-Latin language threshold (0..100)<input name="languageFilterNonLatinThreshold" value="${s.languageFilterNonLatinThreshold}"></label>
               </fieldset>
-              <fieldset><legend>Adult content handling</legend>
+              <fieldset class="card"><legend>Adult content handling</legend>
                 <label class="row"><input type="checkbox" name="classifierEnabled" ${checked(s.classifierEnabled)}> Ingest-time classifier (on by default)</label>
                 <label>Adult mode<select name="adultMode">$adultModeOptions</select></label>
                 <label>Adult hide threshold (0..1; only used by tag mode)<input type="number" step="any" name="adultHideThreshold" value="${s.adultHideThreshold}"></label>
@@ -783,21 +786,21 @@ class ControlServer(
                 adult rows (hidden above the hide threshold); <em>drop</em> discards rows at or above the drop threshold. The
                 keyword porn filter above only runs while the classifier cannot decide (disabled, or its models are missing).</p>
               </fieldset>
-              <fieldset><legend>Bloom filters (changing these invalidates the persisted filters)</legend>
+              <fieldset class="card"><legend>Bloom filters (changing these invalidates the persisted filters)</legend>
                 <label>Bloom capacity<input name="bloomCapacity" value="${s.bloomCapacity}"></label>
                 <label>Failure bloom capacity<input name="failureBloomCapacity" value="${s.failureBloomCapacity}"></label>
                 <label>Bloom error rate (0..1)<input name="bloomErrorRate" value="${s.bloomErrorRate}"></label>
               </fieldset>
-              <fieldset><legend>Advanced overrides (key=value, one per line)</legend>
+              <fieldset class="card"><legend>Advanced overrides (key=value, one per line)</legend>
                 <textarea name="advancedOverrides" rows="6" placeholder="# key=value">${esc(s.advancedOverrides)}</textarea>
                 <p class="meta">Path and backup keys are not allowed; form-managed keys must use the fields above.</p>
               </fieldset>
-              <fieldset><legend>Access</legend>
+              <fieldset class="card"><legend>Access</legend>
                 <label>Proxy port (LAN, authenticated)<input name="proxyPort" value="${s.proxyPort}"></label>
                 <label>Crawler HTTP port (loopback)<input name="crawlerHttpPort" value="${s.crawlerHttpPort}"></label>
                 <label class="row"><input type="checkbox" name="lanDirect" ${checked(s.lanDirect)}> LAN direct (bind 0.0.0.0, no proxy, no auth)</label>
               </fieldset>
-              <fieldset><legend>Backup &amp; Bootstrap (app-side only; not written to the crawler config)</legend>
+              <fieldset class="card"><legend>Backup &amp; Bootstrap (app-side only; not written to the crawler config)</legend>
                 <label class="row"><input type="checkbox" name="uploadEnabled" ${checked(sBackup.uploadEnabled)}> Enable R2 upload</label>
                 <label>R2 endpoint (https://…)<input name="r2Endpoint" value="${esc(sBackup.r2Endpoint)}"></label>
                 <label>R2 bucket<input name="r2Bucket" value="${esc(sBackup.r2Bucket)}"></label>
@@ -810,11 +813,11 @@ class ControlServer(
                 <label class="row"><input type="checkbox" name="bootstrapEnabled" ${checked(sBackup.bootstrapEnabled)}> Enable bootstrap download</label>
                 <label>Bootstrap URL (https://…)<input name="bootstrapUrl" value="${esc(sBackup.bootstrapUrl)}"></label>
               </fieldset>
-              <button type="submit">Apply</button>
+              <button type="submit" class="btn">Apply</button>
             </form>
             $rebuildBox
             <div id="apply-status">Apply status: IDLE</div>
-            <pre id="apply-log" class="apply-log" style="display:none"></pre>
+            <pre id="apply-log" class="apply-log loglines" style="display:none"></pre>
             $maintenanceSection
             $backupSection
             $dbBackupSection
@@ -911,17 +914,17 @@ class ControlServer(
             """
               <form method="post" action="/crawler/maintenance/${a.route}"
                     onsubmit="return confirm('Run ${a.flag}? The crawler is stopped while it runs.$warn')">
-              <button type="submit">${a.route}</button></form>
+              <button type="submit" class="btn secondary">${a.route}</button></form>
             """.trimIndent()
         }
         return """
-            <fieldset><legend>Maintenance (one at a time; crawler stopped while running)</legend>
+            <fieldset class="card"><legend>Maintenance (one at a time; crawler stopped while running)</legend>
               <p class="meta">Runs <code>libdhtcrawler.so &lt;flag&gt;</code> as a one-shot in the crawler
               work dir. compact / recover-database need ~DB size of free internal space. The supervised
               crawler is stopped first and restarted afterwards if enabled (and wifi is up).</p>
               <div id="maint-btns">$buttons</div>
               <div id="maint-status" class="meta">Maintenance: idle</div>
-              <pre id="maint-log" class="apply-log" style="display:none"></pre>
+              <pre id="maint-log" class="apply-log loglines" style="display:none"></pre>
             </fieldset>
         """.trimIndent()
     }
@@ -932,14 +935,14 @@ class ControlServer(
         val enabledNote = if (st.uploadEnabled) "" else
             "<p class=\"warn\">R2 upload is disabled — tick <em>Enable R2 upload</em> above and apply first.</p>"
         return """
-            <fieldset><legend>Cache backup (upload the crawler's BEP51 bootstrap cache to R2)</legend>
+            <fieldset class="card"><legend>Cache backup (upload the crawler's BEP51 bootstrap cache to R2)</legend>
               <p class="meta">Uploads <code>bep51_cache.dat</code> (validated + gzip-compressed) to the R2
               object key above — at most once per day, on Wi-Fi, and only when no apply/maintenance
               job is running. <em>Upload now</em> bypasses the daily gate only.</p>
               $enabledNote
               <form method="post" action="/crawler/backup/upload"
                     onsubmit="return confirm('Upload the BEP51 cache to R2 now?')">
-              <button type="submit">Upload now</button></form>
+              <button type="submit" class="btn">Upload now</button></form>
               <div id="backup-status" class="meta">Backup: ${st.state.name}</div>
             </fieldset>
         """.trimIndent()
@@ -952,7 +955,7 @@ class ControlServer(
         val enabledNote = if (st.uploadEnabled) "" else
             "<p class=\"warn\">DB dump upload is disabled — tick <em>Enable daily DB dump upload</em> above and apply first.</p>"
         return """
-            <fieldset><legend>DB backup (upload the crawler's incremental SQLite dump to the R2 DB bucket)</legend>
+            <fieldset class="card"><legend>DB backup (upload the crawler's incremental SQLite dump to the R2 DB bucket)</legend>
               <p class="meta">Dumps new torrents (<code>torrents.db</code>) as gzip-compressed SQL to
               <code>&lt;db-prefix&gt;/incremental_&lt;date&gt;_&lt;start&gt;-&lt;end&gt;.sql.gz</code> — at most once per day, on
               Wi-Fi, and only when no apply/maintenance job is running. The upload bookmark advances only
@@ -961,10 +964,10 @@ class ControlServer(
               $enabledNote
               <form method="post" action="/crawler/backup/db"
                     onsubmit="return confirm('Upload the crawler DB dump to R2 now?')">
-              <button type="submit">Upload now</button></form>
+              <button type="submit" class="btn">Upload now</button></form>
               <div id="db-backup-status" class="meta">DB backup: ${st.state.name}</div>
             </fieldset>
-            <fieldset><legend>DB restore (replay the R2 dump chain into a fresh database)</legend>
+            <fieldset class="card"><legend>DB restore (replay the R2 dump chain into a fresh database)</legend>
               <p class="meta">Stops the crawler, downloads + gunzips every dump object in the DB bucket
               (in chain order), and runs <code>libdhtcrawler.so --restore-database</code> to replay them into a
               fresh <code>torrents.db</code>, swapped in atomically. On success the upload bookmark resets to
@@ -972,7 +975,7 @@ class ControlServer(
               and the DB bucket configured (the upload toggle is not required).</p>
               <form method="post" action="/crawler/restore/db"
                     onsubmit="return confirm('Restore the crawler DB from R2 now? This replaces torrents.db and the crawler is stopped while it runs.')">
-              <button type="submit">Restore now</button></form>
+              <button type="submit" class="btn">Restore now</button></form>
               <div id="db-restore-status" class="meta">DB restore: ${rst.state.name}</div>
             </fieldset>
         """.trimIndent()
@@ -1345,10 +1348,8 @@ class ControlServer(
             label{display:block;margin:.6em 0}
             label input,label select,label textarea{display:block;width:100%;margin-top:2px;padding:8px;font-size:1rem;color:var(--text);border:1px solid #dadce0;border-radius:8px;background:#fff;box-sizing:border-box;touch-action:manipulation}
             label input[type="checkbox"],label input[type="radio"]{display:inline;width:auto;margin:0 6px 0 0}
-            fieldset{margin:.8em 0;border:1px solid #ddd;border-radius:8px}
-            legend{padding:0 6px;font-weight:600;color:var(--blue)}
-            fieldset label{display:inline-block;width:auto;vertical-align:middle}
-            fieldset input,fieldset select{display:inline;width:auto}
+            fieldset{margin:.8em 0;padding:12px;border:1px solid #e3e7ee;border-radius:12px;background:var(--card);box-shadow:0 1px 3px rgba(0,0,0,.06)}
+            legend{padding:0 8px;margin-bottom:8px;color:var(--muted);font-weight:600;font-size:.85rem}
             label.row{display:block}
             button:not(.btn):not(.chip){display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:.5em 1.2em;margin-top:1em;font-size:.95rem;font-weight:600;color:#fff;background:var(--blue);border:none;border-radius:22px;cursor:pointer;touch-action:manipulation}
             button:not(.btn):not(.chip):hover{background:var(--blue-dark)}

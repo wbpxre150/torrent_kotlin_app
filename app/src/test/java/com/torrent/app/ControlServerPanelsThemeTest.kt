@@ -94,18 +94,21 @@ class ControlServerPanelsThemeTest {
         val html = transmissionPanel()
         assertThemedAndSelfContained(html)
         assertTrue("transmission form must post to its route", html.contains("action=\"/settings/transmission\""))
+        assertTrue("transmission panel must use the shared card chrome", html.contains("class=\"card\""))
     }
 
     @Test fun ftpPanel_themeAndRoute() {
         val html = ftpPanel()
         assertThemedAndSelfContained(html)
         assertTrue("ftp form must post to its route", html.contains("action=\"/settings/ftp\""))
+        assertTrue("ftp panel must use the shared card chrome", html.contains("class=\"card\""))
     }
 
     @Test fun storagePanel_themeAndSelfContained() {
         val html = storagePanel()
         assertThemedAndSelfContained(html)
         assertTrue("storage panel keeps its heading", html.contains("<h1>USB storage</h1>"))
+        assertTrue("storage panel must use the shared card chrome", html.contains("class=\"card\""))
         assertFalse("storage panel is read-only: no form", html.contains("<form"))
     }
 
@@ -118,5 +121,10 @@ class ControlServerPanelsThemeTest {
         assertTrue("missing #maint-status hook", html.contains("#maint-status"))
         assertTrue("missing warn-num class", html.contains("warn-num"))
         assertTrue("missing apply-log class", html.contains("apply-log"))
+        assertTrue("crawler panel must use the shared card chrome", html.contains("class=\"card\""))
+        assertTrue(
+            "maintenance one-shot buttons must use the secondary pill",
+            html.contains("class=\"btn secondary\"")
+        )
     }
 }
