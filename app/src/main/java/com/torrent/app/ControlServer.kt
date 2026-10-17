@@ -1309,12 +1309,18 @@ class ControlServer(
         """.trimIndent()
 
         /**
-         * Shared CSS for the /search shell (search-dashboard stage 3a): the
-         * blue palette, a 640px centred phone column, ≥44px touch targets and
-         * safe-area padding on the sticky control bar. A `private val` (not
-         * `const val`) because it is a `trimIndent()` expression.
+         * Shared WebUI theme for every server-rendered page (search-dashboard
+         * stage 5a): the blue palette, the 640px centred phone column, the
+         * header/nav shell, the live status dot and the reusable controls
+         * (buttons, chips, cards, banners, badges, toasts, meta rows).
+         *
+         * An `internal val` (not `const val`) because it is a `trimIndent()`
+         * expression, and `internal` so the unit tests can pin the palette. Page
+         * CSS is built as `WEBUI_CSS + "\n" + <page-specific rules>`; companion
+         * vals initialise in declaration order, so it is declared before
+         * `SEARCH_CSS`.
          */
-        private val SEARCH_CSS = """
+        internal val WEBUI_CSS = """
             :root{--blue:#1a73e8;--blue-dark:#1557b0;--chip:#e8f0fe;--text:#1f2937;--muted:#5f6368;--card:#fff}
             *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
             html,body{margin:0;padding:0}
@@ -1327,20 +1333,40 @@ class ControlServer(
             nav a:hover{color:var(--blue-dark)}
             #live{display:inline-block;width:10px;height:10px;border-radius:50%;background:#c5221f}
             #live.on{background:#188038}
+            #live.wait{background:#f9ab00}
+            .btn{display:inline-flex;align-items:center;justify-content:center;min-height:44px;min-width:44px;padding:0 18px;font-size:.95rem;font-weight:600;color:#fff;background:var(--blue);border:none;border-radius:22px;cursor:pointer;touch-action:manipulation}
+            .btn:hover{background:var(--blue-dark)}
+            .btn.secondary{background:var(--chip);color:var(--blue)}
+            .btn.secondary:hover{background:#d2e3fc}
+            .chip{display:inline-flex;align-items:center;min-height:44px;padding:0 16px;font-size:.9rem;color:var(--text);background:var(--card);border:1px solid #dadce0;border-radius:22px;cursor:pointer;touch-action:manipulation}
+            .chip:hover{border-color:var(--blue)}
+            .chip[aria-pressed="true"]{background:var(--chip);border-color:var(--blue);color:var(--blue);font-weight:600}
+            .card{background:var(--card);border:1px solid #e3e7ee;border-radius:12px;padding:12px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+            .banner{padding:.6em .8em;border-radius:8px;margin:8px 0;font-size:.9rem}
+            .banner[hidden]{display:none}
+            .banner.red{background:#fce8e6;color:#c5221f}
+            .banner.amber{background:#fef7e0;color:#7a5900}
+            .meta{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin-top:8px;font-size:.85rem;color:var(--muted)}
+            .badge{background:var(--chip);color:var(--blue);border-radius:10px;padding:1px 8px;font-size:.78rem;font-weight:600}
+            .toast{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom));transform:translateX(-50%);max-width:90vw;padding:10px 16px;border-radius:8px;background:#202124;color:#fff;font-size:.9rem;z-index:60;box-shadow:0 2px 8px rgba(0,0,0,.3)}
+            .toast[hidden]{display:none}
+            .toast.err{background:#c5221f}
+        """.trimIndent()
+
+        /**
+         * The /search page CSS (search-dashboard stage 3a): the shared WebUI
+         * theme plus the search-only control bar, result-card details and paging
+         * rules. A `private val` (not `const val`) because it is a
+         * `trimIndent()` expression.
+         */
+        private val SEARCH_CSS = WEBUI_CSS + "\n" + """
             .control-bar{position:sticky;top:0;z-index:20;background:var(--card);margin:0 -12px;padding:calc(8px + env(safe-area-inset-top)) calc(12px + env(safe-area-inset-right)) 8px calc(12px + env(safe-area-inset-left));box-shadow:0 1px 4px rgba(0,0,0,.12)}
             .search-row{display:flex;align-items:center;gap:8px}
             .search-row+.search-row{margin-top:8px}
             #search-input{flex:1 1 auto;min-width:0;height:48px;padding:0 16px;font-size:1rem;color:var(--text);border:1px solid #dadce0;border-radius:24px;outline:none;background:#fff}
             #search-input:focus{border-color:var(--blue);box-shadow:0 0 0 2px var(--chip)}
             #sort{height:44px;min-width:44px;padding:0 12px;font-size:.95rem;color:var(--text);border:1px solid #dadce0;border-radius:22px;background:#fff;touch-action:manipulation}
-            .btn{display:inline-flex;align-items:center;justify-content:center;min-height:44px;min-width:44px;padding:0 18px;font-size:.95rem;font-weight:600;color:#fff;background:var(--blue);border:none;border-radius:22px;cursor:pointer;touch-action:manipulation}
-            .btn:hover{background:var(--blue-dark)}
-            .btn.secondary{background:var(--chip);color:var(--blue)}
-            .btn.secondary:hover{background:#d2e3fc}
             #category-grid{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
-            .chip{display:inline-flex;align-items:center;min-height:44px;padding:0 16px;font-size:.9rem;color:var(--text);background:var(--card);border:1px solid #dadce0;border-radius:22px;cursor:pointer;touch-action:manipulation}
-            .chip:hover{border-color:var(--blue)}
-            .chip[aria-pressed="true"]{background:var(--chip);border-color:var(--blue);color:var(--blue);font-weight:600}
             #tv-kind-row{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 12px}
             #tv-kind-row[hidden]{display:none}
             .seg{display:inline-flex;flex-wrap:wrap;gap:8px;margin:0 0 12px}
@@ -1352,30 +1378,19 @@ class ControlServer(
             #sentinel{height:1px}
             #load-more{display:inline-flex;margin:16px auto}
             #load-more[hidden]{display:none}
-            #live.wait{background:#f9ab00}
             .hidden{display:none}
-            .banner{padding:.6em .8em;border-radius:8px;margin:8px 0;font-size:.9rem}
-            .banner[hidden]{display:none}
-            .banner.red{background:#fce8e6;color:#c5221f}
-            .banner.amber{background:#fef7e0;color:#7a5900}
-            .card{background:var(--card);border:1px solid #e3e7ee;border-radius:12px;padding:12px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
             .card .name{font-weight:700;cursor:pointer;overflow-wrap:anywhere}
             .card .name:hover{color:var(--blue)}
             .filelist{margin:8px 0 0;padding:8px;background:#f5f7fa;border-radius:8px;font-size:.85rem}
             .filelist .frow{display:flex;justify-content:space-between;gap:8px}
             .filelist .frow span:first-child{overflow-wrap:anywhere}
             .filelist .more{color:var(--muted);margin-top:4px}
-            .meta{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin-top:8px;font-size:.85rem;color:var(--muted)}
-            .badge{background:var(--chip);color:var(--blue);border-radius:10px;padding:1px 8px;font-size:.78rem;font-weight:600}
             .peers.hi{color:#188038}
             .peers.mid{color:#b06000}
             .peers.lo{color:#9aa0a6}
             .actions{display:flex;align-items:center;gap:14px;margin-top:10px}
             .add-btn{min-height:40px;padding:0 16px}
             .detail{color:var(--blue);text-decoration:none;font-size:1.1rem;font-weight:700;padding:8px}
-            .toast{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom));transform:translateX(-50%);max-width:90vw;padding:10px 16px;border-radius:8px;background:#202124;color:#fff;font-size:.9rem;z-index:60;box-shadow:0 2px 8px rgba(0,0,0,.3)}
-            .toast[hidden]{display:none}
-            .toast.err{background:#c5221f}
         """.trimIndent()
 
         /**
