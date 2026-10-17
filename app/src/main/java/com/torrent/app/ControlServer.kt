@@ -985,7 +985,7 @@ class ControlServer(
     }
 
     private fun crawlerSection(): String {
-        val c = loadConfig().crawler
+        // Search dashboard is same-origin on :8090 (/search); the proxied C UI was retired in stage 4.
         val d = daemonStatuses().firstOrNull { it.label == DaemonService.CRAWLER_LABEL }
         val state = d?.state ?: ProcessState.STOPPED
         val uptime = d?.startTimeMs?.let { formatUptime(System.currentTimeMillis() - it) } ?: "—"
@@ -994,8 +994,7 @@ class ControlServer(
         val free = internalFreeSpace()
         val spaceWarn = if (free < CRAWLER_LOW_FREE_SPACE_BYTES) " <span class=\"warn\">low free space</span>" else ""
         val paused = if (crawlerPausedNoWifi()) " <span class=\"state STOPPED\">paused: no wifi</span>" else ""
-        val host = wifiIp() ?: "127.0.0.1"
-        val searchUrl = "http://$host:${c.proxyPort}/"
+        val searchUrl = "/search"
         return """
             <p class="meta">State: <span class="state $state">$state</span>$paused
                &nbsp; PID: <strong>${d?.pid ?: "—"}</strong>
@@ -1003,7 +1002,7 @@ class ControlServer(
                &nbsp; Restarts: <strong>${d?.restartCount ?: 0}</strong></p>
             <p class="meta">DB: <strong>${dbSize?.let { formatBytes(it) } ?: "—"}</strong>
                &nbsp; Internal free: <strong>${formatBytes(free)}</strong>$spaceWarn</p>
-            <p class="meta">Search UI: <a href="$searchUrl" target="_blank">$searchUrl</a></p>
+            <p class="meta">Search dashboard: <a href="$searchUrl">$searchUrl</a></p>
             <p class="meta" id="crawler-stats">Stats: loading…</p>
             <pre class="loglines">$logs</pre>
             <script>
