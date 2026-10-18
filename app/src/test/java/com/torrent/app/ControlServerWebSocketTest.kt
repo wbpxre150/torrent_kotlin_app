@@ -498,12 +498,38 @@ class ControlServerWebSocketTest {
         try {
             val ws = connectWithRetry(live.port, "/search/ws?token=$TOKEN")
             try {
-                ws.sendText("""{"id":9,"type":"browse","category":"tv","sort":"peers","page":1}""")
+                ws.sendText("""{"id":9,"type":"browse","category":"tv","page":1}""")
                 val reply = ws.nextText(10_000)
                 assertTrue("expected a reply, got none", reply != null)
                 assertTrue("expected ok with the payload spliced verbatim, got: $reply",
                     reply!!.contains("\"ok\":true") &&
                         reply.contains("\"payload\":{\"results\":[],\"has_more\":false}"))
+            } finally {
+                ws.close()
+            }
+        } finally {
+            live.stop()
+            upstream.close()
+        }
+    }
+
+    @Test fun searchWebSocket_legacySortKey_toleratedAsUnknown() {
+        // webui-ux stage 6: `sort` is gone from the protocol, but a cached older
+        // page may still send it; the unknown key is ignored and the reply stays ok.
+        val upstream = startStatsUpstream("""{"results":[],"has_more":false}""")
+        val live = startTestServer(
+            TOKEN, crawlerRunning = true, crawlerPort = upstream.localPort,
+            pushPeriodMs = 10_000, searchReadTimeoutMs = 15_000,
+        )
+        live.start()
+        try {
+            val ws = connectWithRetry(live.port, "/search/ws?token=$TOKEN")
+            try {
+                ws.sendText("""{"id":10,"type":"browse","category":"tv","sort":"peers","page":1}""")
+                val reply = ws.nextText(10_000)
+                assertTrue("expected a reply, got none", reply != null)
+                assertTrue("expected ok despite the stray sort key, got: $reply",
+                    reply!!.contains("\"ok\":true"))
             } finally {
                 ws.close()
             }

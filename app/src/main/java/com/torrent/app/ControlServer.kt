@@ -1218,7 +1218,6 @@ class ControlServer(
             category = searchField(obj, "category"),
             tvKind = searchField(obj, "tv_kind"),
             adult = searchField(obj, "adult"),
-            sort = searchField(obj, "sort"),
             page = searchField(obj, "page"),
         )
         return when (result) {
@@ -1306,7 +1305,6 @@ class ControlServer(
             "none", "episode", "multi_episode", "season_pack",
             "multi_season", "complete_series", "daily")
         private val SEARCH_ADULT_MODES = setOf("hide", "show", "only")
-        private val SEARCH_SORTS = setOf("peers", "added", "size")
 
         /**
          * Validates one /search/ws request and builds the crawler loopback path
@@ -1322,7 +1320,6 @@ class ControlServer(
             category: String?,
             tvKind: String?,
             adult: String?,
-            sort: String?,
             page: String?,
         ): CrawlerQueryResult {
             if (type != "search" && type != "browse" && type != "random") {
@@ -1343,11 +1340,6 @@ class ControlServer(
             if (cat != null) parts += "category=$cat"
             if (tv != null) parts += "tv_kind=$tv"
             if (ad != null) parts += "adult=$ad"
-            if (type == "browse") {
-                val s = sort?.takeIf { it.isNotEmpty() }
-                if (s != null && s !in SEARCH_SORTS) return CrawlerQueryResult.Bad("sort")
-                if (s != null) parts += "sort=$s"
-            }
             if (type == "random") parts += "min_peers=10"
             if (type != "random") {
                 // page applies to search/browse only; absent -> crawler default 1.
@@ -1496,11 +1488,6 @@ class ControlServer(
               </div>
               <div class="search-row">
                 <button id="randomize-btn" class="btn secondary" type="button">🎲 Randomize</button>
-                <select id="sort" aria-label="Sort">
-                  <option value="peers">Peers</option>
-                  <option value="added">Newest</option>
-                  <option value="size">Largest</option>
-                </select>
               </div>
             </div>
             <div id="category-grid">
@@ -1624,7 +1611,6 @@ class ControlServer(
             .search-row+.search-row{margin-top:8px}
             #search-input{flex:1 1 auto;min-width:0;height:48px;padding:0 16px;font-size:1rem;color:var(--text);border:1px solid #dadce0;border-radius:24px;outline:none;background:#fff}
             #search-input:focus{border-color:var(--blue);box-shadow:0 0 0 2px var(--chip)}
-            #sort{height:44px;min-width:44px;padding:0 12px;font-size:.95rem;color:var(--text);border:1px solid #dadce0;border-radius:22px;background:#fff;touch-action:manipulation}
             #category-grid{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
             #tv-kind-row{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 12px}
             #tv-kind-row[hidden]{display:none}
@@ -1656,7 +1642,7 @@ class ControlServer(
 
         /**
          * The /search page interaction logic (search-dashboard stage 3b): the
-         * authenticated /search/ws client, category/TV/adult/sort controls,
+         * authenticated /search/ws client, category/TV/adult controls,
          * result cards, infinite scroll and the add-to-transmission button.
          */
         private val SEARCH_JS = """
@@ -1666,7 +1652,7 @@ class ControlServer(
               var backoff = 1000;
               var MAX_BACKOFF = 30000;
 
-              var sel = { category: null, tv_kind: null, adult: 'hide', sort: 'peers' };
+              var sel = { category: null, tv_kind: null, adult: 'hide' };
               var current = null;
               var seq = 0;
               var activeId = 0;
@@ -1743,10 +1729,6 @@ class ControlServer(
                 var mo = Math.floor(dd / 30);
                 if (mo < 12) return mo + 'mo ago';
                 return Math.floor(mo / 12) + 'y ago';
-              }
-
-              function sortLabel(s) {
-                return s === 'added' ? 'newest' : (s === 'size' ? 'largest' : 'peers');
               }
 
               function badge(text) {
@@ -1874,11 +1856,11 @@ class ControlServer(
                 var page = typeof payload.page === 'number' ? payload.page : (req.page || 1);
                 current = {
                   type: req.type, q: req.q, category: req.category, tv_kind: req.tv_kind,
-                  adult: req.adult, sort: req.sort, page: page, has_more: !!payload.has_more
+                  adult: req.adult, page: page, has_more: !!payload.has_more
                 };
                 var n = typeof payload.total_count === 'number' ? payload.total_count : results.length;
                 var txt = n + (n === 1 ? ' result' : ' results');
-                if (req.type === 'browse') txt += ' \u00b7 sorted by ' + sortLabel(req.sort);
+                if (req.type === 'search') txt += ' \u00b7 best matches first';
                 statusText(txt);
               }
 
@@ -1896,7 +1878,7 @@ class ControlServer(
                 pendingAppend = !!append;
                 pendingReq = {
                   type: obj.type, q: obj.q, category: obj.category,
-                  tv_kind: obj.tv_kind, adult: obj.adult, sort: obj.sort, page: obj.page
+                  tv_kind: obj.tv_kind, adult: obj.adult, page: obj.page
                 };
                 setLoading(true);
                 if (!append) statusText('Searching\u2026');
@@ -1908,7 +1890,7 @@ class ControlServer(
               function sendBrowse() {
                 send({
                   type: 'browse', category: sel.category, tv_kind: sel.tv_kind,
-                  adult: sel.adult, sort: sel.sort, page: 1
+                  adult: sel.adult, page: 1
                 }, false);
               }
 
@@ -1917,7 +1899,7 @@ class ControlServer(
                 var c = current;
                 send({
                   type: c.type, q: c.q, category: c.category, tv_kind: c.tv_kind,
-                  adult: c.adult, sort: c.sort, page: c.page + 1
+                  adult: c.adult, page: c.page + 1
                 }, true);
               }
 
@@ -2145,11 +2127,6 @@ class ControlServer(
                   type: 'random', category: sel.category,
                   tv_kind: sel.tv_kind, adult: sel.adult
                 }, false);
-              };
-
-              el('sort').onchange = function () {
-                sel.sort = el('sort').value;
-                clearResults();
               };
 
               // Read the keyword prefill from this page's own query string; the

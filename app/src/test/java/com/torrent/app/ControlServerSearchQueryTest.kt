@@ -18,9 +18,8 @@ class ControlServerSearchQueryTest {
         category: String? = null,
         tvKind: String? = null,
         adult: String? = null,
-        sort: String? = null,
         page: String? = null,
-    ) = ControlServer.buildCrawlerQuery(type, q, category, tvKind, adult, sort, page)
+    ) = ControlServer.buildCrawlerQuery(type, q, category, tvKind, adult, page)
 
     private fun okPath(
         type: String?,
@@ -28,10 +27,9 @@ class ControlServerSearchQueryTest {
         category: String? = null,
         tvKind: String? = null,
         adult: String? = null,
-        sort: String? = null,
         page: String? = null,
     ): String {
-        val r = build(type, q, category, tvKind, adult, sort, page)
+        val r = build(type, q, category, tvKind, adult, page)
         return (r as CrawlerQueryResult.Ok).path
     }
 
@@ -41,10 +39,9 @@ class ControlServerSearchQueryTest {
         category: String? = null,
         tvKind: String? = null,
         adult: String? = null,
-        sort: String? = null,
         page: String? = null,
     ): String {
-        val r = build(type, q, category, tvKind, adult, sort, page)
+        val r = build(type, q, category, tvKind, adult, page)
         return (r as CrawlerQueryResult.Bad).field
     }
 
@@ -62,10 +59,8 @@ class ControlServerSearchQueryTest {
                 tvKind = "episode", adult = "show", page = "2"))
     }
 
-    @Test fun browse_omitsAbsentParamsAndOrdersSortBeforePage() {
-        assertEquals(
-            "/browse?category=tv&sort=added&page=3",
-            okPath(type = "browse", category = "tv", sort = "added", page = "3"))
+    @Test fun browse_omitsAbsentParams() {
+        assertEquals("/browse?category=tv&page=3", okPath(type = "browse", category = "tv", page = "3"))
     }
 
     @Test fun browse_allOptionalAbsentHasNoQueryString() {
@@ -121,16 +116,6 @@ class ControlServerSearchQueryTest {
 
     @Test fun badAdult() {
         assertEquals("adult", badField(type = "browse", adult = "maybe"))
-    }
-
-    @Test fun badSortOnBrowse() {
-        assertEquals("sort", badField(type = "browse", sort = "name"))
-    }
-
-    @Test fun sortIsIgnoredOutsideBrowse() {
-        // search/random have no sort param, so a bogus value must not fail.
-        assertEquals("/search?q=x", okPath(type = "search", q = "x", sort = "name"))
-        assertEquals("/random?min_peers=10", okPath(type = "random", sort = "name"))
     }
 
     @Test fun badPage() {

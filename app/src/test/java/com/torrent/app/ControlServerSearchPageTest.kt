@@ -101,7 +101,7 @@ class ControlServerSearchPageTest {
     }
 
     @Test fun js_chipControlsDoNotAutoLoad() {
-        // webui-ux stage 3: the chip/sort controls only update in-page selection
+        // webui-ux stage 3: the chip controls only update in-page selection
         // state; results load only on Search (button/Enter) or Randomize.
         val sends = page.split("sendBrowse();").size - 1
         assertTrue("expected exactly one sendBrowse(); call, found $sends", sends == 1)
@@ -112,9 +112,20 @@ class ControlServerSearchPageTest {
         assertTrue(page.contains("sel.category"))
         assertTrue(page.contains("sel.tv_kind"))
         assertTrue(page.contains("sel.adult"))
-        assertTrue(page.contains("sel.sort"))
         assertFalse(page.contains("Pick a category to browse"))
         assertTrue(page.contains("Pick your filters, then Search or Randomize"))
+    }
+
+    @Test fun js_sortControlRemoved() {
+        // webui-ux stage 6: searches rank by relevance, so the sort dropdown and
+        // its JS wiring are gone and the status line says so for search results.
+        assertFalse(page.contains("id=\"sort\""))
+        assertFalse(page.contains("sortLabel"))
+        assertFalse(page.contains("sorted by"))
+        assertFalse(page.contains(">Newest<"))
+        assertFalse(page.contains(">Largest<"))
+        assertFalse(page.contains("sel.sort"))
+        assertTrue(page.contains("best matches first"))
     }
 
     @Test fun js_chipFocusMode_helpersExistAndAreWired() {
