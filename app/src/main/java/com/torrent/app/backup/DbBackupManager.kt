@@ -26,22 +26,9 @@ fun interface S3DbUploader {
  * One incremental dump of the crawler database (plan 2, Stage 1+2). The
  * production adapter is [CrawlerDbDumper]; unit tests of
  * [DbBackupManager] fake this seam.
- *
- * [maxCursors] peeks the current max ids WITHOUT dumping any rows (a cheap
- * `SELECT MAX(id)` per base table). [DbBackupManager] no longer calls it: a
- * first backup drains from the start of the DB ([DbBookmark.FIRST_RUN])
- * instead of seeding a baseline at the current max ids.
  */
 interface DbDumper {
     fun dump(dbFile: File, bookmark: DbBookmark): DbDumpOutcome
-
-    /**
-     * The DB's current max ids as a [DbBookmark] (an empty table maps to its
-     * [DbBookmark.FIRST_RUN] value, i.e. `-1`). Reads no row data — a
-     * `SELECT MAX(id)` per base table inside one read transaction — so it
-     * stays cheap even on a multi-ten-GB database.
-     */
-    fun maxCursors(dbFile: File): DbBookmark
 }
 
 /** Outcome states of the last DB dump upload check. */
@@ -49,7 +36,6 @@ enum class DbBackupState {
     IDLE,
     RUNNING,
     SUCCESS,
-    SEEDED,
     FAILED,
     SKIPPED_BUSY,
     SKIPPED_NO_WIFI,
@@ -223,7 +209,7 @@ class DbBackupManager(
      * A previous NOT_CONFIGURED state is reset to IDLE once the settings
      * are enabled and valid (that state only ever described the config
      * gate, which has just been cleared); any real outcome state
-     * (SUCCESS/SEEDED/FAILED/SKIPPED_*) and its message is preserved, only
+     * (SUCCESS/FAILED/SKIPPED_*) and its message is preserved, only
      * the config flags are corrected. Races with an in-flight check are
      * benign — status is a best-effort volatile snapshot and the check's
      * own finish() re-applies its outcome.

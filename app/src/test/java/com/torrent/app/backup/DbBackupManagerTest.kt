@@ -68,7 +68,6 @@ class DbBackupManagerTest {
     /** Scripted [DbDumper]; records the bookmark it was given. */
     private class FakeDumper(
         var outcome: DbDumpOutcome = testDumpOutcome(),
-        var maxCursorsResult: DbBookmark = DbBookmark(-1, -1),
         /**
          * Optional scripted outcomes (the bounded-drain tests): one per dump
          * call, consumed in order. An exhausted queue falls back to [outcome].
@@ -76,23 +75,15 @@ class DbBackupManagerTest {
         private val outcomes: MutableList<DbDumpOutcome> = mutableListOf(),
     ) : DbDumper {
         var calls = 0
-        var maxCalls = 0
         var lastBookmark: DbBookmark? = null
         /** Every cursor a dump was asked for, in call order. */
         val bookmarks = mutableListOf<DbBookmark>()
-        var lastMaxFile: File? = null
 
         override fun dump(dbFile: File, bookmark: DbBookmark): DbDumpOutcome {
             calls++
             lastBookmark = bookmark
             bookmarks += bookmark
             return if (outcomes.isNotEmpty()) outcomes.removeAt(0) else outcome
-        }
-
-        override fun maxCursors(dbFile: File): DbBookmark {
-            maxCalls++
-            lastMaxFile = dbFile
-            return maxCursorsResult
         }
     }
 
@@ -173,7 +164,7 @@ class DbBackupManagerTest {
 
     @Test fun refreshConfigStatus_updatesStaleSnapshotAfterApply() {
         val up = FakeUploader()
-        val d = FakeDumper(maxCursorsResult = DbBookmark(100, 5))
+        val d = FakeDumper()
         var s = settings(dbBackupEnabled = false)
         val m = DbBackupManager(
             dbFile = { dbFile() },
@@ -198,7 +189,6 @@ class DbBackupManagerTest {
         assertTrue(m.status.uploadEnabled)
         assertTrue(m.status.configured)
         assertEquals(DbBackupState.IDLE, m.status.state)
-        assertEquals(0, d.maxCalls) // config-only refresh: no seed/dump
         assertEquals(0, up.calls)
     }
 
@@ -305,7 +295,6 @@ class DbBackupManagerTest {
         val throwing = object : DbDumper {
             override fun dump(dbFile: File, bookmark: DbBookmark): DbDumpOutcome =
                 throw IOException("database is locked")
-            override fun maxCursors(dbFile: File): DbBookmark = DbBookmark(-1, -1)
         }
         val bookmarkFile = File(tmp.root, "db_bookmark.txt")
         // The check takes the dump path (the throwing dumper) whether or not a
@@ -578,7 +567,6 @@ class DbBackupManagerTest {
                 duringDump = m.inFlight
                 return testDumpOutcome()
             }
-            override fun maxCursors(dbFile: File): DbBookmark = DbBookmark(-1, -1)
         }
         m = DbBackupManager(
             dbFile = { dbFile() },
@@ -610,8 +598,7 @@ class DbBackupManagerTest {
         val d = FakeDumper(
             outcome = testDumpOutcome(
                 cursor = DbBookmark(10, 2),
-                objectKey = "db/incremental_20231114_0-10.sql.gz"),
-            maxCursorsResult = DbBookmark(100, 5))
+                objectKey = "db/incremental_20231114_0-10.sql.gz"))
         val bookmarkFile = File(tmp.root, "db_bookmark.txt")
         var stored: String? = null
         val m = newManager(
@@ -627,8 +614,6 @@ class DbBackupManagerTest {
         // baseline at the current max ids.
         assertEquals(DbBookmark.FIRST_RUN, d.lastBookmark)
         assertEquals(1, d.calls)
-        // The cheap MAX() peek is never used for seeding any more.
-        assertEquals(0, d.maxCalls)
         // The chunk was uploaded and only then followed by the bookmark write.
         assertEquals(1, up.calls)
         assertEquals("db/incremental_20231114_0-10.sql.gz", up.lastKey)
@@ -711,15 +696,13 @@ class DbBackupManagerTest {
     }
     @Test fun existingBookmarkDoesNotSeed() {
         val up = FakeUploader()
-        // A valid (FIRST_RUN) bookmark file exists -> the normal dump path; the
-        // expensive MAX() peek must NOT run.
-        val d = FakeDumper(maxCursorsResult = DbBookmark(999, 999))
+        // A valid (FIRST_RUN) bookmark file exists -> the normal dump path.
+        val d = FakeDumper()
         val bookmarkFile = File(tmp.root, "db_bookmark.txt")
         DbBookmark.write(bookmarkFile, DbBookmark.FIRST_RUN)
         val m = newManager(dbFile(), d, up, bookmarkFile = bookmarkFile)
         val st = m.runCheck(manual = true)
         assertEquals(DbBackupState.SUCCESS, st.state)
-        assertEquals(0, d.maxCalls)
         assertEquals(1, d.calls)
         assertEquals(DbBookmark.FIRST_RUN, d.lastBookmark)
     }
@@ -892,7 +875,6 @@ class DbBackupManagerTest {
         val oom = object : DbDumper {
             override fun dump(dbFile: File, bookmark: DbBookmark): DbDumpOutcome =
                 throw OutOfMemoryError("boom")
-            override fun maxCursors(dbFile: File): DbBookmark = DbBookmark(-1, -1)
         }
         val m = DbBackupManager(
             dbFile = { dbFile() },
