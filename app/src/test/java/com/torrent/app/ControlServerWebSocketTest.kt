@@ -20,8 +20,11 @@ import java.util.Base64
 import kotlin.random.Random
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
 import org.mockito.Mockito
 
 /**
@@ -30,8 +33,11 @@ import org.mockito.Mockito
  * crawler's loopback /stats, and a hand-rolled RFC 6455 client (house style:
  * raw sockets + retries). Android unit tests compile against android.jar,
  * which has no java.net.http / com.sun.net.httpserver, so the WebSocket
- * client speaks the protocol by hand.
+ * client speaks the protocol by hand. Runs under Robolectric so org.json is
+ * the real implementation (not the returnDefaultValues android.jar stub):
+ * handleSearchFrame parses each frame with JSONObject.
  */
+@RunWith(RobolectricTestRunner::class)
 class ControlServerWebSocketTest {
 
     private companion object {
@@ -190,6 +196,9 @@ class ControlServerWebSocketTest {
         }
 
         fun close() = runCatching { socket.close() }
+
+        /** Sends one masked client→server text frame (RFC 6455: client frames mask). */
+        fun sendText(text: String) = sendFrame(0x1, text.toByteArray())
     }
 
     // ── server / upstream plumbing ─────────────────────────────────────────
@@ -254,6 +263,34 @@ class ControlServerWebSocketTest {
         return server
     }
 
+    /** Accepts connections but never answers: the loopback fetch must hit its
+     * read timeout while the crawler daemon state still reports RUNNING. */
+    private fun startSilentCrawlerUpstream(): ServerSocket {
+        val server = ServerSocket(0)
+        Thread {
+            while (true) {
+                val socket = try {
+                    server.accept()
+                } catch (e: SocketException) {
+                    break
+                }
+                Thread {
+                    try {
+                        // Drain the request so the socket stays open; the
+                        // client blocks on read until its read timeout fires.
+                        val input = socket.getInputStream()
+                        val buf = ByteArray(512)
+                        while (input.read(buf) != -1) Unit
+                    } catch (_: Exception) {
+                    } finally {
+                        runCatching { socket.close() }
+                    }
+                }.apply { isDaemon = true }.start()
+            }
+        }.apply { isDaemon = true }.start()
+        return server
+    }
+
     private class LiveServer(val control: ControlServer, val port: Int) {
         fun start() = control.start()
         fun stop() = control.stop()
@@ -264,6 +301,7 @@ class ControlServerWebSocketTest {
         crawlerRunning: Boolean,
         crawlerPort: Int,
         pushPeriodMs: Long,
+        searchReadTimeoutMs: Int = ControlServer.SEARCH_READ_TIMEOUT_MS,
     ): LiveServer {
         val daemon = ProcessStatus(
             label = DaemonService.CRAWLER_LABEL,
@@ -300,6 +338,7 @@ class ControlServerWebSocketTest {
                 crawlerHttpPort = { crawlerPort },
                 port = port,
                 wsPushPeriodMs = pushPeriodMs,
+                searchReadTimeoutMs = searchReadTimeoutMs,
             ),
             port,
         )
@@ -389,6 +428,88 @@ class ControlServerWebSocketTest {
             }
         } finally {
             live.stop()
+        }
+    }
+
+    @Test fun searchWebSocket_runningDaemon_silentCrawler_answersBusyNotUnavailable() {
+        // The exact field report: a complete_series search while the crawler
+        // daemon is RUNNING but its HTTP API never answers. The old reply was
+        // the misleading `unavailable` ("crawler is starting or stopped");
+        // with the daemon state consulted it must be `busy` instead.
+        val upstream = startSilentCrawlerUpstream()
+        val live = startTestServer(
+            TOKEN, crawlerRunning = true, crawlerPort = upstream.localPort,
+            pushPeriodMs = 10_000, searchReadTimeoutMs = 500,
+        )
+        live.start()
+        try {
+            val ws = connectWithRetry(live.port, "/search/ws?token=$TOKEN")
+            try {
+                assertTrue("expected a 101 upgrade, got: ${ws.statusLine}", ws.upgraded)
+                ws.sendText("""{"id":7,"type":"search","q":"Manifest","tv_kind":"complete_series"}""")
+                val reply = ws.nextText(10_000)
+                assertTrue("expected a reply, got none", reply != null)
+                assertTrue("expected busy, got: $reply", reply!!.contains("\"error\":\"busy\""))
+                assertFalse("busy must not claim the crawler is down: $reply",
+                    reply.contains("unavailable"))
+                assertTrue("expected the request id echoed, got: $reply", reply.contains("\"id\":7"))
+            } finally {
+                ws.close()
+            }
+        } finally {
+            live.stop()
+            upstream.close()
+        }
+    }
+
+    @Test fun searchWebSocket_stoppedDaemon_answersUnavailable() {
+        // Nothing listens on the crawler port and the daemon reports STOPPED:
+        // the reply stays `unavailable` (the "starting or stopped" banner).
+        val live = startTestServer(
+            TOKEN, crawlerRunning = false, crawlerPort = 1,
+            pushPeriodMs = 10_000, searchReadTimeoutMs = 500,
+        )
+        live.start()
+        try {
+            val ws = connectWithRetry(live.port, "/search/ws?token=$TOKEN")
+            try {
+                ws.sendText("""{"id":8,"type":"search","q":"Manifest"}""")
+                val reply = ws.nextText(10_000)
+                assertTrue("expected a reply, got none", reply != null)
+                assertTrue("expected unavailable, got: $reply",
+                    reply!!.contains("\"error\":\"unavailable\""))
+            } finally {
+                ws.close()
+            }
+        } finally {
+            live.stop()
+        }
+    }
+
+    @Test fun searchWebSocket_crawlerAnswers_splicesPayloadVerbatim() {
+        // Happy path: the crawler answers 200 JSON, the reply splices it
+        // verbatim under `payload` (escaping stays the crawler's).
+        val upstream = startStatsUpstream("""{"results":[],"has_more":false}""")
+        val live = startTestServer(
+            TOKEN, crawlerRunning = true, crawlerPort = upstream.localPort,
+            pushPeriodMs = 10_000, searchReadTimeoutMs = 15_000,
+        )
+        live.start()
+        try {
+            val ws = connectWithRetry(live.port, "/search/ws?token=$TOKEN")
+            try {
+                ws.sendText("""{"id":9,"type":"browse","category":"tv","sort":"peers","page":1}""")
+                val reply = ws.nextText(10_000)
+                assertTrue("expected a reply, got none", reply != null)
+                assertTrue("expected ok with the payload spliced verbatim, got: $reply",
+                    reply!!.contains("\"ok\":true") &&
+                        reply.contains("\"payload\":{\"results\":[],\"has_more\":false}"))
+            } finally {
+                ws.close()
+            }
+        } finally {
+            live.stop()
+            upstream.close()
         }
     }
 

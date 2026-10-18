@@ -9,8 +9,10 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import io.ktor.server.websocket.*
 import io.ktor.websocket.*
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 import java.net.URLDecoder
 import java.net.URLEncoder
 import java.util.Base64
@@ -50,6 +52,11 @@ class ControlServer(
     private val crawlerHttpPort: () -> Int = { 8081 },
     // Stats websocket push period (webui stage 1); injectable for tests.
     private val wsPushPeriodMs: Long = 10_000L,
+    // Read timeout for /search/ws queries while the crawler daemon is RUNNING
+    // (search-dashboard): search/browse over a big torrents DB can take quite
+    // a long time, so this is much longer than the 15 s default. A crawler that
+    // is not RUNNING keeps the short default (fail fast). Injected for tests.
+    private val searchReadTimeoutMs: Int = SEARCH_READ_TIMEOUT_MS,
     private val crawlerDbSize: () -> Long? = { null },
     private val internalFreeSpace: () -> Long = { 0L },
     // Maintenance (plan 10 step 5): the POST route queues an action by name and
@@ -390,18 +397,30 @@ class ControlServer(
                         }
                         for (frame in incoming) {
                             if (frame !is Frame.Text) continue
-                            val reply = try {
-                                handleSearchFrame(frame.readText())
-                            } catch (e: Exception) {
-                                // Defensive: a reply is mandatory, never a crash.
-                                """{"id":0,"ok":false,"error":"bad_request"}"""
-                            }
-                            try {
-                                send(Frame.Text(reply))
-                            } catch (e: kotlinx.coroutines.CancellationException) {
-                                throw e // coroutine cancelled (client gone)
-                            } catch (e: Exception) {
-                                break // the socket went away; stop the loop
+                            // Snapshot the frame text here in the read loop: the
+                            // Frame's buffer is recycled once the loop moves on,
+                            // so readText() must not happen later, off-loop.
+                            val text = frame.readText()
+                            // A big-DB search can hold this fetch for the whole
+                            // search read timeout (120 s), so the reply must not
+                            // stall the read loop: fetch off-loop on
+                            // Dispatchers.IO, one in-flight fetch per frame.
+                            // Replies may race; the client drops stale ones by
+                            // id (latest-reply-wins).
+                            launch(Dispatchers.IO) {
+                                val reply = try {
+                                    handleSearchFrame(text)
+                                } catch (e: Exception) {
+                                    // Defensive: a reply is mandatory, never a crash.
+                                    """{"id":0,"ok":false,"error":"bad_request"}"""
+                                }
+                                try {
+                                    send(Frame.Text(reply))
+                                } catch (e: kotlinx.coroutines.CancellationException) {
+                                    throw e // coroutine cancelled (client gone)
+                                } catch (e: Exception) {
+                                    // the socket went away; nothing more to do
+                                }
                             }
                         }
                     }
@@ -1087,14 +1106,15 @@ class ControlServer(
     /**
      * Loopback GET of the crawler's JSON API ([pathAndQuery] must start with
      * `/`). Returns the raw body on 200, null on any error/non-200 — the legacy
-     * null-on-anything seam for /stats and /search/ws, which cannot tell a down
-     * crawler from a 404 and must keep behaving exactly as before. The read
-     * timeout defaults to 15 s because search/browse queries can be slow; the
-     * connect timeout stays short so a down crawler fails fast.
+     * null-on-anything seam for /stats, which cannot tell a down crawler from
+     * a 404 and must keep behaving exactly as before. The read timeout default
+     * [CRAWLER_READ_TIMEOUT_MS] serves the fast indexed routes; the search feed
+     * picks its own state-aware timeout — see [handleSearchFrame].
+     * The connect timeout stays short so a down crawler fails fast.
      */
     private fun fetchCrawlerJson(
         pathAndQuery: String,
-        readTimeoutMs: Int = 15_000,
+        readTimeoutMs: Int = CRAWLER_READ_TIMEOUT_MS,
     ): String? = (fetchCrawlerJsonStatus(pathAndQuery, readTimeoutMs) as? CrawlerFetch.Ok)?.body
 
     /**
@@ -1160,11 +1180,25 @@ class ControlServer(
     }
 
     /**
+     * True when the crawler supervisor reports the crawler daemon process
+     * RUNNING (label [DaemonService.CRAWLER_LABEL]). A RUNNING process whose
+     * loopback HTTP API lets a read timeout expire is busy — a big-DB search
+     * can take quite a while — not starting or stopped.
+     */
+    private fun crawlerDaemonRunning(): Boolean = daemonStatuses().any {
+        it.label == DaemonService.CRAWLER_LABEL && it.state == ProcessState.RUNNING
+    }
+
+    /**
      * Answers one /search/ws text frame. Never throws: an unparseable frame
      * yields `bad_request` (id 0), a missing/invalid `id` or `type` yields
-     * `bad_request: <field>`, an unreachable crawler yields `unavailable`, a
-     * non-object body yields `db_error`, and success carries the crawler's raw
-     * JSON body verbatim under `payload` (so escaping stays the crawler's).
+     * `bad_request: <field>`, a non-object body yields `db_error`, and success
+     * carries the crawler's raw JSON body verbatim under `payload` (so
+     * escaping stays the crawler's). An unreachable crawler yields
+     * `unavailable` — unless the daemon state says the crawler process is
+     * RUNNING: then a timed-out loopback fetch means the crawler is busy, not
+     * down, so the answer is `busy` and the query rides the long
+     * [searchReadTimeoutMs] instead of the short [CRAWLER_READ_TIMEOUT_MS].
      */
     private fun handleSearchFrame(text: String): String {
         val obj: JSONObject = try {
@@ -1191,16 +1225,36 @@ class ControlServer(
             is CrawlerQueryResult.Bad ->
                 "{\"id\":$id,\"ok\":false,\"error\":\"bad_request: ${result.field}\"}"
             is CrawlerQueryResult.Ok -> {
-                val body = fetchCrawlerJson(result.path)
-                    ?: return "{\"id\":$id,\"ok\":false,\"error\":\"unavailable\"}"
-                val isObject = try {
-                    JSONObject(body)
-                    true
-                } catch (e: Exception) {
-                    false
+                // The actual daemon state (not the fetch outcome) picks the read
+                // timeout and the "down" wording: a RUNNING crawler gets the
+                // long search timeout (big-DB queries are slow) and a
+                // timed-out/5xx fetch answers `busy`; anything else keeps the
+                // short default and the "starting or stopped" answer.
+                val crawlerRunning = crawlerDaemonRunning()
+                val fetch = fetchCrawlerJsonStatus(
+                    result.path,
+                    if (crawlerRunning) searchReadTimeoutMs else CRAWLER_READ_TIMEOUT_MS,
+                )
+                when (fetch) {
+                    is CrawlerFetch.Ok -> {
+                        val body = fetch.body
+                        val isObject = try {
+                            JSONObject(body)
+                            true
+                        } catch (e: Exception) {
+                            false
+                        }
+                        if (!isObject) "{\"id\":$id,\"ok\":false,\"error\":\"db_error\"}"
+                        else "{\"id\":$id,\"ok\":true,\"payload\":$body}"
+                    }
+                    // The crawler answered 404: it is up, but that is not the
+                    // answer a search query can use (kept as `unavailable`).
+                    is CrawlerFetch.NotFound ->
+                        "{\"id\":$id,\"ok\":false,\"error\":\"unavailable\"}"
+                    is CrawlerFetch.Unavailable ->
+                        if (crawlerRunning) "{\"id\":$id,\"ok\":false,\"error\":\"busy\"}"
+                        else "{\"id\":$id,\"ok\":false,\"error\":\"unavailable\"}"
                 }
-                if (!isObject) "{\"id\":$id,\"ok\":false,\"error\":\"db_error\"}"
-                else "{\"id\":$id,\"ok\":true,\"payload\":$body}"
             }
         }
     }
@@ -1322,6 +1376,19 @@ class ControlServer(
         /** Loopback read timeouts for the torrent-detail forward routes. */
         internal const val TORRENT_READ_TIMEOUT_MS = 15_000
         internal const val TORRENT_REFRESH_TIMEOUT_MS = 30_000
+
+        /** Default loopback read timeout for one crawler JSON GET — the fast,
+         * indexed routes (/stats, torrent detail). Short so a down crawler
+         * fails fast. */
+        internal const val CRAWLER_READ_TIMEOUT_MS = 15_000
+
+        /** Read timeout for /search/ws queries (search/browse/random) while
+         * the crawler daemon is RUNNING. FTS search over a big torrents DB can
+         * take quite a long time (a `tv_kind=complete_series` search
+         * especially), so this is 8x [CRAWLER_READ_TIMEOUT_MS]; the client
+         * spinner shows "Searching…" for the whole wait. Injected per server
+         * as `searchReadTimeoutMs`. */
+        internal const val SEARCH_READ_TIMEOUT_MS = 120_000
 
         /** `hash` must be a full BEP3 info hash: exactly 40 hex chars. */
         internal const val INFO_HASH_HEX_LEN = 40
@@ -1860,6 +1927,11 @@ class ControlServer(
                 if (err === 'unavailable') {
                   setLive('down', 'unavailable');
                   showBanner('amber', 'Crawler is starting or stopped');
+                } else if (err === 'busy') {
+                  // The server checked the daemon state: the crawler process is
+                  // RUNNING and the query simply outlasted the search read
+                  // timeout (big DB). Not a crash — retry or narrow the filters.
+                  showBanner('amber', 'Crawler is busy \u2014 the search timed out. Try again or narrow the filters.');
                 } else if (err === 'db_error') {
                   showBanner('red', 'Crawler database error');
                 } else if (err.indexOf('bad_request') === 0) {

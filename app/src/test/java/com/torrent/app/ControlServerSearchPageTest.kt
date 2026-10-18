@@ -66,6 +66,18 @@ class ControlServerSearchPageTest {
     @Test fun js_hasAddButton() {
         assertTrue(page.contains("/api/transmission/add"))
     }
+
+    @Test fun js_distinguishesBusyCrawlerFromDownCrawler() {
+        // A `busy` reply means the server checked the daemon state: the crawler
+        // process is RUNNING while the loopback fetch outlasted the search read
+        // timeout (big-DB search) — a different banner from the `unavailable`
+        // (starting or stopped) one, which stays for a down/starting crawler.
+        assertTrue(page.contains("err === 'busy'"))
+        assertTrue("the busy banner must mention the timed-out search",
+            page.contains("the search timed out"))
+        assertTrue("the unavailable banner must keep its starting-or-stopped wording",
+            page.contains("Crawler is starting or stopped"))
+    }
     @Test fun page_hasNoProxyOriginParameter() {
         // Torrent-page stage 2: detail links are same-origin, so the page no
         // longer carries a crawler proxy origin (and no `proxyOrigin` const).
