@@ -194,9 +194,10 @@ class CrawlerConfig(
 
         /**
          * Text list files shipped under `assets/dht_crawler/` and kept in the work
-         * dir: the keyword lists plus the always-on hard-block list (Stage 6).
+         * dir: the torrent-search keyword list plus the always-on hard-block list
+         * (Stage 6).
          */
-        val KEYWORD_FILES = listOf("porn_filter_keywords.txt", "torrent_search_keywords.txt", HARD_BLOCK_FILE)
+        val KEYWORD_FILES = listOf("torrent_search_keywords.txt", HARD_BLOCK_FILE)
 
         /** Hard-block list file name (`hard_block_file`), staged in the work dir. */
         const val HARD_BLOCK_FILE = "hard_block.txt"

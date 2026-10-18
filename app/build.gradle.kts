@@ -421,7 +421,8 @@ tasks.register("prepareDhtCrawlerSrc") {
             "civetweb-stop-flag-atomic.patch",
             "bep51-periodic-cache-save.patch",
             "restore-database.patch",
-            "clear-failure-filter.patch"
+            "clear-failure-filter.patch",
+            "remove-porn-filter.patch"
         )) {
             project.exec {
                 commandLine("patch", "-p1", "-d", destDir.absolutePath, "-i", file("$destDir/patches/$patchName").absolutePath)
@@ -436,7 +437,7 @@ tasks.register<Copy>("copyDhtCrawlerAssets") {
     val crawlerSrc = providers.gradleProperty("dhtCrawlerSrc").orNull?.let { file(it).absoluteFile }
         ?: file("src/main/cpp/dht_crawler")
     from(crawlerSrc) {
-        include("porn_filter_keywords.txt", "torrent_search_keywords.txt", "hard_block.txt")
+        include("torrent_search_keywords.txt", "hard_block.txt")
     }
     // Stage 5: fastText classifier model files. Binary — the Copy task is byte-exact
     // (no text filtering / charset conversion), so a plain copy is correct here.

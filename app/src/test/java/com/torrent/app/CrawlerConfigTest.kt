@@ -179,7 +179,6 @@ class CrawlerConfigTest {
             // fixture files mirroring the `assets/dht_crawler/` layout. The default
             // config is the real checked-in asset, so the pins are verified end to end.
             val fixture = File(tmp.root, "assets/dht_crawler").apply { mkdirs() }
-            File(fixture, "porn_filter_keywords.txt").writeText("keyword-a\nkeyword-b\n")
             File(fixture, "torrent_search_keywords.txt").writeText("strip-a\n")
             File(fixture, "hard_block.txt").writeText("blocked-word\n")
             val defaultAsset = File("src/main/assets/dht_crawler/config.ini.default")
@@ -358,7 +357,6 @@ class CrawlerConfigTest {
         private fun configWithRealDefaultAsset(): CrawlerConfig {
             val context = RuntimeEnvironment.getApplication()
             val fixture = File(tmp.root, "assets/dht_crawler").apply { mkdirs() }
-            File(fixture, "porn_filter_keywords.txt").writeText("keyword-a\n")
             File(fixture, "torrent_search_keywords.txt").writeText("strip-a\n")
             File(fixture, "hard_block.txt").writeText("blocked-word\n")
             val defaultAsset = File("src/main/assets/dht_crawler/config.ini.default")
