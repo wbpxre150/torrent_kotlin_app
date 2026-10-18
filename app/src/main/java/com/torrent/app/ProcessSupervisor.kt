@@ -78,6 +78,28 @@ class ProcessSupervisor(
 
     private val _status = MutableStateFlow(ProcessStatus(label = label, state = ProcessState.STOPPED))
     val status: StateFlow<ProcessStatus> = _status.asStateFlow()
+    /**
+     * The **only** writer of [_status]. Every transition — start()/stop(), the
+     * run loop's loop-top and launch publishes, the readiness publish and the
+     * log-tail push — goes through here, under [lifecycleLock].
+     *
+     * Why: `_status.value = _status.value.copy(...)` is a read-modify-write, not
+     * an atomic update. An unguarded writer (the log tail pushes a snapshot
+     * every ~300 ms while a daemon spams its startup log) could read a stale
+     * status, get descheduled, and then land its write *after* a guarded
+     * publish — silently reverting it: a daemon that already answered its
+     * readiness probe stayed STARTING forever, and the launch publish could be
+     * rolled back to STOPPED with the pid nulled while the child was alive.
+     * Serializing every write keeps the last transition authoritative.
+     *
+     * `internal` (not private) so a unit test can assert the guarded RMW.
+     */
+    internal fun updateStatus(transform: (ProcessStatus) -> ProcessStatus): ProcessStatus =
+        synchronized(lifecycleLock) {
+            val next = transform(_status.value)
+            _status.value = next
+            next
+        }
 
     // Internal coroutine scope — cancelled on stop()
     private var scope: CoroutineScope? = null
@@ -113,7 +135,7 @@ class ProcessSupervisor(
                     Log.e(TAG, "[$label] supervisor loop failed", e)
                 })
         scope = newScope
-        _status.value = _status.value.copy(state = ProcessState.STARTING, pid = null)
+        updateStatus { it.copy(state = ProcessState.STARTING, pid = null) }
         newScope.launch { runLoop() }
     }
 
@@ -125,11 +147,11 @@ class ProcessSupervisor(
     fun stop() = synchronized(lifecycleLock) {
         Log.d(TAG, "[$label] stop() requested")
         stopping = true
-        _status.value = _status.value.copy(state = ProcessState.STOPPING)
+        updateStatus { it.copy(state = ProcessState.STOPPING) }
         scope?.cancel()
         scope = null
         killChild()
-        _status.value = _status.value.copy(state = ProcessState.STOPPED, pid = null, startTimeMs = null)
+        updateStatus { it.copy(state = ProcessState.STOPPED, pid = null, startTimeMs = null) }
     }
 
     /** kill + delayed restart. Blocking (see [stop]); callable from any non-main thread. */
@@ -150,7 +172,7 @@ class ProcessSupervisor(
         // [stopping] flag: after stop() + start() the flag is false again, and
         // a stale loop must not resurrect and launch a second child.
         while (currentCoroutineContext().isActive && !stopping) {
-            _status.value = _status.value.copy(state = ProcessState.STARTING, pid = null)
+            updateStatus { it.copy(state = ProcessState.STARTING, pid = null) }
 
             val proc = launchChild()
             if (proc == null) {
@@ -178,12 +200,14 @@ class ProcessSupervisor(
             // With a readiness probe the launch stays STARTING until the probe
             // answers; without one it is RUNNING as soon as it is forked (the
             // original behavior).
-            _status.value = _status.value.copy(
-                state = if (readinessProbe == null) ProcessState.RUNNING else ProcessState.STARTING,
-                pid = pidOf(proc),
-                startTimeMs = now,
-                restartCount = restarts,
-            )
+            updateStatus {
+                it.copy(
+                    state = if (readinessProbe == null) ProcessState.RUNNING else ProcessState.STARTING,
+                    pid = pidOf(proc),
+                    startTimeMs = now,
+                    restartCount = restarts,
+                )
+            }
             Log.i(TAG, "[$label] started (restart #$restarts)")
 
             // Drain stdout/stderr concurrently with waitFor. While a readiness
@@ -250,13 +274,13 @@ class ProcessSupervisor(
                 // A stop() that raced the probe must never be overwritten by a
                 // late RUNNING: only publish from STARTING and only if we are
                 // not stopping. Other fields (logs, pid, …) are carried over.
-                val published = synchronized(lifecycleLock) {
-                    val cur = _status.value
+                var published = false
+                updateStatus { cur ->
                     if (!stopping && cur.state == ProcessState.STARTING) {
-                        _status.value = cur.copy(state = ProcessState.RUNNING)
-                        true
+                        published = true
+                        cur.copy(state = ProcessState.RUNNING)
                     } else {
-                        false
+                        cur
                     }
                 }
                 if (published) {
@@ -359,11 +383,17 @@ class ProcessSupervisor(
     }
 
     private fun pushToRingBuffer(line: String) {
-        synchronized(ringBuffer) {
+        // Mutate the buffer under its own lock, then publish the snapshot through
+        // updateStatus() *after* releasing it: no thread may hold lifecycleLock
+        // while waiting for the ringBuffer lock (lifecycleLock → ringBuffer is
+        // never taken anywhere), and a stop() blocking in killChild() must not
+        // stall the stdout drain.
+        val lines = synchronized(ringBuffer) {
             if (ringBuffer.size >= pipelineMaxLines) ringBuffer.removeFirst()
             ringBuffer.addLast(line)
-            _status.value = _status.value.copy(lastLogLines = ringBuffer.toList())
+            ringBuffer.toList()
         }
+        updateStatus { it.copy(lastLogLines = lines) }
     }
 
     private suspend fun tailLogFileIntoRingBuffer(logFile: File) {
