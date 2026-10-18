@@ -450,13 +450,14 @@ tasks.register<Copy>("copyDhtCrawlerAssets") {
         into("models")
     }
     into(file("build/generated/assets/dht_crawler/dht_crawler"))
-    // A Copy task leaves files behind that its sources no longer produce, so after a
-    // models/v1 -> models/v2 bump a warm build tree still held models/v1 and packaged it
-    // into the APK. `models/` under this destination is exclusively this task's model
-    // output (the keyword files land in the parent dir), so dropping it wholesale before
-    // the copy re-populates it is safe and stays correct for the next model bump too.
+    // A Copy task leaves files behind that its sources no longer produce: after a
+    // models/v1 -> models/v2 bump a warm build tree still held models/v1, and after a
+    // keyword file was dropped from the crawler repo its stale copy stayed here — both
+    // got packaged into the APK. This destination dir is exclusively this task's output
+    // (keyword files at the top level, models/ below), so dropping it wholesale before
+    // the copy re-populates it is safe and stays correct for future removals too.
     doFirst {
-        delete(file("build/generated/assets/dht_crawler/dht_crawler/models"))
+        delete(file("build/generated/assets/dht_crawler/dht_crawler"))
     }
     // Gradle does not treat a file *added* to a Copy task's destination as "out of date",
     // so without this the whole task (and the cleanup above) is skipped on a warm tree and
