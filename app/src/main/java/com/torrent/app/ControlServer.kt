@@ -21,6 +21,7 @@ import org.json.JSONObject
 import com.torrent.app.config.TransmissionApplyMode
 import com.torrent.app.config.CrawlerKeys
 import com.torrent.app.config.CrawlerSettings
+import com.torrent.app.config.CrawlerTaxonomy
 import com.torrent.app.config.BackupSettings
 
 class ControlServer(
@@ -266,20 +267,30 @@ class ControlServer(
                         call.respondText(buildCrawlerPanel(msg, ok, rebuildBloom), ContentType.Text.Html)
                     }
                     post("settings/crawler") {
-                        val form = parseForm(call.receiveText())
+                        val multi = parseFormMulti(call.receiveText())
+                        val form = collapseForm(multi)
                         val currentCfg = loadConfig()
                         val current = currentCfg.crawler
-                        val s = crawlerSettingsFromForm(form, current)
-                        val backup = backupSettingsFromForm(form, currentCfg.backup)
-                        val bloomChanged = current.bloomCapacity != s.bloomCapacity ||
-                            current.failureBloomCapacity != s.failureBloomCapacity ||
-                            current.bloomErrorRate != s.bloomErrorRate
-                        val r = applyCrawler(s)
-                        val rb = saveBackup(backup)
                         val token = parseCookieToken(call.request.headers["Cookie"]) ?: call.request.queryParameters["token"] ?: ""
-                        val msg = if (r.ok && rb.ok) r.message else "${r.message} / backup: ${rb.message}"
-                        val rebuild = if (bloomChanged) "&rebuildBloom=true" else ""
-                        call.respondRedirect("/settings/crawler?msg=${urlEnc(msg)}&ok=${r.ok && rb.ok}&token=$token$rebuild")
+                        when (val parsed = crawlerSettingsFromForm(multi, current)) {
+                            // Rejected before anything is written or restarted (stage 4:
+                            // an empty category selection would purge the whole database).
+                            is CrawlerSettingsFormResult.Bad -> call.respondRedirect(
+                                "/settings/crawler?msg=${urlEnc(parsed.message)}&ok=false&token=$token")
+                            is CrawlerSettingsFormResult.Ok -> {
+                                val s = parsed.settings
+                                val backup = backupSettingsFromForm(form, currentCfg.backup)
+                                val bloomChanged = current.bloomCapacity != s.bloomCapacity ||
+                                    current.failureBloomCapacity != s.failureBloomCapacity ||
+                                    current.bloomErrorRate != s.bloomErrorRate
+                                val r = applyCrawler(s)
+                                val rb = saveBackup(backup)
+                                val msg = if (r.ok && rb.ok) r.message else "${r.message} / backup: ${rb.message}"
+                                val rebuild = if (bloomChanged) "&rebuildBloom=true" else ""
+                                call.respondRedirect(
+                                    "/settings/crawler?msg=${urlEnc(msg)}&ok=${r.ok && rb.ok}&token=$token$rebuild")
+                            }
+                        }
                     }
                     get("api/crawler/apply-status") {
                         val st = crawlerApplyStatus()
@@ -779,6 +790,32 @@ class ControlServer(
         """.trimIndent()
     }
 
+    /**
+     * The effective taxonomy selection for the UI: an empty stored list means
+     * "save everything" (the [CrawlerSettings] convention), so it renders as
+     * every name selected.
+     */
+    private fun savedSelection(selected: List<String>, all: List<String>): Set<String> =
+        if (selected.isEmpty()) all.toSet() else selected.map { it.trim().lowercase() }.toSet()
+
+    /**
+     * One taxonomy multi-select, rendered as plain checkbox labels so the whole
+     * settings form still posts as one plain `<form>` (stage 4). Every box takes
+     * the same `name`, so the browser posts one value per checked box.
+     */
+    private fun taxonomyToggles(
+        name: String,
+        all: List<String>,
+        labels: Map<String, String>,
+        selected: List<String>,
+    ): String {
+        val saved = savedSelection(selected, all)
+        return all.joinToString("") { n ->
+            val on = if (n in saved) " checked" else ""
+            """<label><input type="checkbox" name="$name" value="$n"$on> ${labels[n] ?: n}</label>"""
+        }
+    }
+
     internal fun buildCrawlerPanel(msg: String?, ok: Boolean, rebuildBloom: Boolean): String {
         val s = loadConfig().crawler
         val sBackup = loadConfig().backup
@@ -799,6 +836,17 @@ class ControlServer(
         val maintenanceSection = buildMaintenanceSection()
         val backupSection = buildBackupSection()
         val dbBackupSection = buildDbBackupSection()
+        // Stage 4: the category selection. An empty stored list means "save all"
+        // (the CrawlerSettings convention), so the toggles all render checked.
+        val savedCategories = savedSelection(s.saveCategories, CrawlerTaxonomy.CATEGORIES)
+        val categoryToggles = taxonomyToggles(
+            "saveCategories", CrawlerTaxonomy.CATEGORIES, CATEGORY_LABELS, s.saveCategories)
+        val tvKindToggles = taxonomyToggles(
+            "saveTvKinds", CrawlerTaxonomy.TV_KINDS, TV_KIND_LABELS, s.saveTvKinds)
+        // TV kinds only matter for tv/anime rows; the row is revealed client-side
+        // too, so a selection change takes effect without a save.
+        val tvKindRowHidden =
+            if ("tv" in savedCategories || "anime" in savedCategories) "" else " hidden"
         return """
             <!DOCTYPE html><html><head><title>DHT crawler settings</title>
             <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -810,6 +858,10 @@ class ControlServer(
             #maint-status.busy{background:#fef7e0;color:#7a5900}
             #maint-btns form{display:inline-block;margin:0 .5em .5em 0}
             #maint-btns button{margin:0;padding:.4em .8em}
+            .pick{display:flex;flex-wrap:wrap;margin:4px 0}
+            .pick label{display:inline-flex;align-items:center;width:auto;margin:.2em 1em .2em 0}
+            #save-tv-kind-row h3{margin:10px 0 2px;font-size:.85rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+            #save-tv-kind-row[hidden]{display:none}
             </style></head><body>
             <h1>DHT crawler</h1>$banner
             <form method="post" action="/settings/crawler">
@@ -832,6 +884,20 @@ class ControlServer(
               </fieldset>
               <fieldset class="card"><legend>Filters</legend>
                 <label>Non-Latin language threshold (0..100)<input name="languageFilterNonLatinThreshold" value="${s.languageFilterNonLatinThreshold}"></label>
+              </fieldset>
+              <fieldset class="card"><legend>Categories to save</legend>
+                <p class="meta"><strong>Checked categories are saved</strong> to the database;
+                <strong>unchecked categories are dropped</strong> when the crawler finds them. The
+                <em>Category filter update</em> button in the maintenance section below then deletes the
+                existing database rows of every unchecked category and compacts the database. Tick at
+                least one category.</p>
+                <div class="pick">$categoryToggles</div>
+                <div id="save-tv-kind-row"$tvKindRowHidden>
+                  <h3>TV kinds — applies to TV and anime torrents only</h3>
+                  <p class="meta">Checked kinds are saved; unchecked kinds are dropped (only within TV and
+                  anime rows). Leaving every kind unchecked saves all of them.</p>
+                  <div class="pick">$tvKindToggles</div>
+                </div>
               </fieldset>
               <fieldset class="card"><legend>Adult content handling</legend>
                 <label class="row"><input type="checkbox" name="classifierEnabled" ${checked(s.classifierEnabled)}> Ingest-time classifier (on by default)</label>
@@ -891,6 +957,20 @@ class ControlServer(
               }
               ids.forEach(function (id) { document.getElementById(id).addEventListener('input', updateEst); });
               updateEst();
+              // TV kinds only apply to tv/anime rows, so the row is revealed whenever
+              // one of those categories is ticked. Its boxes stay checked while
+              // hidden, so switching tv/anime off and back on keeps the selection.
+              var catBoxes = document.querySelectorAll('input[name="saveCategories"]');
+              function syncTvKindRow() {
+                var on = false;
+                for (var ci = 0; ci < catBoxes.length; ci++) {
+                  if (catBoxes[ci].checked && (catBoxes[ci].value === 'tv' || catBoxes[ci].value === 'anime')) on = true;
+                }
+                var row = document.getElementById('save-tv-kind-row');
+                if (on) row.removeAttribute('hidden'); else row.setAttribute('hidden', '');
+              }
+              for (var ci = 0; ci < catBoxes.length; ci++) catBoxes[ci].addEventListener('change', syncTvKindRow);
+              syncTvKindRow();
               function pollApply() {
                 fetch('/api/crawler/apply-status').then(function (r) { return r.json(); }).then(function (st) {
                   var box = document.getElementById('apply-status');
@@ -962,14 +1042,19 @@ class ControlServer(
         """.trimIndent()
     }
 
-    /** The maintenance fieldset on the crawler panel (plan 10 step 4). */
+    /**
+     * The maintenance fieldset on the crawler panel (plan 10 step 4). Each action
+     * renders one button; stage 4 replaced the raw route names with a readable
+     * label + a description of what the action does, so the purge button cannot
+     * be mistaken for a filtered export.
+     */
     private fun buildMaintenanceSection(): String {
         val buttons = MaintenanceAction.entries.joinToString("") { a ->
             val warn = if (a.needsSpaceCheck) " (needs ~DB size of free internal space)" else ""
             """
               <form method="post" action="/crawler/maintenance/${a.route}"
-                    onsubmit="return confirm('Run ${a.flag}? The crawler is stopped while it runs.$warn')">
-              <button type="submit" class="btn secondary">${a.route}</button></form>
+                    onsubmit="return confirm('${maintenanceWhat(a)}? The crawler is stopped while it runs.$warn')">
+              <button type="submit" class="btn secondary" title="${a.flag}">${maintenanceLabel(a)}</button></form>
             """.trimIndent()
         }
         return """
@@ -977,11 +1062,35 @@ class ControlServer(
               <p class="meta">Runs <code>libdhtcrawler.so &lt;flag&gt;</code> as a one-shot in the crawler
               work dir. compact / recover-database need ~DB size of free internal space. The supervised
               crawler is stopped first and restarted afterwards if enabled (and wifi is up).</p>
+              <p class="meta"><strong>Category filter update</strong> deletes the database rows of every
+              category you left unchecked in <em>Categories to save</em> above (and of the unchecked TV
+              kinds inside TV/anime rows), then compacts the database and updates the crawler's stats.</p>
               <div id="maint-btns">$buttons</div>
               <div id="maint-status" class="meta">Maintenance: idle</div>
               <pre id="maint-log" class="apply-log loglines" style="display:none"></pre>
             </fieldset>
         """.trimIndent()
+    }
+
+    /** Human label for a maintenance button (the flag is kept as its tooltip). */
+    private fun maintenanceLabel(a: MaintenanceAction): String = when (a) {
+        MaintenanceAction.CHECK_DATABASE -> "Check database"
+        MaintenanceAction.COMPACT -> "Compact database"
+        MaintenanceAction.RECOVER_DATABASE -> "Recover database"
+        MaintenanceAction.REBUILD_BLOOM_FILTER -> "Rebuild bloom filter"
+        MaintenanceAction.CLEAR_FAILURE_FILTER -> "Clear failure filter"
+        MaintenanceAction.CATEGORY_FILTER_UPDATE -> "Category filter update"
+    }
+
+    /** What a maintenance action does, phrased for its confirmation prompt. */
+    private fun maintenanceWhat(a: MaintenanceAction): String = when (a) {
+        MaintenanceAction.CHECK_DATABASE -> "Check the database for corruption"
+        MaintenanceAction.COMPACT -> "Compact the database"
+        MaintenanceAction.RECOVER_DATABASE -> "Recover a damaged database"
+        MaintenanceAction.REBUILD_BLOOM_FILTER -> "Rebuild the bloom filters from the database"
+        MaintenanceAction.CLEAR_FAILURE_FILTER -> "Clear the failure filter"
+        MaintenanceAction.CATEGORY_FILTER_UPDATE ->
+            "Delete all torrents in unchecked categories from the database and compact it"
     }
 
     /** The BEP51 cache backup section on the crawler panel (Stage 4). */
@@ -1296,13 +1405,25 @@ class ControlServer(
             data class Bad(val field: String) : CrawlerQueryResult
         }
 
-        private val SEARCH_CATEGORIES = setOf(
-            "unknown", "movie", "tv", "anime", "music", "audiobook",
-            "ebook", "comic", "software", "game", "image", "other")
-        private val SEARCH_TV_KINDS = setOf(
-            "none", "episode", "multi_episode", "season_pack",
-            "multi_season", "complete_series", "daily")
+        // The search allow-lists are exactly the crawler taxonomy (stage 4): the
+        // chips the page renders are hand-written below, but validation and the
+        // settings form share one source of truth.
+        private val SEARCH_CATEGORIES: Set<String> = CrawlerTaxonomy.CATEGORIES.toSet()
+        private val SEARCH_TV_KINDS: Set<String> = CrawlerTaxonomy.TV_KINDS.toSet()
         private val SEARCH_ADULT_MODES = setOf("hide", "show", "only")
+
+        /** Display labels for the crawler settings page's category toggles. */
+        private val CATEGORY_LABELS: Map<String, String> = mapOf(
+            "unknown" to "Unknown", "movie" to "Movie", "tv" to "TV", "anime" to "Anime",
+            "music" to "Music", "audiobook" to "Audiobook", "ebook" to "Ebook",
+            "comic" to "Comic", "software" to "Software", "game" to "Game",
+            "image" to "Image", "other" to "Other")
+
+        /** Display labels for the crawler settings page's tv-kind toggles. */
+        private val TV_KIND_LABELS: Map<String, String> = mapOf(
+            "none" to "None", "episode" to "Episodes", "multi_episode" to "Multi-episode",
+            "season_pack" to "Season packs", "multi_season" to "Multi-season",
+            "complete_series" to "Complete series", "daily" to "Daily")
 
         /**
          * Validates one /search/ws request and builds the crawler loopback path
@@ -2828,15 +2949,30 @@ class ControlServer(
             append(",\"configured\":").append(st.configured).append("}")
         }
 
-        internal fun parseForm(body: String): Map<String, String> {
+        /**
+         * Decodes a form body keeping every value of a repeated key (checkbox
+         * groups post one value per checked box). Otherwise identical to
+         * [parseForm]: `+` stays literal, undecodable pairs are dropped.
+         */
+        internal fun parseFormMulti(body: String): Map<String, List<String>> {
             if (body.isEmpty()) return emptyMap()
             return body.split("&").mapNotNull { pair ->
                 val idx = pair.indexOf('=')
                 if (idx < 0) null
                 else URLDecoder.decode(pair.substring(0, idx), "UTF-8") to
                      URLDecoder.decode(pair.substring(idx + 1), "UTF-8")
-            }.toMap()
+            }.groupBy({ it.first }, { it.second })
         }
+
+        /**
+         * Collapses a multi-value form map to one value per key (last wins, like
+         * the old `toMap()`), for the single-value controls.
+         */
+        internal fun collapseForm(multi: Map<String, List<String>>): Map<String, String> =
+            multi.mapValues { it.value.last() }
+
+        internal fun parseForm(body: String): Map<String, String> =
+            collapseForm(parseFormMulti(body))
         internal fun parseCookieToken(cookieHeader: String?): String? {
             if (cookieHeader == null) return null
             for (part in cookieHeader.split(';')) {
@@ -2897,44 +3033,102 @@ class ControlServer(
         internal fun crawlerStatsJson(statsBody: String?, state: ProcessState? = null): String =
             if (statsBody.isNullOrBlank()) "{\"running\":false,\"state\":\"${state ?: ProcessState.STOPPED}\"}" else statsBody
 
+        /** One crawler-settings form parse outcome (stage 4). */
+        internal sealed interface CrawlerSettingsFormResult {
+            data class Ok(val settings: CrawlerSettings) : CrawlerSettingsFormResult
+
+            /** The form was rejected; [message] is shown in the panel's error banner. */
+            data class Bad(val message: String) : CrawlerSettingsFormResult
+        }
+
+        /** One validated taxonomy multi-select: the picked names in taxonomy order. */
+        private sealed interface TaxonomySelection {
+            data class Ok(val names: List<String>) : TaxonomySelection
+            data class Bad(val message: String) : TaxonomySelection
+        }
+
+        /**
+         * Validates one taxonomy multi-select parameter ([values] is every posted
+         * value of the field, or null when the field was not posted at all) and
+         * returns the selection in [allowed]'s order. Values are trimmed +
+         * lowercased first; a value outside [allowed] rejects the whole form.
+         */
+        private fun taxonomySelection(
+            label: String,
+            allowed: List<String>,
+            values: List<String>?,
+        ): TaxonomySelection {
+            val picked = values.orEmpty().map { it.trim().lowercase() }.filter { it.isNotEmpty() }
+            val unknown = picked.firstOrNull { it !in allowed }
+            if (unknown != null)
+                return TaxonomySelection.Bad(
+                    "unknown $label '$unknown' — not one of ${allowed.joinToString(", ")}")
+            return TaxonomySelection.Ok(allowed.filter { it in picked })
+        }
+
         /**
          * Builds CrawlerSettings from the settings form (checkbox presence =
          * true, blank/missing numerics fall back to [current]). Pure and
-         * unit-testable; the POST route validates the result server-side.
+         * unit-testable; the POST route redirects with the message on [Bad].
+         *
+         * The multi-select taxonomies are validated here rather than in
+         * ConfigValidator because "nothing selected" is a *form* mistake, not an
+         * invalid config: an empty list legitimately means "save everything".
+         * `saveCategories` is required — the fieldset is always rendered on the
+         * only page that posts this form, so an absent key can only mean the
+         * user unticked every box, which would purge the whole database.
+         * `saveTvKinds` stays optional (empty = keep every kind; CrawlerConfig
+         * then omits the key).
          */
         internal fun crawlerSettingsFromForm(
-            form: Map<String, String>,
+            form: Map<String, List<String>>,
             current: CrawlerSettings,
-        ): CrawlerSettings = CrawlerSettings(
-            enabled = form.containsKey("enabled"),
-            wifiOnly = form.containsKey("wifiOnly"),
-            logLevel = form["logLevel"]?.takeIf { it.isNotEmpty() } ?: current.logLevel,
-            dhtPort = form["dhtPort"]?.toIntOrNull() ?: current.dhtPort,
-            niceLevel = form["niceLevel"]?.toIntOrNull() ?: current.niceLevel,
-            numTrees = form["numTrees"]?.toIntOrNull() ?: current.numTrees,
-            treeFindNodeWorkers = form["treeFindNodeWorkers"]?.toIntOrNull() ?: current.treeFindNodeWorkers,
-            treeBep51Workers = form["treeBep51Workers"]?.toIntOrNull() ?: current.treeBep51Workers,
-            treeGetPeersWorkers = form["treeGetPeersWorkers"]?.toIntOrNull() ?: current.treeGetPeersWorkers,
-            treeMetadataWorkers = form["treeMetadataWorkers"]?.toIntOrNull() ?: current.treeMetadataWorkers,
-            treeInfohashQueueCapacity = form["treeInfohashQueueCapacity"]?.toIntOrNull() ?: current.treeInfohashQueueCapacity,
-            treePeersQueueCapacity = form["treePeersQueueCapacity"]?.toIntOrNull() ?: current.treePeersQueueCapacity,
-            // Stage 4 owns the category/tv-kind chips; until then the form
-            // carries no selection, so keep the stored one.
-            saveCategories = current.saveCategories,
-            saveTvKinds = current.saveTvKinds,
-            languageFilterNonLatinThreshold = form["languageFilterNonLatinThreshold"]?.toIntOrNull() ?: current.languageFilterNonLatinThreshold,
-            classifierEnabled = form.containsKey("classifierEnabled"),
-            adultMode = form["adultMode"]?.takeIf { it.isNotEmpty() }?.trim()?.lowercase() ?: current.adultMode,
-            adultHideThreshold = form["adultHideThreshold"]?.toDoubleOrNull() ?: current.adultHideThreshold,
-            adultDropThreshold = form["adultDropThreshold"]?.toDoubleOrNull() ?: current.adultDropThreshold,
-            bloomCapacity = form["bloomCapacity"]?.toIntOrNull() ?: current.bloomCapacity,
-            failureBloomCapacity = form["failureBloomCapacity"]?.toIntOrNull() ?: current.failureBloomCapacity,
-            bloomErrorRate = form["bloomErrorRate"]?.toDoubleOrNull() ?: current.bloomErrorRate,
-            advancedOverrides = form["advancedOverrides"] ?: current.advancedOverrides,
-            proxyPort = form["proxyPort"]?.toIntOrNull() ?: current.proxyPort,
-            crawlerHttpPort = form["crawlerHttpPort"]?.toIntOrNull() ?: current.crawlerHttpPort,
-            lanDirect = form.containsKey("lanDirect"),
-        )
+        ): CrawlerSettingsFormResult {
+            val categories = when (
+                val r = taxonomySelection("category", CrawlerTaxonomy.CATEGORIES, form["saveCategories"])
+            ) {
+                is TaxonomySelection.Bad -> return CrawlerSettingsFormResult.Bad(r.message)
+                is TaxonomySelection.Ok -> r.names
+            }
+            if (categories.isEmpty()) return CrawlerSettingsFormResult.Bad(
+                "tick at least one category to save — an empty selection would drop every torrent and " +
+                    "delete the whole database when purged")
+            val tvKinds = when (
+                val r = taxonomySelection("TV kind", CrawlerTaxonomy.TV_KINDS, form["saveTvKinds"])
+            ) {
+                is TaxonomySelection.Bad -> return CrawlerSettingsFormResult.Bad(r.message)
+                is TaxonomySelection.Ok -> r.names
+            }
+            val f = collapseForm(form)
+            return CrawlerSettingsFormResult.Ok(CrawlerSettings(
+                enabled = f.containsKey("enabled"),
+                wifiOnly = f.containsKey("wifiOnly"),
+                logLevel = f["logLevel"]?.takeIf { it.isNotEmpty() } ?: current.logLevel,
+                dhtPort = f["dhtPort"]?.toIntOrNull() ?: current.dhtPort,
+                niceLevel = f["niceLevel"]?.toIntOrNull() ?: current.niceLevel,
+                numTrees = f["numTrees"]?.toIntOrNull() ?: current.numTrees,
+                treeFindNodeWorkers = f["treeFindNodeWorkers"]?.toIntOrNull() ?: current.treeFindNodeWorkers,
+                treeBep51Workers = f["treeBep51Workers"]?.toIntOrNull() ?: current.treeBep51Workers,
+                treeGetPeersWorkers = f["treeGetPeersWorkers"]?.toIntOrNull() ?: current.treeGetPeersWorkers,
+                treeMetadataWorkers = f["treeMetadataWorkers"]?.toIntOrNull() ?: current.treeMetadataWorkers,
+                treeInfohashQueueCapacity = f["treeInfohashQueueCapacity"]?.toIntOrNull() ?: current.treeInfohashQueueCapacity,
+                treePeersQueueCapacity = f["treePeersQueueCapacity"]?.toIntOrNull() ?: current.treePeersQueueCapacity,
+                saveCategories = categories,
+                saveTvKinds = tvKinds,
+                languageFilterNonLatinThreshold = f["languageFilterNonLatinThreshold"]?.toIntOrNull() ?: current.languageFilterNonLatinThreshold,
+                classifierEnabled = f.containsKey("classifierEnabled"),
+                adultMode = f["adultMode"]?.takeIf { it.isNotEmpty() }?.trim()?.lowercase() ?: current.adultMode,
+                adultHideThreshold = f["adultHideThreshold"]?.toDoubleOrNull() ?: current.adultHideThreshold,
+                adultDropThreshold = f["adultDropThreshold"]?.toDoubleOrNull() ?: current.adultDropThreshold,
+                bloomCapacity = f["bloomCapacity"]?.toIntOrNull() ?: current.bloomCapacity,
+                failureBloomCapacity = f["failureBloomCapacity"]?.toIntOrNull() ?: current.failureBloomCapacity,
+                bloomErrorRate = f["bloomErrorRate"]?.toDoubleOrNull() ?: current.bloomErrorRate,
+                advancedOverrides = f["advancedOverrides"] ?: current.advancedOverrides,
+                proxyPort = f["proxyPort"]?.toIntOrNull() ?: current.proxyPort,
+                crawlerHttpPort = f["crawlerHttpPort"]?.toIntOrNull() ?: current.crawlerHttpPort,
+                lanDirect = f.containsKey("lanDirect"),
+            ))
+        }
 
         /**
          * Builds BackupSettings from the crawler panel form (checkbox

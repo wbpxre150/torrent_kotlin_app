@@ -7,6 +7,7 @@ import org.junit.Test
 
 import com.torrent.app.config.BackupSettings
 import com.torrent.app.config.CrawlerSettings
+import com.torrent.app.ControlServer.Companion.CrawlerSettingsFormResult
 import org.junit.Assert.assertFalse
 class ControlServerHelpersTest {
     @Test fun parseForm_decodesPairs() {
@@ -26,6 +27,21 @@ class ControlServerHelpersTest {
         val m = ControlServer.parseForm("token=ok&badpair")
         assertEquals("ok", m["token"])
         assertNull(m["badpair"])
+    }
+    @Test fun parseFormMulti_keepsEveryValueOfARepeatedKey() {
+        val m = ControlServer.parseFormMulti(
+            "saveCategories=tv&saveCategories=anime&saveTvKinds=daily&numTrees=8")
+        assertEquals(listOf("tv", "anime"), m["saveCategories"])
+        assertEquals(listOf("daily"), m["saveTvKinds"])
+        assertEquals(listOf("8"), m["numTrees"])
+    }
+
+    @Test fun parseFormMulti_emptyBodyReturnsEmpty() {
+        assertTrue(ControlServer.parseFormMulti("").isEmpty())
+    }
+
+    @Test fun parseForm_collapsesRepeatedKeysToTheLastValue() {
+        assertEquals("anime", ControlServer.parseForm("saveCategories=tv&saveCategories=anime")["saveCategories"])
     }
     @Test fun parseCookieToken_findsControlToken() {
         assertEquals("xyz", ControlServer.parseCookieToken("control_token=xyz; other=1"))
@@ -53,15 +69,30 @@ class ControlServerHelpersTest {
         assertEquals(body, ControlServer.crawlerStatsJson(body))
     }
 
+    private fun parseSettings(
+        form: Map<String, List<String>>,
+        current: CrawlerSettings = CrawlerSettings(),
+    ): CrawlerSettings =
+        (ControlServer.crawlerSettingsFromForm(form, current)
+            as CrawlerSettingsFormResult.Ok).settings
+
+    private fun parseError(
+        form: Map<String, List<String>>,
+        current: CrawlerSettings = CrawlerSettings(),
+    ): String =
+        (ControlServer.crawlerSettingsFromForm(form, current)
+            as CrawlerSettingsFormResult.Bad).message
+
     @Test fun crawlerSettingsFromForm_parsesAllFields() {
-        val m = ControlServer.parseForm(
+        val m = ControlServer.parseFormMulti(
             "enabled=&wifiOnly=&lanDirect=&logLevel=WARN&dhtPort=6882&niceLevel=-5"
                 + "&numTrees=8&treeFindNodeWorkers=2&treeBep51Workers=5&treeGetPeersWorkers=12&treeMetadataWorkers=40"
                 + "&treeInfohashQueueCapacity=100&treePeersQueueCapacity=200"
                 + "&languageFilterNonLatinThreshold=50&bloomCapacity=1000&failureBloomCapacity=2000"
                 + "&bloomErrorRate=0.005&advancedOverrides=bep51_cache_capacity=77&proxyPort=8090&crawlerHttpPort=8091"
-                + "&classifierEnabled=&adultMode=drop&adultHideThreshold=0.9&adultDropThreshold=0.995")
-        val s = ControlServer.crawlerSettingsFromForm(m, CrawlerSettings())
+                + "&classifierEnabled=&adultMode=drop&adultHideThreshold=0.9&adultDropThreshold=0.995"
+                + "&saveCategories=tv&saveCategories=movie&saveTvKinds=episode&saveTvKinds=daily")
+        val s = parseSettings(m)
         assertTrue(s.enabled)
         assertTrue(s.wifiOnly)
         assertTrue(s.lanDirect)
@@ -86,17 +117,58 @@ class ControlServerHelpersTest {
         assertEquals("drop", s.adultMode)
         assertEquals(0.9, s.adultHideThreshold, 0.0)
         assertEquals(0.995, s.adultDropThreshold, 0.0)
+        // Taxonomy order, not post order: ConfigStore sorts on load anyway, and
+        // the config.ini line then follows the crawler's own index order.
+        assertEquals(listOf("movie", "tv"), s.saveCategories)
+        assertEquals(listOf("episode", "daily"), s.saveTvKinds)
+    }
+
+    @Test fun crawlerSettingsFromForm_duplicateCategoryValuesAreDeduped() {
+        val s = parseSettings(mapOf(
+            "saveCategories" to listOf("tv", "TV", " movie ", "tv")))
+        assertEquals(listOf("movie", "tv"), s.saveCategories)
+    }
+
+    @Test fun crawlerSettingsFromForm_rejectsUnknownCategory() {
+        val msg = parseError(mapOf("saveCategories" to listOf("movie", "porn")))
+        assertTrue(msg, msg.contains("unknown category"))
+        assertTrue(msg, msg.contains("porn"))
+    }
+
+    @Test fun crawlerSettingsFromForm_rejectsUnknownTvKind() {
+        val msg = parseError(mapOf(
+            "saveCategories" to listOf("tv"), "saveTvKinds" to listOf("episodes")))
+        assertTrue(msg, msg.contains("unknown TV kind"))
+    }
+
+    @Test fun crawlerSettingsFromForm_rejectsEmptyCategorySelection() {
+        val current = CrawlerSettings(saveCategories = listOf("tv"), saveTvKinds = listOf("daily"))
+        // Plain checkboxes post nothing when every box is unticked; the fieldset
+        // is always rendered, so an absent key means "nothing selected".
+        val msg = parseError(mapOf("numTrees" to listOf("4")), current)
+        assertTrue(msg, msg.contains("tick at least one category"))
+        assertTrue(parseError(mapOf("saveCategories" to listOf("", ""))).contains("tick at least one category"))
+    }
+
+    @Test fun crawlerSettingsFromForm_emptyTvKindsMeansAll() {
+        val current = CrawlerSettings(saveCategories = listOf("tv"), saveTvKinds = listOf("daily"))
+        // Clearing the row is allowed: an empty list omits save_tv_kinds, which
+        // the crawler reads as "every kind".
+        val s = parseSettings(mapOf("saveCategories" to listOf("tv")), current)
+        assertEquals(listOf("tv"), s.saveCategories)
+        assertTrue(s.saveTvKinds.isEmpty())
     }
 
     @Test fun crawlerSettingsFromForm_adultFieldsFallBackToCurrent() {
         val current = CrawlerSettings(
             classifierEnabled = true, adultMode = "drop",
             adultHideThreshold = 0.5, adultDropThreshold = 0.6)
-        val s = ControlServer.crawlerSettingsFromForm(
+        val s = parseSettings(
             mapOf(
-                "adultMode" to "",
-                "adultHideThreshold" to "not-a-number",
-                "adultDropThreshold" to "",
+                "saveCategories" to listOf("tv"),
+                "adultMode" to listOf(""),
+                "adultHideThreshold" to listOf("not-a-number"),
+                "adultDropThreshold" to listOf(""),
             ),
             current)
         assertFalse("checkbox absence means off, like the other toggles", s.classifierEnabled)
@@ -106,25 +178,26 @@ class ControlServerHelpersTest {
     }
 
     @Test fun crawlerSettingsFromForm_adultModeIsNormalised() {
-        val s = ControlServer.crawlerSettingsFromForm(mapOf("adultMode" to " DROP "), CrawlerSettings())
+        val s = parseSettings(mapOf(
+            "saveCategories" to listOf("movie"), "adultMode" to listOf(" DROP ")))
         assertEquals("drop", s.adultMode)
     }
 
     @Test fun crawlerSettingsFromForm_keepsCurrentWhenBlankOrMissing() {
         val current = CrawlerSettings(
-            dhtPort = 6881, logLevel = "DEBUG", advancedOverrides = "x=1", bloomErrorRate = 0.002,
-            saveCategories = listOf("tv", "anime"), saveTvKinds = listOf("daily"))
-        val s = ControlServer.crawlerSettingsFromForm(mapOf("numTrees" to "4", "bloomErrorRate" to ""), current)
+            dhtPort = 6881, logLevel = "DEBUG", advancedOverrides = "x=1", bloomErrorRate = 0.002)
+        val s = parseSettings(
+            mapOf("numTrees" to listOf("4"), "bloomErrorRate" to listOf(""),
+                "saveCategories" to listOf("anime")),
+            current)
         assertEquals(4, s.numTrees)
         assertEquals(6881, s.dhtPort)
         assertEquals("DEBUG", s.logLevel)
         assertEquals(0.002, s.bloomErrorRate, 0.0)
         assertEquals("x=1", s.advancedOverrides)
         assertFalse(s.enabled)
-        // The category selection is not in the form yet (Stage 4 adds the chips):
-        // an apply must keep the stored selection instead of resetting it.
-        assertEquals(listOf("tv", "anime"), s.saveCategories)
-        assertEquals(listOf("daily"), s.saveTvKinds)
+        // Stage 4: the posted selection now wins over the stored one.
+        assertEquals(listOf("anime"), s.saveCategories)
     }
 
     @Test fun backupStatusJson_idleStatus() {
