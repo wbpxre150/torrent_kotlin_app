@@ -66,4 +66,24 @@ class ControlServerSearchPageTest {
     @Test fun js_hasAddButton() {
         assertTrue(page.contains("/api/transmission/add"))
     }
+    @Test fun page_hasNoProxyOriginParameter() {
+        // Torrent-page stage 2: detail links are same-origin, so the page no
+        // longer carries a crawler proxy origin (and no `proxyOrigin` const).
+        assertFalse(page.contains("proxyOrigin"))
+        assertTrue(page.contains("/torrent?hash="))
+    }
+
+    @Test fun js_linksDetailPagesSameOrigin() {
+        assertTrue(page.contains("detail.href = '/torrent?hash=' + encodeURIComponent(r.info_hash || '')"))
+        assertTrue(page.contains("detail.target = '_blank'"))
+        assertTrue(page.contains("detail.rel = 'noopener'"))
+    }
+
+    @Test fun js_prefillsTheQueryFromTheUrl() {
+        // /torrent's "Search DHT" button links to /search?q=<words>; the page
+        // fills the box and runs the same search on the first socket open.
+        assertTrue(page.contains(".get('q')"))
+        assertTrue(page.contains("prefill"))
+        assertTrue(page.contains("el('search-input').value = prefill"))
+    }
 }

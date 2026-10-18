@@ -142,9 +142,16 @@ class ControlServer(
                     // shell. Static markup/CSS only; the interaction logic
                     // lands in stage 3b over the /search/ws feed.
                     get("search") {
-                        val proxyOrigin =
-                            "http://${wifiIp() ?: "127.0.0.1"}:${loadConfig().crawler.proxyPort}"
-                        call.respondText(buildSearchPage(proxyOrigin), ContentType.Text.Html)
+                        call.respondText(buildSearchPage(), ContentType.Text.Html)
+                    }
+
+                    // Torrent-page stage 2: the /torrent?hash=<40-hex> detail
+                    // shell. Static markup/CSS/JS only — the hash rides in the
+                    // query string and is read client-side (the same pattern as
+                    // the token on /search), so nothing here validates it; the
+                    // JSON forwards below do.
+                    get("torrent") {
+                        call.respondText(buildTorrentPage(), ContentType.Text.Html)
                     }
 
                     get("api/status") { call.respondText(buildStatusJson(), ContentType.Application.Json) }
@@ -279,6 +286,37 @@ class ControlServer(
                     }
                     get("api/crawler/stats") {
                         call.respondText(crawlerStatsPayload(), ContentType.Application.Json)
+                    }
+
+                    // Torrent-page stage 2: JSON forwards for the detail page. The
+                    // hash is the only field that can fail validation (exactly 40
+                    // hex chars, lowercased); the files route clamps offset/limit
+                    // and drops a filter shorter than 3 chars, and /refresh carries
+                    // the 30 s read timeout because it re-queries the DHT.
+                    get("api/crawler/torrent/info") {
+                        call.respondText(
+                            torrentForwardJson(buildTorrentInfoPath(call.request.queryParameters["hash"])),
+                            ContentType.Application.Json,
+                        )
+                    }
+                    get("api/crawler/torrent/files") {
+                        call.respondText(
+                            torrentForwardJson(
+                                buildTorrentFilesPath(
+                                    hash = call.request.queryParameters["hash"],
+                                    offset = call.request.queryParameters["offset"]?.toIntOrNull(),
+                                    limit = call.request.queryParameters["limit"]?.toIntOrNull(),
+                                    q = call.request.queryParameters["q"],
+                                ),
+                            ),
+                            ContentType.Application.Json,
+                        )
+                    }
+                    get("api/crawler/refresh") {
+                        call.respondText(
+                            torrentForwardJson(buildTorrentRefreshPath(call.request.queryParameters["hash"])),
+                            ContentType.Application.Json,
+                        )
                     }
 
                     // Same-origin magnet add (search-dashboard stage 2): mirrors
@@ -1048,22 +1086,77 @@ class ControlServer(
 
     /**
      * Loopback GET of the crawler's JSON API ([pathAndQuery] must start with
-     * `/`). Returns the raw body on 200, null on any error/non-200. The read
-     * timeout is generous (15s) because search/browse queries can be slow;
-     * the connect timeout stays short so a down crawler fails fast.
+     * `/`). Returns the raw body on 200, null on any error/non-200 — the legacy
+     * null-on-anything seam for /stats and /search/ws, which cannot tell a down
+     * crawler from a 404 and must keep behaving exactly as before. The read
+     * timeout defaults to 15 s because search/browse queries can be slow; the
+     * connect timeout stays short so a down crawler fails fast.
      */
-    private fun fetchCrawlerJson(pathAndQuery: String): String? {
+    private fun fetchCrawlerJson(
+        pathAndQuery: String,
+        readTimeoutMs: Int = 15_000,
+    ): String? = (fetchCrawlerJsonStatus(pathAndQuery, readTimeoutMs) as? CrawlerFetch.Ok)?.body
+
+    /**
+     * One loopback crawler GET outcome. The torrent page (torrent-page stage 2)
+     * needs the HTTP status: "the crawler has no such torrent" (404) and "the
+     * crawler is down" are different answers for the user, and a sealed result
+     * keeps the three cases explicit instead of overloading a status int.
+     */
+    private sealed interface CrawlerFetch {
+        data class Ok(val body: String) : CrawlerFetch
+        data object NotFound : CrawlerFetch
+        data object Unavailable : CrawlerFetch
+    }
+
+    /**
+     * Loopback GET of the crawler's JSON API, status-aware: 200 carries the raw
+     * body, 404 is [CrawlerFetch.NotFound], and everything else (5xx, a timeout,
+     * a refused connection) is [CrawlerFetch.Unavailable]. A non-200 error body
+     * is drained and dropped so the JDK's keep-alive cache can reuse the socket.
+     */
+    private fun fetchCrawlerJsonStatus(pathAndQuery: String, readTimeoutMs: Int): CrawlerFetch {
         return try {
             val url = "http://127.0.0.1:${crawlerHttpPort()}$pathAndQuery"
             val conn = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
                 connectTimeout = 2000
-                readTimeout = 15_000
+                readTimeout = readTimeoutMs
                 instanceFollowRedirects = false
             }
-            if (conn.responseCode == 200) conn.inputStream.bufferedReader().use { it.readText() } else null
+            val status = conn.responseCode
+            if (status == 200) {
+                CrawlerFetch.Ok(conn.inputStream.bufferedReader().use { it.readText() })
+            } else {
+                // An unread error body pins the socket; drain and discard it.
+                try {
+                    conn.errorStream?.bufferedReader()?.use { it.readText() }
+                } catch (e: Exception) {
+                    // Nothing to read — the status code alone is the answer.
+                }
+                if (status == 404) CrawlerFetch.NotFound else CrawlerFetch.Unavailable
+            }
         } catch (e: Exception) {
-            null
+            CrawlerFetch.Unavailable
         }
+    }
+
+    /**
+     * Answers one torrent-detail forward route (torrent-page stage 2): validates
+     * the built path, fetches it with that path's own read timeout, and wraps the
+     * answer in the JSON convention shared with /search/ws — the crawler's raw
+     * 200 body spliced verbatim under `payload`, and a fixed error code
+     * otherwise: `bad_request:hash` for a route-side validation failure,
+     * `not_found` for a crawler 404, `unavailable` for a down crawler, a
+     * timeout, or any other status.
+     */
+    private fun torrentForwardJson(result: TorrentPathResult): String = when (result) {
+        is TorrentPathResult.Bad -> """{"ok":false,"error":"bad_request:${result.field}"}"""
+        is TorrentPathResult.Ok ->
+            when (val r = fetchCrawlerJsonStatus(result.path, result.readTimeoutMs)) {
+                is CrawlerFetch.Ok -> """{"ok":true,"payload":${r.body}}"""
+                is CrawlerFetch.NotFound -> """{"ok":false,"error":"not_found"}"""
+                is CrawlerFetch.Unavailable -> """{"ok":false,"error":"unavailable"}"""
+            }
     }
 
     /**
@@ -1217,17 +1310,99 @@ class ControlServer(
         }
 
         /**
+         * One torrent-detail path-builder outcome (torrent-page stage 2).
+         * The read timeout rides along with the path so the slow `/refresh`
+         * variant is observable from a pure unit test (no server, no clock).
+         */
+        internal sealed interface TorrentPathResult {
+            data class Ok(val path: String, val readTimeoutMs: Int) : TorrentPathResult
+            data class Bad(val field: String) : TorrentPathResult
+        }
+
+        /** Loopback read timeouts for the torrent-detail forward routes. */
+        internal const val TORRENT_READ_TIMEOUT_MS = 15_000
+        internal const val TORRENT_REFRESH_TIMEOUT_MS = 30_000
+
+        /** `hash` must be a full BEP3 info hash: exactly 40 hex chars. */
+        internal const val INFO_HASH_HEX_LEN = 40
+
+        /** `/torrent/files` paging defaults/clamps (mirrors the crawler's C handler). */
+        internal const val FILES_DEFAULT_LIMIT = 50
+        internal const val FILES_MAX_LIMIT = 200
+
+        /** A `q` shorter than this cannot match the crawler's trigram FTS index. */
+        internal const val FILES_MIN_FILTER_LEN = 3
+
+        /**
+         * Validates one `hash` query value: exactly 40 hex chars, case-insensitive,
+         * LOWERCASED before it is forwarded — mirrors the crawler's C
+         * `tp_get_hash_param` (http_torrent_page.c). Returns null when invalid.
+         */
+        internal fun torrentHash(hash: String?): String? {
+            if (hash == null || hash.length != INFO_HASH_HEX_LEN) return null
+            for (c in hash) {
+                val hex = (c in '0'..'9') || (c in 'a'..'f') || (c in 'A'..'F')
+                if (!hex) return null
+            }
+            return hash.lowercase()
+        }
+
+        /**
+         * Builds the crawler loopback path for `/torrent/info?hash=<hex>`.
+         * Only `hash` can fail validation; everything else has a safe default.
+         */
+        internal fun buildTorrentInfoPath(hash: String?): TorrentPathResult {
+            val h = torrentHash(hash) ?: return TorrentPathResult.Bad("hash")
+            return TorrentPathResult.Ok("/torrent/info?hash=$h", TORRENT_READ_TIMEOUT_MS)
+        }
+
+        /**
+         * Builds the crawler loopback path for `/torrent/files?hash=…&offset=…&limit=…[&q=…]`
+         * with the C handler's clamping: a negative (or unparseable) `offset`
+         * becomes 0, and a `limit` outside 1..200 becomes the default 50. A `q`
+         * shorter than [FILES_MIN_FILTER_LEN] is DROPPED (not an error); longer
+         * filters are percent-encoded (URLEncoder, UTF-8). Pure: no network.
+         */
+        internal fun buildTorrentFilesPath(
+            hash: String?,
+            offset: Int? = null,
+            limit: Int? = null,
+            q: String? = null,
+        ): TorrentPathResult {
+            val h = torrentHash(hash) ?: return TorrentPathResult.Bad("hash")
+            val off = (offset ?: 0).coerceAtLeast(0)
+            val lim = limit?.takeIf { it in 1..FILES_MAX_LIMIT } ?: FILES_DEFAULT_LIMIT
+            val filter = q?.takeIf { it.length >= FILES_MIN_FILTER_LEN }
+            val path = buildString {
+                append("/torrent/files?hash=").append(h)
+                append("&offset=").append(off)
+                append("&limit=").append(lim)
+                if (filter != null) append("&q=").append(URLEncoder.encode(filter, "UTF-8"))
+            }
+            return TorrentPathResult.Ok(path, TORRENT_READ_TIMEOUT_MS)
+        }
+
+        /**
+         * Builds the crawler loopback path for `/refresh?hash=<hex>` (forced peer
+         * re-query). This is the one slow route — a fresh DHT lookup can take
+         * tens of seconds — so it carries [TORRENT_REFRESH_TIMEOUT_MS].
+         */
+        internal fun buildTorrentRefreshPath(hash: String?): TorrentPathResult {
+            val h = torrentHash(hash) ?: return TorrentPathResult.Bad("hash")
+            return TorrentPathResult.Ok("/refresh?hash=$h", TORRENT_REFRESH_TIMEOUT_MS)
+        }
+
+        /**
          * The /search page (search-dashboard stage 3a): a static, self-contained
          * blue phone search shell. All markup, CSS and JS are inline — no
          * external assets, no CDN, no fonts. The search/browse/random/
          * infinite-scroll/add-button interaction logic lives in [SEARCH_JS],
          * wired to the authenticated /search/ws feed (token via
          * `location.search`).
-         * [proxyOrigin] is the crawler proxy origin (3b uses it for per-torrent
-         * detail links); it defaults to the loopback address so the page stays
-         * unit-testable without a running app.
+         * `location.search`). Per-torrent detail links point at this server's own
+         * /torrent page, so the page needs no crawler origin.
          */
-        internal fun buildSearchPage(proxyOrigin: String = "http://127.0.0.1:8080"): String = """
+        internal fun buildSearchPage(): String = """
             <!DOCTYPE html>
             <html lang="en">
             <head>
@@ -1294,7 +1469,6 @@ class ControlServer(
             <div id="toast" class="toast" hidden></div>
             </div>
             <script>
-            const proxyOrigin = '$proxyOrigin';
             $SEARCH_JS
             </script>
             </body>
@@ -1435,6 +1609,9 @@ class ControlServer(
               var pendingAppend = false;
               var pendingReq = null;
               var toastTimer = null;
+              // ?q= keyword prefill handed over by the /torrent page (torrent-page
+              // stage 2); it is applied on the first socket open, not before.
+              var prefill = null;
 
               function el(id) { return document.getElementById(id); }
 
@@ -1597,7 +1774,9 @@ class ControlServer(
                 var detail = document.createElement('a');
                 detail.className = 'detail';
                 detail.textContent = '\u2026';
-                detail.href = proxyOrigin + '/torrent?hash=' + encodeURIComponent(r.info_hash || '');
+                // Same-origin detail page: this server serves /torrent itself
+                // (torrent-page stage 2), so no crawler proxy origin is needed.
+                detail.href = '/torrent?hash=' + encodeURIComponent(r.info_hash || '');
                 detail.target = '_blank';
                 detail.rel = 'noopener';
                 actions.appendChild(detail);
@@ -1718,6 +1897,16 @@ class ControlServer(
                   setLive('ok', 'live');
                   hideBanner();
                   setLoading(false);
+                  // ?q= prefill (torrent-page stage 2): /torrent links here with
+                  // the selected keywords. Run the same search the Search button
+                  // runs, but only now that the feed can accept it.
+                  if (prefill) {
+                    var q = prefill;
+                    prefill = null;
+                    el('search-input').value = q;
+                    doSearch();
+                    return;
+                  }
                   if (!current) statusText('Live \u2014 pick a category to browse');
                 };
                 ws.onmessage = onMessage;
@@ -1854,8 +2043,416 @@ class ControlServer(
                 sendBrowse();
               };
 
+              // Read the keyword prefill from this page's own query string; the
+              // search itself waits for the first socket open (send() would bail
+              // on a not-yet-open feed).
+              var prefillQ = new URLSearchParams(location.search).get('q');
+              if (prefillQ && prefillQ.trim() !== '') {
+                prefill = prefillQ.trim();
+                el('search-input').value = prefill;
+              }
+
               setupObserver();
               connect();
+            })();
+        """.trimIndent()
+
+        /**
+         * The /torrent detail page (torrent-page stage 2): the Kotlin twin of the
+         * crawler's C page, on the control server's :8090 origin. It is a PURE
+         * string builder — no fetcher, no network, no config lookups — so it is
+         * unit-testable and can never leak a token into the markup: the hash (and
+         * an optional token) are read client-side from `location.search`, exactly
+         * like the token on /search.
+         *
+         * The page talks only to same-origin routes: /api/crawler/torrent/info,
+         * /api/crawler/torrent/files, /api/crawler/refresh, /api/transmission/add
+         * and /search?q= (IMDb is the one external link). Markup/CSS/JS are all
+         * inline; every crawler value reaches the DOM through textContent only.
+         */
+        internal fun buildTorrentPage(): String = """
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+            <title>Torrent</title>
+            <style>$TORRENT_CSS</style>
+            </head>
+            <body>
+            <!-- Torrent detail shell: the info hash rides in location.search, so the
+                 server renders nothing torrent-specific here. -->
+            <div class="wrap">
+            <header><h1 id="name">Torrent</h1><nav><a id="back" href="/">&larr; Back</a></nav></header>
+            <div id="banner" class="banner red" hidden></div>
+            <div id="detail" hidden>
+              <div class="meta" id="meta"></div>
+              <p class="hint">Select keywords for search:</p>
+              <div class="pills" id="pills"></div>
+              <div class="query-preview" id="query-preview"></div>
+              <div class="btnrow">
+                <button id="imdb-btn" class="btn" type="button">Search IMDb</button>
+                <button id="dht-btn" class="btn secondary" type="button">Search DHT</button>
+                <button id="refresh-btn" class="btn secondary" type="button">&#8635; Refresh peers</button>
+                <button id="add-btn" class="btn secondary" type="button">&#10133; Add to Transmission</button>
+                <span id="peer-info" class="hint"></span>
+              </div>
+              <h3>Files</h3>
+              <div class="file-tools">
+                <input id="file-filter" type="search" placeholder="Filter files&hellip;" autocomplete="off">
+              </div>
+              <ul class="file-list" id="file-list"></ul>
+              <div class="sentinel" id="sentinel">Loading&hellip;</div>
+            </div>
+            <div id="toast" class="toast" hidden></div>
+            </div>
+            <script>
+            $TORRENT_JS
+            </script>
+            </body>
+            </html>
+        """.trimIndent()
+
+        /**
+         * The /torrent page CSS (torrent-page stage 2): the shared search theme
+         * plus the keyword pills, the query preview, the button row and the
+         * paginated file list. A `private val` (not `const val`) because it is a
+         * `trimIndent()` expression, and declared after [SEARCH_CSS] because it
+         * extends it.
+         */
+        private val TORRENT_CSS = SEARCH_CSS + "\n" + """
+            .hint{color:var(--muted);font-size:.9rem;margin:8px 0 4px}
+            .pills{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}
+            .pill{display:inline-flex;align-items:center;min-height:38px;padding:0 14px;font-size:.9rem;color:var(--text);background:var(--card);border:1px solid #dadce0;border-radius:19px;cursor:pointer;user-select:none;touch-action:manipulation}
+            .pill.on{background:var(--blue);border-color:var(--blue);color:#fff;font-weight:600}
+            .query-preview{background:var(--chip);color:var(--blue);padding:6px 10px;border-radius:8px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85rem;margin:8px 0;overflow-wrap:anywhere}
+            .btnrow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:12px 0}
+            .file-tools{display:flex;gap:8px;margin:8px 0}
+            #file-filter{flex:1 1 auto;min-width:0;height:44px;padding:0 14px;font-size:.95rem;color:var(--text);border:1px solid #dadce0;border-radius:22px;outline:none;background:#fff}
+            #file-filter:focus{border-color:var(--blue);box-shadow:0 0 0 2px var(--chip)}
+            .file-list{list-style:none;margin:0;padding:0;background:var(--card);border:1px solid #e3e7ee;border-radius:12px;overflow:hidden}
+            .file-list li{display:flex;justify-content:space-between;gap:8px;padding:8px 12px;border-top:1px solid #eee;font-size:.9rem}
+            .file-list li:first-child{border-top:none}
+            .file-path{overflow-wrap:anywhere}
+            .file-size{color:var(--muted);flex-shrink:0;white-space:nowrap}
+            .sentinel{padding:10px;text-align:center;color:var(--muted);font-size:.85rem}
+        """.trimIndent()
+
+        /**
+         * The /torrent page interaction logic (torrent-page stage 2), ported
+         * from the crawler's C page: keyword pills, IMDb/DHT search, refresh
+         * peers, add-to-Transmission and the paginated/filterable file list.
+         * Only same-origin :8090 routes are contacted; nothing here inlines the
+         * control token.
+         */
+        private val TORRENT_JS = """
+            (function () {
+              'use strict';
+              var hash = new URLSearchParams(location.search).get('hash') || '';
+              var FILE_BATCH = 50;
+              var fileOffset = 0;
+              var fileLoading = false;
+              var fileHasMore = true;
+              var fileQuery = '';
+              var filterTimer = null;
+              var toastTimer = null;
+
+              function el(id) { return document.getElementById(id); }
+
+              // %.2f with 1024 steps: byte-for-byte parity with the crawler's C
+              // tp_format_size (http_torrent_page.c).
+              function fmtSize(bytes) {
+                var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+                var unit = 0;
+                var size = typeof bytes === 'number' && isFinite(bytes) ? bytes : 0;
+                while (size >= 1024 && unit < 4) { size = size / 1024; unit++; }
+                return size.toFixed(2) + ' ' + units[unit];
+              }
+
+              function fmtGiB(b) {
+                var n = typeof b === 'number' && isFinite(b) ? b : 0;
+                return (n / 1073741824).toFixed(2) + ' GiB';
+              }
+
+              function toast(msg, isErr) {
+                var t = el('toast');
+                t.textContent = msg;
+                t.className = 'toast' + (isErr ? ' err' : '');
+                t.removeAttribute('hidden');
+                if (toastTimer) clearTimeout(toastTimer);
+                toastTimer = setTimeout(function () { t.setAttribute('hidden', ''); }, 4000);
+              }
+
+              function setState(msg) {
+                el('detail').setAttribute('hidden', '');
+                el('banner').textContent = msg;
+                el('banner').removeAttribute('hidden');
+                el('name').textContent = 'Torrent';
+              }
+
+              function showDetail() {
+                el('banner').setAttribute('hidden', '');
+                el('detail').removeAttribute('hidden');
+              }
+
+              // The control token is never server-rendered into this page: prefer
+              // the ?token= of this nav (the auth interceptor preserves it), else
+              // the control_token cookie set by that same interceptor.
+              function tokenSuffix() {
+                var t = new URLSearchParams(location.search).get('token');
+                if (!t) {
+                  var m = /(?:^|;\s*)control_token=([^;]+)/.exec(document.cookie || '');
+                  if (m) t = decodeURIComponent(m[1]);
+                }
+                return t ? '&token=' + encodeURIComponent(t) : '';
+              }
+
+              // Name -> search words: dots/underscores become spaces, the token
+              // split is on whitespace, and ( ) [ ] { } are stripped (C parity).
+              function tokenizeName(name) {
+                var s = (name == null ? '' : String(name)).replace(/[._]/g, ' ');
+                var parts = s.split(/\s+/);
+                var out = [];
+                for (var i = 0; i < parts.length; i++) {
+                  var w = parts[i].replace(/[()\[\]{}]/g, '');
+                  if (w) out.push(w);
+                }
+                return out;
+              }
+
+              // Case-insensitive whole-token match against the crawler's
+              // filtered_name (its extracted media title).
+              function wordInFiltered(word, filtered) {
+                if (!word || !filtered) return false;
+                var tokens = String(filtered).split(/\s+/);
+                var lw = String(word).toLowerCase();
+                for (var i = 0; i < tokens.length; i++) {
+                  if (tokens[i].toLowerCase() === lw) return true;
+                }
+                return false;
+              }
+
+              function selectedWords() {
+                var out = [];
+                var pills = el('pills').querySelectorAll('.pill');
+                for (var i = 0; i < pills.length; i++) {
+                  if (pills[i].classList.contains('on')) out.push(pills[i].getAttribute('data-word'));
+                }
+                return out;
+              }
+
+              function updatePreview() {
+                var q = selectedWords().join(' ');
+                el('query-preview').textContent = q || '(no words selected)';
+              }
+
+              function renderPills(name, filteredName) {
+                var box = el('pills');
+                box.textContent = '';
+                var words = tokenizeName(name);
+                for (var i = 0; i < words.length; i++) {
+                  var pill = document.createElement('span');
+                  pill.className = 'pill' + (wordInFiltered(words[i], filteredName) ? ' on' : '');
+                  pill.setAttribute('data-word', words[i]);
+                  pill.textContent = words[i];
+                  pill.onclick = function () {
+                    if (this.classList.contains('on')) this.classList.remove('on');
+                    else this.classList.add('on');
+                    updatePreview();
+                  };
+                  box.appendChild(pill);
+                }
+                updatePreview();
+              }
+
+              function infoError(err) {
+                err = err == null ? '' : String(err);
+                if (err.indexOf('bad_request') === 0) {
+                  setState('Bad request: the info hash in this URL is not a 40-character hex string.');
+                } else if (err === 'not_found') {
+                  setState('Torrent not found');
+                } else {
+                  setState('Crawler unavailable \u2014 it may be starting or stopped.');
+                }
+              }
+
+              function renderInfo(payload) {
+                var info = payload && typeof payload === 'object' ? payload : {};
+                var name = info.name != null ? String(info.name) : '(unnamed)';
+                document.title = name;
+                el('name').textContent = name;
+                var peers = typeof info.total_peers === 'number' ? info.total_peers : 0;
+                var files = typeof info.file_count === 'number' ? info.file_count : 0;
+                var hex = info.info_hash != null ? String(info.info_hash) : hash;
+                el('meta').textContent = fmtSize(info.size_bytes) + ' \u00b7 ' +
+                  peers + (peers === 1 ? ' peer' : ' peers') + ' \u00b7 ' +
+                  files + (files === 1 ? ' file' : ' files') + ' \u00b7 ' + hex;
+                el('peer-info').textContent = peers + (peers === 1 ? ' peer' : ' peers');
+                renderPills(info.name, info.filtered_name);
+                showDetail();
+                loadFiles();
+              }
+
+              function loadInfo() {
+                if (!hash) { setState('Bad request: no info hash in this URL.'); return; }
+                fetch('/api/crawler/torrent/info?hash=' + encodeURIComponent(hash))
+                  .then(function (r) { return r.json(); })
+                  .then(function (d) {
+                    if (!d || !d.ok) { infoError(d && d.error); return; }
+                    renderInfo(d.payload);
+                  })
+                  .catch(function () { infoError('unavailable'); });
+              }
+
+              function setSentinel(text) { el('sentinel').textContent = text; }
+
+              function loadFiles() {
+                if (fileLoading || !fileHasMore) return;
+                fileLoading = true;
+                var url = '/api/crawler/torrent/files?hash=' + encodeURIComponent(hash) +
+                  '&offset=' + fileOffset + '&limit=' + FILE_BATCH;
+                if (fileQuery) url += '&q=' + encodeURIComponent(fileQuery);
+                fetch(url)
+                  .then(function (r) { return r.json(); })
+                  .then(function (j) {
+                    fileLoading = false;
+                    if (!j || !j.ok) { fileHasMore = false; setSentinel('Failed to load files'); return; }
+                    var payload = j.payload || {};
+                    var files = payload.files || [];
+                    var list = el('file-list');
+                    for (var i = 0; i < files.length; i++) {
+                      var row = document.createElement('li');
+                      var path = document.createElement('span');
+                      path.className = 'file-path';
+                      path.textContent = files[i].path != null ? String(files[i].path) : '';
+                      var size = document.createElement('span');
+                      size.className = 'file-size';
+                      size.textContent = fmtSize(files[i].size_bytes);
+                      row.appendChild(path);
+                      row.appendChild(size);
+                      list.appendChild(row);
+                    }
+                    fileOffset += files.length;
+                    fileHasMore = !!payload.has_more;
+                    var total = typeof payload.total === 'number' ? payload.total : fileOffset;
+                    setSentinel(fileHasMore ? 'Scroll for more\u2026' : 'No more files (' + total + ' total)');
+                  })
+                  .catch(function () {
+                    fileLoading = false;
+                    fileHasMore = false;
+                    setSentinel('Failed to load files');
+                  });
+              }
+
+              function resetFiles() {
+                fileOffset = 0;
+                fileHasMore = true;
+                el('file-list').textContent = '';
+                setSentinel('Loading\u2026');
+                loadFiles();
+              }
+
+              // The add outcome map is the /search page's, except that a
+              // space refusal carries the two byte counts (C-page parity).
+              function addMessage(d) {
+                if (!d) return 'Add failed';
+                if (d.ok) return d.duplicate ? 'Already added (duplicate)' : 'Added to Transmission';
+                if (d.error === 'insufficient_space') {
+                  return 'Not enough free space (torrent ' + fmtGiB(d.sizeBytes) +
+                    ', free ' + fmtGiB(d.freeBytes) + ')';
+                }
+                var map = {
+                  bad_hash: 'Bad info hash',
+                  db_unavailable: 'Crawler DB unavailable',
+                  not_found: 'Torrent not found in the crawler DB',
+                  no_storage: 'No storage configured',
+                  rpc_failed: 'Transmission RPC error'
+                };
+                return map[d.error] || 'Add failed';
+              }
+
+              el('back').onclick = function (ev) {
+                if (history.length > 1) { ev.preventDefault(); history.back(); }
+              };
+
+              el('imdb-btn').onclick = function () {
+                var a = document.createElement('a');
+                a.href = 'https://www.imdb.com/find/?q=' + encodeURIComponent(selectedWords().join(' '));
+                a.target = '_blank';
+                a.rel = 'noopener noreferrer';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+              };
+
+              el('dht-btn').onclick = function () {
+                var q = selectedWords().join(' ');
+                if (!q) { toast('Select at least one keyword', true); return; }
+                location.href = '/search?q=' + encodeURIComponent(q) + tokenSuffix();
+              };
+
+              el('refresh-btn').onclick = function () {
+                var btn = el('refresh-btn');
+                if (btn.disabled) return;
+                btn.disabled = true;
+                var peersBox = el('peer-info');
+                peersBox.textContent = 'Refreshing\u2026';
+                // The route holds the connection up to 30 s; give up before it.
+                var ctrl = new AbortController();
+                var timer = setTimeout(function () { ctrl.abort(); }, 25000);
+                fetch('/api/crawler/refresh?hash=' + encodeURIComponent(hash), { signal: ctrl.signal })
+                  .then(function (r) { clearTimeout(timer); return r.json(); })
+                  .then(function (j) {
+                    var payload = j && j.ok ? j.payload : null;
+                    if (payload && typeof payload.total_peers === 'number') {
+                      var n = payload.total_peers;
+                      peersBox.textContent = n + (n === 1 ? ' peer' : ' peers');
+                    } else {
+                      peersBox.textContent = 'Refresh failed';
+                    }
+                    btn.disabled = false;
+                  })
+                  .catch(function () {
+                    peersBox.textContent = 'Refresh failed';
+                    btn.disabled = false;
+                  });
+              };
+
+              el('add-btn').onclick = function () {
+                var btn = el('add-btn');
+                if (btn.disabled) return;
+                btn.disabled = true;
+                // The control_token cookie authenticates this POST (as on /search).
+                fetch('/api/transmission/add?hash=' + encodeURIComponent(hash), { method: 'POST' })
+                  .then(function (r) { return r.json().catch(function () { return null; }); })
+                  .then(function (d) {
+                    btn.disabled = false;
+                    toast(addMessage(d), !(d && d.ok));
+                  })
+                  .catch(function () {
+                    btn.disabled = false;
+                    toast('Add failed', true);
+                  });
+              };
+
+              el('file-filter').oninput = function () {
+                if (filterTimer) clearTimeout(filterTimer);
+                filterTimer = setTimeout(function () {
+                  fileQuery = el('file-filter').value.trim();
+                  resetFiles();
+                }, 250);
+              };
+
+              if (typeof window.IntersectionObserver === 'function') {
+                var observer = new IntersectionObserver(function (entries) {
+                  for (var i = 0; i < entries.length; i++) {
+                    if (entries[i].isIntersecting) loadFiles();
+                  }
+                }, { rootMargin: '150px' });
+                observer.observe(el('sentinel'));
+              }
+
+              loadInfo();
             })();
         """.trimIndent()
 
