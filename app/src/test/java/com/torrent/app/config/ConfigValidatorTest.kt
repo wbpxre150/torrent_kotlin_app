@@ -166,8 +166,8 @@ class ConfigValidatorTest {
     @Test fun validateFraction_acceptsOpenClosedUnitInterval() {
         assertTrue(ConfigValidator.validateFraction("x", 1.0).isEmpty())
         assertTrue(ConfigValidator.validateFraction("x", 0.5).isEmpty())
-        assertTrue(ConfigValidator.validateFraction("x", 0.917039).isEmpty())
-        assertTrue(ConfigValidator.validateFraction("x", 0.995516).isEmpty())
+        assertTrue(ConfigValidator.validateFraction("x", 0.897417).isEmpty())
+        assertTrue(ConfigValidator.validateFraction("x", 0.993899).isEmpty())
     }
 
     @Test fun validateFraction_rejectsZeroAboveOneAndNegative() {
@@ -188,8 +188,8 @@ class ConfigValidatorTest {
     @Test fun crawlerDefaults_includeAdultHandling() {
         assertTrue(validCrawler().classifierEnabled)
         assertEquals("tag", validCrawler().adultMode)
-        assertEquals(0.917039, validCrawler().adultHideThreshold, 0.0)
-        assertEquals(0.995516, validCrawler().adultDropThreshold, 0.0)
+        assertEquals(0.897417, validCrawler().adultHideThreshold, 0.0)
+        assertEquals(0.993899, validCrawler().adultDropThreshold, 0.0)
     }
 
     @Test fun crawlerAdvancedWithBackupKey_fails() {

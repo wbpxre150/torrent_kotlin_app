@@ -16,7 +16,7 @@ import java.nio.file.StandardOpenOption
 
 /**
  * Owns the dht_crawler's working dir under internal storage: `filesDir/crawler/`
- * (contains `config.ini`, `data/`, the keyword files, and `models/v1/` with the
+ * (contains `config.ini`, `data/`, the keyword files, and `models/v2/` with the
  * classifier model files). Stage 09 (internal
  * storage only); the crawler process itself is started by a later supervisor step.
  */
@@ -45,7 +45,7 @@ class CrawlerConfig(
 
     /**
      * Copies the keyword files from `assets/dht_crawler/` into [workDir], and the
-     * classifier model files from `assets/dht_crawler/models/v1/` into [modelsDir],
+     * classifier model files from `assets/dht_crawler/models/v2/` into [modelsDir],
      * when missing or when the app version code differs from the `.assets_version`
      * stamp. The models are binary (`fastText` `.ftz`); they are streamed byte-for-byte
      * — see [copyBinaryAtomically].
@@ -177,11 +177,12 @@ class CrawlerConfig(
         const val HARD_BLOCK_FILE = "hard_block.txt"
 
         /** Classifier model dir, work-dir relative (mirrors crawler `classifier_model_dir`). */
-        const val MODELS_SUBDIR = "models/v1"
+        const val MODELS_SUBDIR = "models/v2"
 
         /**
-         * Binary model assets shipped under `assets/dht_crawler/models/v1/` and staged
-         * into `workDir/models/v1/`, where the crawler resolves them by default.
+         * Binary model assets shipped under `assets/dht_crawler/models/v2/` and staged
+         * into `workDir/models/v2/`, where the crawler resolves them via the pinned
+         * `classifier_model_dir`.
          */
         val MODEL_FILES = listOf("adult.ftz", "category.ftz", "tv_kind.ftz", "manifest.json")
 

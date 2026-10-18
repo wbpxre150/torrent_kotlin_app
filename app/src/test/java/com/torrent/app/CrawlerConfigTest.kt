@@ -141,10 +141,10 @@ class CrawlerConfigTest {
         assertEquals("60000", ini["tree_metadata_timeout_ms"])
         // Stage 6 adult handling: classifier + calibrated thresholds + hard-block list
         assertEquals("1", ini["classifier_enabled"])
-        assertEquals("models/v1", ini["classifier_model_dir"])
+        assertEquals("models/v2", ini["classifier_model_dir"])
         assertEquals("tag", ini["adult_mode"])
-        assertEquals("0.917039", ini["adult_hide_threshold"])
-        assertEquals("0.995516", ini["adult_drop_threshold"])
+        assertEquals("0.897417", ini["adult_hide_threshold"])
+        assertEquals("0.993899", ini["adult_drop_threshold"])
         assertEquals("hard_block.txt", ini["hard_block_file"])
         assertNull(ini["backup_path"])
         assertNull(ini["ssh_host"])
@@ -218,7 +218,7 @@ class CrawlerConfigTest {
             assertTrue(cfg.configFile.exists())
         }
 
-        // --- Stage 5: classifier model staging into workDir/models/v1 ---
+        // --- Stage 5: classifier model staging into workDir/models/v2 ---
 
         @Test fun ensureLayout_stagesClassifierModelsByteIdenticalToAssets() {
             val cfg = configWithRealDefaultAsset()
@@ -304,10 +304,10 @@ class CrawlerConfigTest {
         }
 
         /** Checked-in model assets (read-only source of truth for the staging tests). */
-        private val MODEL_SRC_DIR = File("src/main/cpp/dht_crawler-android/models/v1")
+        private val MODEL_SRC_DIR = File("src/main/cpp/dht_crawler-android/models/v2")
 
         /**
-         * Mirrors `assets/dht_crawler/models/v1/` into the asset fixture with the real
+         * Mirrors `assets/dht_crawler/models/v2/` into the asset fixture with the real
          * checked-in model files, so byte fidelity is asserted against real binaries.
          */
         private fun copyClassifierModelAssets(assetDir: File) {
@@ -390,8 +390,8 @@ class CrawlerConfigTest {
             assertEquals("1", ini["classifier_enabled"])
             assertEquals(CrawlerConfig.MODELS_SUBDIR, ini["classifier_model_dir"])
             assertEquals("tag", ini["adult_mode"])
-            assertEquals("0.917039", ini["adult_hide_threshold"])
-            assertEquals("0.995516", ini["adult_drop_threshold"])
+            assertEquals("0.897417", ini["adult_hide_threshold"])
+            assertEquals("0.993899", ini["adult_drop_threshold"])
             assertEquals(CrawlerConfig.HARD_BLOCK_FILE, ini["hard_block_file"])
         }
 

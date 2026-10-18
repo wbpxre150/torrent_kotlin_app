@@ -440,10 +440,10 @@ tasks.register<Copy>("copyDhtCrawlerAssets") {
     // Stage 5: fastText classifier model files. Binary — the Copy task is byte-exact
     // (no text filtering / charset conversion), so a plain copy is correct here.
     // `into("models")` is relative to the task destination above, giving the asset
-    // path dht_crawler/models/v1/<file> (the crawler's default classifier_model_dir).
+    // path dht_crawler/models/v2/<file> (overriding the crawler's compiled-in default dir).
     val modelSrc = file("src/main/cpp/dht_crawler-android/models")
     from(modelSrc) {
-        include("v1/**")
+        include("v2/**")
         into("models")
     }
     into(file("build/generated/assets/dht_crawler/dht_crawler"))

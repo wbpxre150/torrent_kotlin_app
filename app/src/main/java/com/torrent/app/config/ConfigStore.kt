@@ -43,7 +43,7 @@ class ConfigStore(context: Context) {
             classifierEnabled = prefs.getBoolean(KEY_CRAWLER_CLASSIFIER_ENABLED, ConfigDefaults.CRAWLER.classifierEnabled),
             adultMode = prefs.getString(KEY_CRAWLER_ADULT_MODE, ConfigDefaults.CRAWLER.adultMode)!!,
             // Thresholds are stored as text so the calibrated decimals survive the
-            // round trip exactly (a Float would render as 0.9170390405654907 in the form).
+            // round trip exactly (a Float would render as 0.8974170088768005 in the form).
             adultHideThreshold = prefs.getString(KEY_CRAWLER_ADULT_HIDE_THRESHOLD, null)?.toDoubleOrNull()
                 ?: ConfigDefaults.CRAWLER.adultHideThreshold,
             adultDropThreshold = prefs.getString(KEY_CRAWLER_ADULT_DROP_THRESHOLD, null)?.toDoubleOrNull()
