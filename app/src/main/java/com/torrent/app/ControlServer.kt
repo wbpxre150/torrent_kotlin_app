@@ -1460,7 +1460,7 @@ class ControlServer(
               <button class="chip" type="button" data-tv-kind="daily" aria-pressed="false">Daily</button>
             </div>
             <div class="seg-row"><span class="seg-label">Adult</span><div id="adult-control" class="seg" role="group" aria-label="Adult results"><button class="chip" type="button" data-adult="hide" aria-pressed="true">Hide</button><button class="chip" type="button" data-adult="show" aria-pressed="false">Show</button><button class="chip" type="button" data-adult="only" aria-pressed="false">Only</button></div></div>
-            <div id="results-status">Pick a category to browse</div>
+            <div id="results-status">Pick your filters, then Search or Randomize</div>
             <div id="banner" class="banner" hidden></div>
             <div id="spinner" hidden aria-hidden="true"></div>
             <div id="results"></div>
@@ -1905,7 +1905,7 @@ class ControlServer(
                     doSearch();
                     return;
                   }
-                  if (!current) statusText('Live \u2014 pick a category to browse');
+                  if (!current) statusText('Live \u2014 pick your filters, then Search or Randomize');
                 };
                 ws.onmessage = onMessage;
                 ws.onclose = function () {
@@ -1988,7 +1988,6 @@ class ControlServer(
                   sel.tv_kind = null;
                   selectOnly(tvRow, tvRow.querySelector('.chip[data-tv-kind="none"]'));
                 }
-                sendBrowse();
               };
 
               el('tv-kind-row').onclick = function (ev) {
@@ -1998,7 +1997,6 @@ class ControlServer(
                 selectOnly(el('tv-kind-row'), t);
                 sel.tv_kind = k === 'none' ? null : k;
                 clearResults();
-                sendBrowse();
               };
 
               el('adult-control').onclick = function (ev) {
@@ -2008,7 +2006,6 @@ class ControlServer(
                 selectOnly(el('adult-control'), t);
                 sel.adult = a;
                 clearResults();
-                sendBrowse();
               };
 
               function doSearch() {
@@ -2038,7 +2035,6 @@ class ControlServer(
               el('sort').onchange = function () {
                 sel.sort = el('sort').value;
                 clearResults();
-                sendBrowse();
               };
 
               // Read the keyword prefill from this page's own query string; the

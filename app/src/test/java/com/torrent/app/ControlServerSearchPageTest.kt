@@ -87,4 +87,21 @@ class ControlServerSearchPageTest {
         assertTrue(page.contains("prefill"))
         assertTrue(page.contains("el('search-input').value = prefill"))
     }
+
+    @Test fun js_chipControlsDoNotAutoLoad() {
+        // webui-ux stage 3: the chip/sort controls only update in-page selection
+        // state; results load only on Search (button/Enter) or Randomize.
+        val sends = page.split("sendBrowse();").size - 1
+        assertTrue("expected exactly one sendBrowse(); call, found $sends", sends == 1)
+        assertTrue(
+            "sendBrowse(); must sit inside doSearch()",
+            page.indexOf("function doSearch()") < page.indexOf("sendBrowse();"),
+        )
+        assertTrue(page.contains("sel.category"))
+        assertTrue(page.contains("sel.tv_kind"))
+        assertTrue(page.contains("sel.adult"))
+        assertTrue(page.contains("sel.sort"))
+        assertFalse(page.contains("Pick a category to browse"))
+        assertTrue(page.contains("Pick your filters, then Search or Randomize"))
+    }
 }
