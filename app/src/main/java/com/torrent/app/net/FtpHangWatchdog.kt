@@ -99,33 +99,45 @@ class FtpHangWatchdog(
     }
 
     /**
-     * Opens a plain TCP connection to [host]:[port] and reads the first line.
-     * Returns null when the line starts with "220" (the daemon's greeting),
-     * otherwise a human-readable failure reason.
+     * Runs the shared greeting probe against the configured endpoint.
+     * Returns null when the daemon answered, otherwise a failure reason.
      */
-    private fun probe(host: String, port: Int): String? {
-        return try {
-            Socket().use { sock ->
-                sock.connect(InetSocketAddress(host, port), connectTimeoutMs)
-                // Bound the read too: a hung daemon may accept but never send.
-                sock.soTimeout = connectTimeoutMs
-                val line = sock.getInputStream().bufferedReader().readLine()
-                if (line != null && line.startsWith(GREETING_PREFIX)) {
-                    null
-                } else {
-                    "no 220 greeting (got: ${line?.take(40) ?: "EOF"})"
-                }
-            }
-        } catch (e: Exception) {
-            "probe failed (${e.javaClass.simpleName}: ${e.message})"
-        }
-    }
+    private fun probe(host: String, port: Int): String? =
+        probeGreeting(host, port, connectTimeoutMs)
 
     private fun log(msg: String) {
         System.err.println("[FtpHangWatchdog] $msg")
     }
 
     companion object {
+        /**
+         * Opens a plain TCP connection to [host]:[port] and reads the first line,
+         * expecting the daemon's "220 ..." greeting (session.c:
+         * `reply(s, "220", "ftpserver-host ready.")`). Returns null when the line
+         * starts with "220", otherwise a human-readable failure reason.
+         *
+         * Shared by the hang watchdog and by the supervisor readiness probe, so
+         * a daemon that is not RUNNING yet and a hung one are judged identically.
+         * [connectTimeoutMs] also bounds the greeting read: a hung daemon may
+         * accept the connection but never send.
+         */
+        internal fun probeGreeting(host: String, port: Int, connectTimeoutMs: Int = 5_000): String? {
+            return try {
+                Socket().use { sock ->
+                    sock.connect(InetSocketAddress(host, port), connectTimeoutMs)
+                    sock.soTimeout = connectTimeoutMs
+                    val line = sock.getInputStream().bufferedReader().readLine()
+                    if (line != null && line.startsWith(GREETING_PREFIX)) {
+                        null
+                    } else {
+                        "no 220 greeting (got: ${line?.take(40) ?: "EOF"})"
+                    }
+                }
+            } catch (e: Exception) {
+                "probe failed (${e.javaClass.simpleName}: ${e.message})"
+            }
+        }
+
         private const val DEFAULT_CHECK_INTERVAL_MS = 30_000L
         private const val SLEEP_SLICE_MS = 250L
         private const val GREETING_PREFIX = "220"

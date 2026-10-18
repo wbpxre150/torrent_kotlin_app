@@ -521,7 +521,14 @@ class DaemonService : Service() {
                 "TMPDIR" to File(filesDir, "tmp").apply { mkdirs() }.absolutePath),
             selfLogging = false,
             graceMs = 5000L,
-        )
+            // Readiness: the daemon is only RUNNING once its FTP greeting answers
+            // on the bind IP — the very probe the hang watchdog uses, so a slow
+            // start and a hung daemon are judged identically. The port is
+            // re-read each poll (a settings apply rebuilds this supervisor).
+            readinessProbe = {
+                com.torrent.app.net.FtpHangWatchdog.probeGreeting(
+                    host = ip, port = configStore.load().ftp.port, connectTimeoutMs = 2000) == null
+            })
     }
 
     /**
@@ -1244,7 +1251,17 @@ class DaemonService : Service() {
             nativeLibraryDir = nativeLibDir, workDir = workDir, logDir = logDir,
             extraEnv = mapOf("TORRENT_SAF_SOCKET" to safSocketFile.absolutePath,
                 "TMPDIR" to File(filesDir, "tmp").apply { mkdirs() }.absolutePath),
-            selfLogging = true)
+            selfLogging = true,
+            // Readiness: transmission is only RUNNING once its RPC answers a
+            // session-get on 127.0.0.1:9091 (Basic auth; the 409 session-id
+            // handshake happens inside the client, ~3 s timeout). Credentials
+            // are re-read on every poll so a password change during the launch
+            // cannot wedge readiness.
+            readinessProbe = {
+                val tx = configStore.load().transmission
+                com.torrent.app.transmission.TransmissionRpcClient(tx.username, tx.password)
+                    .sessionGet() != null
+            })
         transmission.start(); supervisors.add(transmission)
     }
 
@@ -1482,7 +1499,14 @@ class DaemonService : Service() {
             workDir = crawlerConfig.workDir, logDir = logDir,
             selfLogging = false,
             graceMs = CRAWLER_GRACE_MS,
-            extraEnv = mapOf("TMPDIR" to File(filesDir, "tmp").apply { mkdirs() }.absolutePath))
+            extraEnv = mapOf("TMPDIR" to File(filesDir, "tmp").apply { mkdirs() }.absolutePath),
+            // Readiness: the crawler is only RUNNING once its own HTTP API
+            // answers GET /stats with 200. crawlerHttpPort() is the port the
+            // crawler itself binds (http_port): the loopback crawlerHttpPort
+            // normally, and proxyPort in lanDirect mode — where CrawlerConfig
+            // writes http_bind=0.0.0.0, which still covers 127.0.0.1. Probing
+            // loopback never goes through CrawlerProxyServer.
+            readinessProbe = { crawlerStatsReachable() })
     }
 
     private fun stopSupervisors() {
