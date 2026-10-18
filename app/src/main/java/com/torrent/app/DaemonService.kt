@@ -878,16 +878,18 @@ class DaemonService : Service() {
         crawler.start()
 
         // Watch the restarted crawler for the whole window (plan 10 §1). The
-        // supervisor reports RUNNING as soon as the child is forked and bumps
-        // restartCount on every (re)launch, so the watch ARMS at the first
-        // poll that sees the crawler RUNNING — the restartCount of the launch
-        // this apply started. Snapshotting immediately after start() (as this
-        // used to do) captured the pre-launch count, so the launch's own bump
-        // looked like an early exit and every apply that started the crawler
-        // was rolled back (restoring enabled=false, which also stopped the
-        // crawler from auto-loading with the app). A slow start is fine: the
-        // crawler opens a large DB before its HTTP API answers, but
-        // restartCount only moves when a process actually exits.
+        // supervisor publishes the child's pid at fork and bumps restartCount
+        // on every (re)launch, so the watch ARMS at the first poll that sees a
+        // launched process (pid set, whether STARTING or RUNNING) and uses
+        // that launch's restartCount as the baseline. Snapshotting immediately
+        // after start() (as this used to do) captured the pre-launch count, so
+        // the launch's own bump looked like an early exit and every apply that
+        // started the crawler was rolled back (restoring enabled=false, which
+        // also stopped the crawler from auto-loading with the app). A slow
+        // start is fine: with a readiness probe the crawler can stay STARTING
+        // for the whole window while it loads its large DB and its HTTP/RPC
+        // API comes up, and restartCount only moves when a process actually
+        // exits — so a slow RPC-readiness start is not an early exit.
         val watch = CrawlerApplyWatch()
         setCrawlerApplyStatus(CrawlerApplyPhase.WATCHING, "watching for early exit (30 s)")
         val deadline = System.currentTimeMillis() + CRAWLER_APPLY_WATCH_MS
