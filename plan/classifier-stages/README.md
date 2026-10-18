@@ -4,7 +4,12 @@ Per-stage implementation packets live here, one file per stage, implemented **on
 `/dev <stage file>` (dev-workflow). `plan/classifier.md` is the design/research doc; `plan/classifier-stages.md`
 is a stub pointing here. Stages 3–4 target repo **`~/apps/classifier-model`**; stages 5–8 target **this app**;
 Stage 9 targets `~/apps/classifier-model` (PC); Stage 10 targets `~/apps/classifier-model` + the vendored
-`~/apps/dht_crawler` (PC — no phone).
+`~/apps/dht_crawler` (PC — no phone). Stage 11 (v2 retrain) is **complete** — the v2 to ship is the
+**fold-all retrain** on the full feedback corpus (`~/apps/classifier-model/data/feedback_all/models/`,
+157,825 teacher labels, seed 43; heldout 15,582: adult 0.9702 precision / **0.6123 recall** at hide
+(v1: 0.4937), category 0.8152, tv_kind 0.9566; thresholds hide 0.897417 / drop 0.993899). Stage 12
+step 0 promotes it to `models/v2/` + `cm export` manifest; stages 12–13 ship it into the app;
+stage 14 (optional) backfills the PC classified copy.
 
 **Stages 0–2 are complete** and their packets were removed (2026-10-15). Stage 2's gold pass was
 dropped — the user hand-checked the teacher's `adult` labels and accepted them — so the ~53k
@@ -50,4 +55,7 @@ This applies to Stage 10 (and any ad-hoc teacher probe; it applied to Stage 2 wh
 | 8 Phone backfill | `stage-08-phone-backfill.md` | app | M | — |
 | 9 PC backfill | `stage-09-pc-backfill.md` | classifier-model | M | long run (measure first) |
 | 10 Teacher audit | `stage-10-feedback-loop.md` | classifier-model + dht_crawler | M | ~3 h teacher run (parent) |
+| 12 v2 ship | `stage-12-v2-model-ship.md` | app | M | phone on USB |
+| 13 v2 phone backfill | `stage-13-v2-phone-backfill.md` | app (verification) | S–M | phone on USB |
+| 14 v2 PC copy backfill (optional) | `stage-14-v2-pc-copy-backfill.md` | classifier-model | S | long run (~2 h) |
 
