@@ -80,4 +80,49 @@ None expected (verification stage). Any fix-ups land as their own commits
 
 ## Results
 
-(record after the stage run)
+(recorded 2026-10-18, via dev-workflow; phone b93dac74 / CPH2305)
+
+**Prerequisite handling:** the phone no longer held stage 8's ~7.9k-row v1 DB — it had been rebuilt
+from scratch minutes prior (627 rows, all already clf_ver=2). Per operator decision the backfill basis
+was a **synthetic v1 downgrade**: flip the live rows' clf_ver 2→1 in place and let the always-on
+engine migrate them back to 2. Consequence (accepted): no genuine v1→v2 label flips, so the
+"v1→v2 flip count" is 0 by construction — see item 7.
+
+1. **Live backfill observed: PASS.** Downgraded 2,451 rows to clf_ver=1, restarted; `/stats`
+   `classifier.backfill` observed live: `running 0/2451` → `running 2000/2451` →
+   `running 2451/2451` (done == total) → `complete`, all at `clf_ver=2`. `rate_rows_s` recorded
+   1733 → 1669 rows/s (stage-8 range 1480–1902). Wall clock ≈ 1.25 s for 2,451 rows. The COMPLETE
+   frame publishes done/total=0/0 (the known stage-8 quirk).
+
+2. **Kill/resume + coverage: PASS.** Kill landed at the first `running` frame (done=0); the on-disk
+   DB was unchanged afterward (2,451 rows all still clf_ver=1, 0 partial writes) — the in-flight
+   page rolled back cleanly. Restart resumed (from-0 re-scan) and completed. Final pulled-DB SQL:
+   2,451 live torrents → 2,451 class rows / 2,451 distinct ids; 0 rows clf_ver<2; 0 unclassified;
+   0 duplicates. `classifier_meta`: clf_ver=2, the three v2 sha256s, adult_hide_threshold=0.897417,
+   and backfill_ckpt=2918 (checkpoint now present after a real sweep).
+
+3. **Host-parity spot-check: labels bit-identical; float columns ULP-identical (not bit-identical).**
+   Full-DB (2,451 rows ≫ 200) host re-classification via `tclassify-db --clf-ver 2 --models-dir
+   models/v2`: `category`, `tv_kind`, and `adult` are bit-identical — **0/2,451 mismatches each**
+   (these are the classification labels). `adult_p` and `confidence` differ on 66 and 811 rows
+   respectively, but only at float32 ULP scale (adult_p max |Δ|=1.19e-7; confidence max |Δ|=6.56e-7)
+   — ARM64 phone vs x86-64 host dot-product accumulation order, with zero decision-boundary
+   crossings (hence category/adult/tv_kind still bit-identical). Same-arch bit-identity was already
+   proven in stage 8 (backfill vs ingest, both on-device).
+
+4. **Ingest + new rows at v2: PASS (rate note).** Newest `torrent_class` row is clf_ver=2; 0
+   unclassified throughout. Crawl stayed active during/after the backfill (32 trees, metadata
+   fetches and UDP sends advancing). This session's ingest windows showed ~0 new torrents
+   (post-bootstrap DHT lull), so a fresh "vs control" rate could not be measured; the
+   no-regression claim rests on stage 8's rigorous 15-min measurement (backfill did not reduce ingest).
+
+5. **Dashboard + /stats: PASS.** `/stats` page HTML contains `id="bf-cell"`, `id="s-backfill"`,
+   `renderBackfill` (×2); `/api/crawler/stats` returns `classifier.backfill{state,done,total,
+   rate_rows_s,ckpt,clf_ver}` (observed live throughout).
+
+6. **Unit tests: PASS.** `./gradlew :app:testDebugUnitTest --rerun-tasks` → 617/617, 0 failures.
+
+7. **Numbers.** rows/s 1669–1733; wall clock ≈1.25 s / 2,451 rows; v1→v2 flip count **0 (synthetic
+   basis)**; adult counters — final DB has 414/2,451 rows adult=1 at the v2 hide threshold 0.897417
+   (adult_dropped=0 in tag mode). A v1(0.917039)-vs-v2(0.897417) adult-counter delta is not
+   measurable on the synthetic basis (no v1-labeled rows on-device).
