@@ -40,10 +40,10 @@ data class DbBookmark(val lastTorrentId: Long, val lastPrefixId: Long) {
          * sentinel). A valid file — including one that holds [FIRST_RUN]
          * (`-1`, `-1`) — returns its parsed [DbBookmark].
          *
-         * Used by [DbBackupManager] to tell "first-ever run against a
-         * pre-existing DB" (null → seed the baseline) apart from "a bookmark
-         * already exists" (non-null → the normal incremental path, which for a
-         * freshly restored/installed small DB dumps everything and is small).
+         * Used by [DbBackupManager]: a null result is treated the same as
+         * [FIRST_RUN] — the next check drains from the very start of the DB
+         * (no baseline seeding), and the bookmark file only appears on disk
+         * after the first chunk's upload succeeds.
          */
         fun readOrNull(file: File): DbBookmark? {
             if (!file.isFile) return null
