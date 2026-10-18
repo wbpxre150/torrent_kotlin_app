@@ -2249,8 +2249,9 @@ class ControlServer(
                 box.textContent = '';
                 var words = tokenizeName(name);
                 for (var i = 0; i < words.length; i++) {
+                  if (!wordInFiltered(words[i], filteredName)) continue;
                   var pill = document.createElement('span');
-                  pill.className = 'pill' + (wordInFiltered(words[i], filteredName) ? ' on' : '');
+                  pill.className = 'pill on';
                   pill.setAttribute('data-word', words[i]);
                   pill.textContent = words[i];
                   pill.onclick = function () {

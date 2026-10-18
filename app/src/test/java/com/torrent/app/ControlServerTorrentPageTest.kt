@@ -23,9 +23,13 @@ class ControlServerTorrentPageTest {
         assertTrue(page.contains("id=\"pills\""))
         assertTrue(page.contains("class=\"pills\""))
         assertTrue(page.contains("id=\"query-preview\""))
-        // pills are rendered from the torrent name, textContent only.
+        // pills are rendered from the torrent name, textContent only, and only
+        // for words present in the crawler's extracted media title (filtered_name).
         assertTrue(page.contains("tokenizeName"))
         assertTrue(page.contains("wordInFiltered"))
+        assertTrue(page.contains("if (!wordInFiltered(words[i], filteredName)) continue;"))
+        assertTrue(page.contains("pill.className = 'pill on'"))
+        assertFalse(page.contains("'pill' + (wordInFiltered"))
     }
 
     @Test fun page_hasTheFourActionButtons() {
