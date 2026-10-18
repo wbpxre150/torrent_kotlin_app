@@ -15,6 +15,7 @@ enum class MaintenanceAction(val route: String, val flag: String, val needsSpace
     COMPACT("compact", "--compact", true),
     RECOVER_DATABASE("recover-database", "--recover-database", true),
     REBUILD_BLOOM_FILTER("rebuild-bloom-filter", "--rebuild-bloom-filter", false),
+    CLEAR_FAILURE_FILTER("clear-failure-filter", "--clear-failure-filter", false),
     PORN_FILTER_UPDATE("porn-filter-update", "--porn-filter-update", false),
     ;
 

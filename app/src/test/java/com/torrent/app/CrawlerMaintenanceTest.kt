@@ -48,6 +48,7 @@ class CrawlerMaintenanceTest {
         assertEquals(MaintenanceAction.COMPACT, MaintenanceAction.fromRoute("compact"))
         assertEquals(MaintenanceAction.RECOVER_DATABASE, MaintenanceAction.fromRoute("recover-database"))
         assertEquals(MaintenanceAction.REBUILD_BLOOM_FILTER, MaintenanceAction.fromRoute("rebuild-bloom-filter"))
+        assertEquals(MaintenanceAction.CLEAR_FAILURE_FILTER, MaintenanceAction.fromRoute("clear-failure-filter"))
         assertEquals(MaintenanceAction.PORN_FILTER_UPDATE, MaintenanceAction.fromRoute("porn-filter-update"))
     }
 
@@ -63,6 +64,7 @@ class CrawlerMaintenanceTest {
         assertEquals("--compact", MaintenanceAction.COMPACT.flag)
         assertEquals("--recover-database", MaintenanceAction.RECOVER_DATABASE.flag)
         assertEquals("--rebuild-bloom-filter", MaintenanceAction.REBUILD_BLOOM_FILTER.flag)
+        assertEquals("--clear-failure-filter", MaintenanceAction.CLEAR_FAILURE_FILTER.flag)
         assertEquals("--porn-filter-update", MaintenanceAction.PORN_FILTER_UPDATE.flag)
     }
 
@@ -71,6 +73,7 @@ class CrawlerMaintenanceTest {
         assertTrue(MaintenanceAction.COMPACT.needsSpaceCheck)
         assertTrue(MaintenanceAction.RECOVER_DATABASE.needsSpaceCheck)
         assertFalse(MaintenanceAction.REBUILD_BLOOM_FILTER.needsSpaceCheck)
+        assertFalse(MaintenanceAction.CLEAR_FAILURE_FILTER.needsSpaceCheck)
         assertFalse(MaintenanceAction.PORN_FILTER_UPDATE.needsSpaceCheck)
     }
 
