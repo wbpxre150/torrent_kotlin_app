@@ -18,9 +18,9 @@ import java.util.concurrent.atomic.AtomicInteger
 /**
  * Plain-JUnit tests for [DbRestoreManager]: the stop-first flow
  * (settings → stop → LIST → download/gunzip/concat → one-shot), the
- * chain ordering (sorted by date, then start id; malformed and
- * zero-size keys skipped), the chain coherence failures (missing
- * baseline, gap between consecutive objects), the bookmark ordering (reset to
+ * chain ordering (ID-MAJOR: sorted by start id, then date; malformed
+ * and zero-size keys skipped), the chain coherence failures (a gap
+ * against the running max end; overlap is legal), the bookmark ordering (reset to
  * [DbBookmark.FIRST_RUN] ONLY on a zero exit — a failed restore
  * leaves it untouched), the crawler restart on every stopped outcome
  * (even a throwing stopCrawler), the temp-file cleanup on success AND
@@ -556,6 +556,95 @@ class DbRestoreManagerTest {
         assertEquals(1, flags.startCount)
         assertEquals(DbBookmark.FIRST_RUN, DbBookmark.read(bookmarkFile))
         assertTrue(tempFiles(File(tmp.root, "tmp")).isEmpty())
+    }
+
+    @Test fun mixedLegacyAndFromZeroChainSharingADate_hasNoFalseGap() {
+        val restorer = FakeRestorer()
+        val runner = FakeRunner()
+        val (m, _, _) = newManager(
+            restorer, runner,
+            // The real mixed bucket: a from-zero object and a legacy
+            // (old seeded behavior) object share the SAME UTC date, with
+            // the filler in between bridging the id range. Under the old
+            // (date, start) adjacency check the shared date paired
+            // [0-2000] with [34500594-...] and 34500594 > 2001 failed as a
+            // FALSE gap, refusing a complete chain.
+            objects = listOf(
+                "db/incremental_20261013_34500594-34503000.sql.gz" to "C",
+                "db/incremental_20261013_0-2000.sql.gz" to "A",
+                "db/incremental_20261014_2001-34500593.sql.gz" to "B",
+            ),
+        )
+
+        val st = m.runRestore()
+
+        assertEquals(DbRestoreState.SUCCESS, st.state)
+        // Id-major replay: 0 → 2001 → 34500594.
+        assertEquals(
+            listOf(
+                "db/incremental_20261013_0-2000.sql.gz",
+                "db/incremental_20261014_2001-34500593.sql.gz",
+                "db/incremental_20261013_34500594-34503000.sql.gz",
+            ),
+            restorer.getOrder)
+        assertEquals(3, st.objectCount)
+        assertEquals(1, runner.calls)
+        assertEquals("ABC", String(runner.capturedFileBytes!!))
+        assertTrue(st.message, st.message.contains("chain starts at torrent id 0"))
+    }
+
+    @Test fun genuineGapAfterRunningMax_failsWithGapMessage() {
+        val restorer = FakeRestorer()
+        val runner = FakeRunner()
+        val (m, _, _) = newManager(
+            restorer, runner,
+            // 2001..4999 is covered by no object: a real gap, not overlap.
+            objects = listOf(
+                "db/incremental_20261013_0-2000.sql.gz" to "A",
+                "db/incremental_20261014_5000-6000.sql.gz" to "B",
+            ),
+        )
+
+        val st = m.runRestore()
+
+        assertEquals(DbRestoreState.FAILED, st.state)
+        assertTrue(st.message, st.message.contains("has a gap"))
+        assertTrue(st.message, st.message.contains("db/incremental_20261013_0-2000.sql.gz"))
+        assertTrue(st.message, st.message.contains("ends at 2000"))
+        assertTrue(st.message, st.message.contains("db/incremental_20261014_5000-6000.sql.gz"))
+        assertTrue(st.message, st.message.contains("starts at 5000"))
+        assertEquals(0, restorer.getOrder.size)
+        assertEquals(0, runner.calls)
+    }
+
+    @Test fun redumpOfEarlierRangeOnALaterDate_replaysStartThenDateOrder() {
+        val restorer = FakeRestorer()
+        val runner = FakeRunner()
+        val (m, _, _) = newManager(
+            restorer, runner,
+            // [0-2000] was dumped twice (a later re-dump of the same range):
+            // id-major order replays the OLDER dump first, so the
+            // INSERT OR IGNORE replay is deterministically first-writer-wins.
+            objects = listOf(
+                "db/incremental_20261012_0-2000.sql.gz" to "B",
+                "db/incremental_20261011_2001-4000.sql.gz" to "C",
+                "db/incremental_20261010_0-2000.sql.gz" to "A",
+            ),
+        )
+
+        val st = m.runRestore()
+
+        assertEquals(DbRestoreState.SUCCESS, st.state)
+        assertEquals(
+            listOf(
+                "db/incremental_20261010_0-2000.sql.gz",
+                "db/incremental_20261012_0-2000.sql.gz",
+                "db/incremental_20261011_2001-4000.sql.gz",
+            ),
+            restorer.getOrder)
+        assertEquals(3, st.objectCount)
+        assertEquals("ABC", String(runner.capturedFileBytes!!))
+        assertTrue(st.message, st.message.contains("chain starts at torrent id 0"))
     }
 
     @Test fun adjacentChain_succeedsWithoutOffByOne() {

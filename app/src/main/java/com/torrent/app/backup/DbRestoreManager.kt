@@ -67,7 +67,7 @@ data class DbRestoreStatus(
  * restore already in flight →
  * [DbRestoreState.REFUSED_RUNNING]; otherwise stop the crawler,
  * LIST the `db/` prefix, download + gunzip every parseable object in
- * chain order (sorted by date, then start id; malformed keys are
+ * chain order (sorted by start id, then date; malformed keys are
  * skipped), concatenate them into ONE temp `.sql`, and run
  * `libdhtcrawler.so --restore-database <abs path>` as a one-shot in
  * the crawler work dir (the C side replays the dump into a FRESH db
@@ -207,42 +207,53 @@ class DbRestoreManager(
                     throw IllegalStateException("listing failed: " +
                         "${r.cause.message ?: r.cause.javaClass.simpleName}")
             }
-            // Chain order: sort by (date, start id); skip keys that do not
-            // match the dump convention exactly, keys outside the configured
-            // prefix, and zero-size objects (which would restore an EMPTY
-            // database).
+            // Chain order: ID-MAJOR — sort by (start id, then date) so an
+            // overlapping re-dump of the same range replays oldest-first;
+            // skip keys that do not match the dump convention exactly, keys
+            // outside the configured prefix, and zero-size objects (which
+            // would restore an EMPTY database).
             val chain = listed.mapNotNull { o ->
                 if (o.size == 0L) return@mapNotNull null
                 val k = DbObjectKey.parse(o.key) ?: return@mapNotNull null
                 if (k.prefix != settings.r2DbObjectPrefix) return@mapNotNull null
                 o.key to k
-            }.sortedWith(compareBy({ it.second.date }, { it.second.start }))
+            }.sortedWith(compareBy({ it.second.start }, { it.second.date }))
             if (chain.isEmpty()) {
                 throw IllegalStateException("nothing to restore: no parseable dump objects " +
                     "under ${prefixDir(settings)}")
             }
-            // Chain coherence: with seeded baselines the chain legitimately
-            // starts at ANY id — the first object's start defines the chain
-            // start (pre-baseline history is deliberately not in the bucket) —
-            // so there is no "missing baseline" failure.
+            // Chain coherence: the chain legitimately starts at ANY id —
+            // the first object's start defines the chain start (history
+            // before it is deliberately not in the bucket) — so there is no
+            // "missing baseline" failure.
             //
-            // A restore-induced re-baseline legitimately produces an OVERLAPPING
-            // chain: after a restore resets the bookmark to first run, the next
-            // backup re-dumps the whole (restored) database starting at 0, so
-            // the bucket can hold e.g. `[0-1434, 47-1390]` (sorted by date,
-            // start). Overlap is safe: every dump statement is
-            // `INSERT OR IGNORE`, so replaying overlapping ranges is
-            // idempotent. A TRUE gap — the next object's start beyond the
-            // previous object's end + 1 — means the bucket is missing data and
+            // A real bucket can hold a MIXED chain of two shapes that share
+            // a UTC date: legacy objects from the old seeded baseline
+            // (starting at e.g. 34,500,594) and from-zero objects produced
+            // after a restore reset the bookmark to first run (starting at
+            // 0). Sorted id-major those two shapes interleave instead of
+            // stacking by date — e.g. `[0-2000]` is followed by
+            // `[34501812-34503000]` on a shared date — so the coherence
+            // check is a RUNNING-MAX-END pass, never an adjacency check: an
+            // object may start anywhere at or before `runningMaxEnd + 1`,
+            // contiguous OR overlapping. Overlap is legal because every dump
+            // statement is `INSERT OR IGNORE` and the id-major order makes
+            // the replay first-writer-wins deterministically. A TRUE gap —
+            // `start > runningMaxEnd + 1`, i.e. no earlier object covers the
+            // ids right below it — means the bucket is missing data and
             // restoring it would silently drop rows; fail that case.
             val first = chain.first().second
-            for (i in 0 until chain.size - 1) {
-                val (keyA, a) = chain[i]
-                val (keyB, b) = chain[i + 1]
-                if (b.start > a.end + 1L) {
+            var runningMaxEnd = Long.MIN_VALUE
+            var runningMaxEndKey: String? = null
+            for ((key, obj) in chain) {
+                if (runningMaxEnd != Long.MIN_VALUE && obj.start - runningMaxEnd > 1L) {
                     throw IllegalStateException(
-                        "backup chain has a gap: object $keyA ends at ${a.end} " +
-                            "but next object $keyB starts at ${b.start}")
+                        "backup chain has a gap: object $runningMaxEndKey ends at " +
+                            "$runningMaxEnd but next object $key starts at ${obj.start}")
+                }
+                if (obj.end > runningMaxEnd) {
+                    runningMaxEnd = obj.end
+                    runningMaxEndKey = key
                 }
             }
             val keys = chain.map { it.first }
