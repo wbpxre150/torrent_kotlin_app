@@ -214,18 +214,19 @@ class DbBackupManagerTest {
 
     @Test fun refreshConfigStatus_preservesRealOutcomeState() {
         val up = FakeUploader()
-        val d = FakeDumper(maxCursorsResult = DbBookmark(100, 5))
-        // No bookmark file -> runCheck seeds the baseline (SEEDED, uploads
-        // nothing); a later config refresh must not clobber that state.
-        val m = newManager(dbFile(), d, up,
-            bookmarkFile = File(tmp.root, "seed_bookmark.txt"))
+        val d = FakeDumper()
+        val bookmarkFile = File(tmp.root, "outcome_bookmark.txt")
+        DbBookmark.write(bookmarkFile, DbBookmark.FIRST_RUN)
+        // A completed check (SUCCESS here) must not be clobbered by a later
+        // config refresh.
+        val m = newManager(dbFile(), d, up, bookmarkFile = bookmarkFile)
         m.runCheck(manual = true)
-        assertEquals(DbBackupState.SEEDED, m.status.state)
+        assertEquals(DbBackupState.SUCCESS, m.status.state)
         m.refreshConfigStatus()
-        assertEquals(DbBackupState.SEEDED, m.status.state)
+        assertEquals(DbBackupState.SUCCESS, m.status.state)
         assertTrue(m.status.uploadEnabled)
         assertTrue(m.status.configured)
-        assertEquals(0, up.calls)
+        assertEquals(1, up.calls)
     }
 
     @Test fun refreshConfigStatus_disabledMarksNotConfigured() {
@@ -307,8 +308,8 @@ class DbBackupManagerTest {
             override fun maxCursors(dbFile: File): DbBookmark = DbBookmark(-1, -1)
         }
         val bookmarkFile = File(tmp.root, "db_bookmark.txt")
-        // A valid bookmark file makes the check take the dump path (the
-        // throwing dumper), not the new missing-bookmark seed path.
+        // The check takes the dump path (the throwing dumper) whether or not a
+        // bookmark file exists; one is written to model the steady state.
         DbBookmark.write(bookmarkFile, DbBookmark.FIRST_RUN)
         val m = DbBackupManager(
             dbFile = { dbFile() },
@@ -567,8 +568,8 @@ class DbBackupManagerTest {
         val up = FakeUploader()
         val noop = NoopScheduledExecutorService()
         val bookmarkFile = File(tmp.root, "db_bookmark.txt")
-        // A valid bookmark file makes the check take the dump path (where
-        // [duringDump] is sampled), not the new missing-bookmark seed path.
+        // The check takes the dump path (where [duringDump] is sampled); a
+        // bookmark file is optional, one is written to model the steady state.
         DbBookmark.write(bookmarkFile, DbBookmark.FIRST_RUN)
         lateinit var m: DbBackupManager
         var duringDump = false
@@ -604,9 +605,13 @@ class DbBackupManagerTest {
         assertFalse(m.inFlight)
     }
 
-    @Test fun missingBookmarkSeedsBaselineAndUploadsNothing() {
+    @Test fun missingBookmarkDrainsFromDatabaseStart() {
         val up = FakeUploader()
-        val d = FakeDumper(maxCursorsResult = DbBookmark(100, 5))
+        val d = FakeDumper(
+            outcome = testDumpOutcome(
+                cursor = DbBookmark(10, 2),
+                objectKey = "db/incremental_20231114_0-10.sql.gz"),
+            maxCursorsResult = DbBookmark(100, 5))
         val bookmarkFile = File(tmp.root, "db_bookmark.txt")
         var stored: String? = null
         val m = newManager(
@@ -616,22 +621,23 @@ class DbBackupManagerTest {
             writeLastSuccessDate = { stored = it },
         )
         val st = m.runCheck(manual = true)
-        assertEquals(DbBackupState.SEEDED, st.state)
-        assertTrue(st.message, st.message.contains("baseline seeded at torrent id 100"))
-        assertTrue(st.message, st.message.contains("prefix id 5"))
-        assertTrue(st.message, st.message.contains("history before the baseline is not uploaded"))
-        // The baseline bookmark was written to the peeked max ids.
-        assertEquals(DbBookmark(100, 5), DbBookmark.read(bookmarkFile))
-        // No upload happened and nothing counts as a success.
-        assertEquals(0, up.calls)
-        assertNull(st.lastSuccess)
+        assertEquals(DbBackupState.SUCCESS, st.state)
+        // First-ever check with no bookmark file: the existing history is
+        // drained from the very beginning of the DB, not skipped by seeding a
+        // baseline at the current max ids.
+        assertEquals(DbBookmark.FIRST_RUN, d.lastBookmark)
+        assertEquals(1, d.calls)
+        // The cheap MAX() peek is never used for seeding any more.
+        assertEquals(0, d.maxCalls)
+        // The chunk was uploaded and only then followed by the bookmark write.
+        assertEquals(1, up.calls)
+        assertEquals("db/incremental_20231114_0-10.sql.gz", up.lastKey)
+        assertEquals(DbBookmark(10, 2), DbBookmark.read(bookmarkFile))
+        assertNotNull(st.lastSuccess)
         assertNotNull(st.lastAttempt)
-        // The cheap peek ran once; the dump path never ran.
-        assertEquals(1, d.maxCalls)
-        assertEquals(0, d.calls)
-        // The daily date is NOT persisted: the next periodic check the same
-        // day proceeds to the normal incremental path.
-        assertNull(stored)
+        // The backlog was drained by this check (the chunk was not capped), so
+        // the daily date is persisted as usual.
+        assertEquals("2023-11-14", stored)
     }
 
     @Test fun missingBookmarkThenNextRunUsesIncrementalPath() {
@@ -639,41 +645,70 @@ class DbBackupManagerTest {
         val d = FakeDumper(
             outcome = testDumpOutcome(
                 cursor = DbBookmark(101, 6),
-                objectKey = "db/incremental_20231114_101-101.sql.gz"),
-            maxCursorsResult = DbBookmark(100, 5))
+                objectKey = "db/incremental_20231114_101-101.sql.gz"))
         val bookmarkFile = File(tmp.root, "db_bookmark.txt")
         val m = newManager(dbFile(), d, up, bookmarkFile = bookmarkFile)
-        // First run: no bookmark -> seed the baseline, upload nothing.
+        // First run: no bookmark -> drains from the start of the DB and
+        // uploads (no baseline seed that uploads nothing).
         val first = m.runCheck(manual = true)
-        assertEquals(DbBackupState.SEEDED, first.state)
-        assertEquals(DbBookmark(100, 5), DbBookmark.read(bookmarkFile))
-        assertEquals(0, up.calls)
-        // Second run: the bookmark now exists -> the normal incremental path.
+        assertEquals(DbBackupState.SUCCESS, first.state)
+        assertEquals(DbBookmark.FIRST_RUN, d.lastBookmark)
+        assertEquals(1, up.calls)
+        assertEquals(DbBookmark(101, 6), DbBookmark.read(bookmarkFile))
+        // Second run: continues from the cursor the first run persisted.
         val second = m.runCheck(manual = true)
         assertEquals(DbBackupState.SUCCESS, second.state)
-        assertEquals(1, d.calls)
-        assertEquals(DbBookmark(100, 5), d.lastBookmark)
-        assertEquals(1, up.calls)
+        assertEquals(2, d.calls)
+        assertEquals(DbBookmark(101, 6), d.lastBookmark)
+        assertEquals(2, up.calls)
     }
 
-    @Test fun missingBookmarkEmptyDbSeedsFirstRunSentinel() {
+    @Test fun missingBookmarkEmptyDbSkipsAndWritesNoBookmark() {
         val up = FakeUploader()
-        // Empty tables -> MAX(id) is NULL -> FIRST_RUN (-1, -1).
-        val d = FakeDumper(maxCursorsResult = DbBookmark(-1, -1))
+        // Empty tables -> nothing to dump -> the dumper reports Skipped.
+        val d = FakeDumper(outcome = DbDumpOutcome.Skipped(
+            maxTorrentId = 0, maxPrefixId = 0, bookmark = DbBookmark.FIRST_RUN))
         val bookmarkFile = File(tmp.root, "db_bookmark.txt")
         val m = newManager(dbFile(), d, up, bookmarkFile = bookmarkFile)
         val st = m.runCheck(manual = true)
-        assertEquals(DbBackupState.SEEDED, st.state)
-        assertEquals(DbBookmark.FIRST_RUN, DbBookmark.read(bookmarkFile))
+        assertEquals(DbBackupState.SKIPPED_EMPTY, st.state)
+        // The drain asked for the very start of the DB.
+        assertEquals(DbBookmark.FIRST_RUN, d.lastBookmark)
         assertEquals(0, up.calls)
-        // A later run now has a FIRST_RUN bookmark -> dumps everything as before.
+        // Nothing was persisted: the bookmark file stays absent (no FIRST_RUN
+        // sentinel is written), so the next check retries from the start.
+        assertFalse(bookmarkFile.exists())
+        // Once rows exist, the next check dumps them from FIRST_RUN.
         d.outcome = testDumpOutcome()
         val second = m.runCheck(manual = true)
         assertEquals(DbBackupState.SUCCESS, second.state)
         assertEquals(DbBookmark.FIRST_RUN, d.lastBookmark)
         assertEquals(1, up.calls)
+        assertEquals(DbBookmark(10, 2), DbBookmark.read(bookmarkFile))
     }
 
+    @Test fun missingBookmarkCheckResumesFromPersistedCursorAfterRestart() {
+        val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        // First manager: no bookmark -> drains from the start of the DB and
+        // persists the uploaded chunk's cursor.
+        val up1 = FakeUploader()
+        val d1 = FakeDumper(outcome = testDumpOutcome(cursor = DbBookmark(10, 2)))
+        newManager(dbFile(), d1, up1, bookmarkFile = bookmarkFile).runCheck(manual = true)
+        assertEquals(DbBookmark.FIRST_RUN, d1.lastBookmark)
+        assertEquals(DbBookmark(10, 2), DbBookmark.read(bookmarkFile))
+        // "Process restart": a fresh manager instance on the same bookmark path
+        // resumes from the cursor on disk instead of re-dumping from the start.
+        val up2 = FakeUploader()
+        val d2 = FakeDumper(outcome = testDumpOutcome(
+            cursor = DbBookmark(20, 3),
+            objectKey = "db/incremental_20231114_11-20.sql.gz"))
+        val restarted = newManager(dbFile(), d2, up2, bookmarkFile = bookmarkFile)
+        val st = restarted.runCheck(manual = true)
+        assertEquals(DbBackupState.SUCCESS, st.state)
+        assertEquals(DbBookmark(10, 2), d2.lastBookmark)
+        assertEquals(1, up2.calls)
+        assertEquals(DbBookmark(20, 3), DbBookmark.read(bookmarkFile))
+    }
     @Test fun existingBookmarkDoesNotSeed() {
         val up = FakeUploader()
         // A valid (FIRST_RUN) bookmark file exists -> the normal dump path; the

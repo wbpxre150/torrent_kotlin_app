@@ -28,9 +28,9 @@ fun interface S3DbUploader {
  * [DbBackupManager] fake this seam.
  *
  * [maxCursors] peeks the current max ids WITHOUT dumping any rows (a cheap
- * `SELECT MAX(id)` per base table) so the manager can seed the baseline
- * bookmark on a first-ever run against a pre-existing (potentially huge) DB
- * without materializing its history in RAM.
+ * `SELECT MAX(id)` per base table). [DbBackupManager] no longer calls it: a
+ * first backup drains from the start of the DB ([DbBookmark.FIRST_RUN])
+ * instead of seeding a baseline at the current max ids.
  */
 interface DbDumper {
     fun dump(dbFile: File, bookmark: DbBookmark): DbDumpOutcome
@@ -97,9 +97,9 @@ data class DbBackupStatus(
  * [DbBackupState.NOT_CONFIGURED]; [isBusy] →
  * [DbBackupState.SKIPPED_BUSY]; no Wi-Fi → [DbBackupState.SKIPPED_NO_WIFI];
  * daily gate; DB file missing → [DbBackupState.SKIPPED_NO_DB];
- * bookmark missing (first-ever run against a pre-existing DB) →
- * [DbBackupState.SEEDED] (seed the baseline via [DbDumper.maxCursors],
- * upload nothing); [DbDumper] skips (empty range) →
+ * bookmark missing (first-ever run, also against a pre-existing DB) →
+ * drained from [DbBookmark.FIRST_RUN], i.e. from the start of the database;
+ * [DbDumper] skips (nothing to dump, e.g. empty DB) →
  * [DbBackupState.SKIPPED_EMPTY]; otherwise the bounded chunk drain below →
  * [DbBackupState.SUCCESS] / [DbBackupState.FAILED].
  *
@@ -303,52 +303,21 @@ class DbBackupManager(
             return finish(DbBackupState.SKIPPED_NO_DB, "skipped: crawler DB is missing",
                 uploadEnabled = true, configured = true)
         }
-        val bookmark = DbBookmark.readOrNull(bookmarkFile())
-        if (bookmark == null) {
-            // First-ever run against a pre-existing DB: there is no baseline
-            // bookmark yet, and the existing history is deliberately NOT
-            // uploaded — it can be tens of GB (a full dump would OOM on the
-            // 402 MB heap and exceed S3's 5 GB single-PUT limit). Seed the
-            // baseline at the current max ids via a cheap MAX() peek (never a
-            // row dump) and upload nothing. lastAttempt is set (it is an
-            // attempt) but lastSuccess is NOT (nothing was uploaded). The
-            // daily date is deliberately NOT persisted, so the next periodic
-            // check the same day proceeds to the normal incremental path and
-            // uploads any rows discovered after the baseline. A capped drain
-            // (see [MAX_CHUNKS_PER_CHECK]) holds the same way: an unfinished
-            // backlog leaves the date unwritten and continues next check.
-            val dumper = dumperFactory(settings)
-            val seeded = try {
-                dumper.maxCursors(file)
-            } catch (e: Exception) {
-                return finish(
-                    DbBackupState.FAILED,
-                    "baseline seed failed: ${e.message ?: e.javaClass.simpleName}",
-                    uploadEnabled = true, configured = true)
-            }
-            try {
-                DbBookmark.write(bookmarkFile(), seeded)
-            } catch (e: Exception) {
-                return finish(
-                    DbBackupState.FAILED,
-                    "baseline seed write failed: ${e.message ?: e.javaClass.simpleName}",
-                    uploadEnabled = true, configured = true)
-            }
-            return finish(
-                DbBackupState.SEEDED,
-                "baseline seeded at torrent id ${seeded.lastTorrentId}, " +
-                    "prefix id ${seeded.lastPrefixId}; history before the " +
-                    "baseline is not uploaded",
-                uploadEnabled = true, configured = true)
-        }
-        // Bounded drain of the incremental backlog: each chunk is dumped (the
-        // dumper caps it at its own row cap), PUT, and only then followed by
-        // its bookmark write (upload-first holds per chunk). The loop budget
-        // keeps one check's wall time bounded; if it runs out while still
-        // capped the next check continues from the advanced bookmark.
-        // The missing-bookmark branch above already returned, so the bookmark
-        // is non-null here.
-        var cursor: DbBookmark = checkNotNull(bookmark)
+        // Missing bookmark file = first-ever run: drain from the very
+        // beginning of the database. [DbBookmark.readOrNull] only tells "no
+        // bookmark file yet" apart from "a bookmark exists"; both resolve to
+        // a concrete cursor here, and a missing/unparseable file reads as
+        // [DbBookmark.FIRST_RUN] ("dump everything"). The sentinel is
+        // deliberately NOT written to disk: a missing file already reads back
+        // as FIRST_RUN, and an empty DB writes nothing at all (SKIPPED_EMPTY
+        // below), so the next check simply retries from the start.
+        //
+        // Bounded drain of the backlog: each chunk is dumped (the dumper caps
+        // it at its own row cap), PUT, and only then followed by its bookmark
+        // write (upload-first holds per chunk). The loop budget keeps one
+        // check's wall time bounded; if it runs out while still capped the
+        // next check continues from the advanced bookmark.
+        var cursor: DbBookmark = DbBookmark.readOrNull(bookmarkFile()) ?: DbBookmark.FIRST_RUN
         var chunks = 0
         var totalBytes = 0L
         var totalStatements = 0
