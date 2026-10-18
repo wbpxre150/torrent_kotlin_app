@@ -2603,10 +2603,6 @@ class ControlServer(
                 return String(v);
               }
 
-              function fmtInt(v) {
-                if (typeof v !== 'number' || !isFinite(v)) return '—';
-                return v.toLocaleString();
-              }
 
               function defaultOpen(depth) {
                 // Top-level sections and per-item objects start expanded;
