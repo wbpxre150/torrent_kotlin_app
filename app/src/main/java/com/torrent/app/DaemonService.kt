@@ -36,6 +36,8 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadFactory
 import org.json.JSONObject
 import com.torrent.app.config.CrawlerGate
+import com.torrent.app.config.ClassifierModelVersionMigration
+import com.torrent.app.config.ConfigDefaults
 import com.torrent.app.backup.Bep51BackupManager
 import com.torrent.app.backup.Bep51BootstrapDownloader
 import com.torrent.app.backup.BootstrapResult
@@ -1267,6 +1269,9 @@ class DaemonService : Service() {
             try {
                 val crawlerConfig = CrawlerConfig(this)
                 crawlerConfig.ensureLayout()
+                // Stage 12: a classifier model-dir bump invalidates every stored
+                // threshold, so migrate BEFORE anything can start the crawler.
+                migrateClassifierVersion(crawlerConfig)
                 // Stage 5: before the crawler's (re)launch, warm-start it from
                 // a downloaded BEP51 bootstrap cache when configured. Bounded
                 // (15 s connect / 30 s read), and every failure falls through
@@ -1278,6 +1283,40 @@ class DaemonService : Service() {
             } catch (e: Exception) {
                 android.util.Log.e("DaemonService", "failed to start crawler supervisor", e)
             }
+        }
+    }
+
+    /**
+     * Stage 12: resets the adult thresholds to the current classifier generation's
+     * calibrated defaults the first time this build starts the crawler against a new
+     * [CrawlerConfig.MODELS_SUBDIR], then re-renders `config.ini` so the pinned
+     * `classifier_model_dir` and the new thresholds reach the daemon before it runs.
+     *
+     * The reset is unconditional (a value tuned against `models/v1` score distributions
+     * is invalid under `models/v2`, not merely stale) and idempotent via the persisted
+     * model-dir sentinel. Runs inside [startCrawlerSupervisor]'s try/catch: a failure
+     * here is logged by the caller and never blocks the crawler's start.
+     */
+    private fun migrateClassifierVersion(crawlerConfig: CrawlerConfig) {
+        val previous = configStore.load().crawler
+        val newHide = ConfigDefaults.CRAWLER.adultHideThreshold
+        val newDrop = ConfigDefaults.CRAWLER.adultDropThreshold
+        val migration = ClassifierModelVersionMigration(
+            readStoredModelDir = { configStore.classifierModelVersion() },
+            resetThresholds = {
+                android.util.Log.i(
+                    "DaemonService",
+                    "classifier model generation changed to ${CrawlerConfig.MODELS_SUBDIR}: " +
+                        "resetting adult thresholds hide ${previous.adultHideThreshold} -> $newHide, " +
+                        "drop ${previous.adultDropThreshold} -> $newDrop"
+                )
+                configStore.resetClassifierThresholds(newHide, newDrop)
+            },
+            writeStoredModelDir = { configStore.setClassifierModelVersion(it) },
+        )
+        if (migration.run(CrawlerConfig.MODELS_SUBDIR)) {
+            // Re-render so the daemon starts with the reset thresholds, not the old ones.
+            crawlerConfig.applySettings(configStore.load().crawler)
         }
     }
 

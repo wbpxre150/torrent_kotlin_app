@@ -310,4 +310,39 @@ class ConfigStoreTest {
         s.clearCrawlerLastKnownGood()
         assertNull(s.restoreCrawlerLastKnownGood())
     }
+
+    @Test fun classifierModelVersion_roundTrips() {
+        val s = store()
+        assertNull("a fresh install has never migrated", s.classifierModelVersion())
+        s.setClassifierModelVersion("models/v2")
+        assertEquals("models/v2", s.classifierModelVersion())
+    }
+
+    @Test fun resetClassifierThresholds_overwritesLiveAndLastKnownGoodValues() {
+        val s = store()
+        // A user-customized value plus a snapshot taken with it: the v1-tuned numbers
+        // must be gone from BOTH views, or a rollback would restore them.
+        s.saveCrawler(CrawlerSettings(adultHideThreshold = 0.5, adultDropThreshold = 0.6))
+        s.snapshotCrawlerLastKnownGood(
+            CrawlerSettings(
+                adultHideThreshold = 0.5, adultDropThreshold = 0.6,
+                classifierEnabled = false, numTrees = 16,
+            )
+        )
+
+        s.resetClassifierThresholds(0.897417, 0.993899)
+
+        val live = s.load().crawler
+        assertEquals(0.897417, live.adultHideThreshold, 1e-6)
+        assertEquals(0.993899, live.adultDropThreshold, 1e-6)
+        assertEquals("0.897417", prefs().getString("lkg_crawler_adult_hide_threshold", null))
+        assertEquals("0.993899", prefs().getString("lkg_crawler_adult_drop_threshold", null))
+        val lkg = s.restoreCrawlerLastKnownGood()
+        assertNotNull(lkg)
+        assertEquals(0.897417, lkg!!.adultHideThreshold, 1e-6)
+        assertEquals(0.993899, lkg.adultDropThreshold, 1e-6)
+        // The rest of the snapshot is untouched by the threshold reset.
+        assertFalse(lkg.classifierEnabled)
+        assertEquals(16, lkg.numTrees)
+    }
 }

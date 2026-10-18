@@ -166,6 +166,33 @@ class ConfigStore(context: Context) {
         prefs.edit().putString(KEY_BACKUP_DB_LAST_SUCCESS_DATE, date).apply()
     }
 
+    /**
+     * Model dir (`models/vN`) the classifier thresholds were last migrated for; the
+     * sentinel of [ClassifierModelVersionMigration] (Stage 12). `null` means "never
+     * migrated", so the first daemon start after this shipped performs the reset.
+     */
+    fun classifierModelVersion(): String? = prefs.getString(KEY_CLASSIFIER_MODEL_VERSION, null)
+
+    fun setClassifierModelVersion(value: String) {
+        prefs.edit().putString(KEY_CLASSIFIER_MODEL_VERSION, value).apply()
+    }
+
+    /**
+     * Overwrites the adult thresholds with the current model generation's calibrated
+     * defaults, in both the live keys and the last-known-good snapshot — otherwise a
+     * rollback would restore thresholds calibrated against the previous model. Written
+     * in a single edit so the two views never disagree. Only the two threshold LKG keys
+     * are touched; the rest of the snapshot is left alone.
+     */
+    fun resetClassifierThresholds(hide: Double, drop: Double) {
+        prefs.edit()
+            .putString(KEY_CRAWLER_ADULT_HIDE_THRESHOLD, hide.toString())
+            .putString(KEY_CRAWLER_ADULT_DROP_THRESHOLD, drop.toString())
+            .putString(KEY_LKG_CRAWLER_ADULT_HIDE_THRESHOLD, hide.toString())
+            .putString(KEY_LKG_CRAWLER_ADULT_DROP_THRESHOLD, drop.toString())
+            .apply()
+    }
+
     fun setWizardCompleted() { prefs.edit().putBoolean(KEY_WIZARD, true).apply() }
 
     /** FTP password falls back to the built-in default + persists on first access;
@@ -310,6 +337,8 @@ class ConfigStore(context: Context) {
         private const val KEY_CRAWLER_ADULT_MODE = "crawler_adult_mode"
         private const val KEY_CRAWLER_ADULT_HIDE_THRESHOLD = "crawler_adult_hide_threshold"
         private const val KEY_CRAWLER_ADULT_DROP_THRESHOLD = "crawler_adult_drop_threshold"
+        /** Sentinel: the model dir the classifier thresholds were last migrated for. */
+        private const val KEY_CLASSIFIER_MODEL_VERSION = "classifier_model_version"
         private const val KEY_CRAWLER_BLOOM_CAPACITY = "crawler_bloom_capacity"
         private const val KEY_CRAWLER_FAILURE_BLOOM_CAPACITY = "crawler_failure_bloom_capacity"
         private const val KEY_CRAWLER_BLOOM_ERROR_RATE = "crawler_bloom_error_rate"

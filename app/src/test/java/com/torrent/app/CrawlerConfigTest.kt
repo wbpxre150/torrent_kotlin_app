@@ -273,6 +273,71 @@ class CrawlerConfigTest {
             assertArrayEquals("staged bytes must be unchanged", firstBytes, staged.readBytes())
         }
 
+        @Test fun ensureAssets_stampCarriesTheModelDir() {
+            val cfg = configWithRealDefaultAsset()
+            cfg.ensureLayout()
+
+            val stamp = File(cfg.workDir, CrawlerConfig.STAMP_FILE)
+            assertEquals(
+                "the stamp must pin the model dir, not just the version code",
+                "${crawlerVersionCode()}|${CrawlerConfig.MODELS_SUBDIR}",
+                stamp.readText().trim()
+            )
+        }
+
+        @Test fun ensureAssets_v1ToV2UpgradeDeletesTheStaleModelDirAndRestages() {
+            val cfg = configWithRealDefaultAsset()
+            cfg.ensureLayout()
+            // Simulate an install staged by the v1 build: stale sibling model dir plus a
+            // stamp from before the model dir was part of it.
+            val staleV1 = File(cfg.workDir, "models/v1").apply { mkdirs() }
+            File(staleV1, "adult.ftz").writeBytes(byteArrayOf(9, 9, 9))
+            val stamp = File(cfg.workDir, CrawlerConfig.STAMP_FILE)
+            stamp.writeText(crawlerVersionCode().toString())
+            cfg.modelsDir.deleteRecursively() // force a real re-stage
+
+            cfg.ensureAssets()
+
+            assertFalse("the v1 model dir must be reclaimed", staleV1.exists())
+            assertFalse("no v1 models may ship", File(cfg.workDir, "models/v1").exists())
+            assertTrue("the current model dir must survive", cfg.modelsDir.isDirectory)
+            for (name in CrawlerConfig.MODEL_FILES) {
+                val staged = File(cfg.modelsDir, name)
+                assertTrue("$name must be re-staged into ${cfg.modelsDir}", staged.isFile)
+                assertArrayEquals(
+                    "$name must be copied byte-for-byte",
+                    File(MODEL_SRC_DIR, name).readBytes(), staged.readBytes()
+                )
+            }
+            assertEquals(
+                "the stamp must be upgraded to the model-dir scheme",
+                "${crawlerVersionCode()}|${CrawlerConfig.MODELS_SUBDIR}",
+                stamp.readText().trim()
+            )
+        }
+
+        @Test fun ensureAssets_stampChangeNeverDeletesTheCurrentModelDir() {
+            val cfg = configWithRealDefaultAsset()
+            cfg.ensureLayout()
+            val current = File(cfg.modelsDir, "adult.ftz")
+            assertTrue(current.isFile)
+            val stale = File(cfg.workDir, "models/v1").apply { mkdirs() }
+            File(stale, "adult.ftz").writeBytes(byteArrayOf(1, 2, 3))
+            val unrelated = File(cfg.workDir, "models/notes.txt").apply { writeText("keep me") }
+            File(cfg.workDir, CrawlerConfig.STAMP_FILE).writeText("0|models/v1")
+
+            cfg.ensureAssets()
+
+            assertFalse("the stale sibling dir is reclaimed", stale.exists())
+            assertTrue("the current model dir is never deleted", cfg.modelsDir.isDirectory)
+            assertTrue("staged model files survive the sweep", current.isFile)
+            assertTrue("only dirs are swept: plain files stay", unrelated.isFile)
+            assertEquals(
+                "${crawlerVersionCode()}|${CrawlerConfig.MODELS_SUBDIR}",
+                File(cfg.workDir, CrawlerConfig.STAMP_FILE).readText().trim()
+            )
+        }
+
         @Test fun ensureAssets_restagesModelsWhenVersionStampChanges() {
             val cfg = configWithRealDefaultAsset()
             cfg.ensureLayout()
@@ -305,6 +370,18 @@ class CrawlerConfigTest {
 
         /** Checked-in model assets (read-only source of truth for the staging tests). */
         private val MODEL_SRC_DIR = File("src/main/cpp/dht_crawler-android/models/v2")
+
+        /** Mirrors `CrawlerConfig.currentVersionCode()`, which is private to the class. */
+        private fun crawlerVersionCode(): Long {
+            val context = RuntimeEnvironment.getApplication()
+            val info = context.packageManager.getPackageInfo(context.packageName, 0)
+            return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                info.longVersionCode
+            } else {
+                @Suppress("DEPRECATION")
+                info.versionCode.toLong()
+            }
+        }
 
         /**
          * Mirrors `assets/dht_crawler/models/v2/` into the asset fixture with the real

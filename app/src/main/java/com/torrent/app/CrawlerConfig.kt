@@ -46,14 +46,19 @@ class CrawlerConfig(
     /**
      * Copies the keyword files from `assets/dht_crawler/` into [workDir], and the
      * classifier model files from `assets/dht_crawler/models/v2/` into [modelsDir],
-     * when missing or when the app version code differs from the `.assets_version`
-     * stamp. The models are binary (`fastText` `.ftz`); they are streamed byte-for-byte
+     * when missing or when the `"<versionCode>|<MODELS_SUBDIR>"` `.assets_version`
+     * stamp differs — so a model-dir bump re-stages even at an unchanged version code.
+     * On a stamp mismatch the previous generation's model dirs under `models/` are
+     * deleted. The models are binary (`fastText` `.ftz`); they are streamed byte-for-byte
      * — see [copyBinaryAtomically].
      */
     fun ensureAssets() {
         val version = currentVersionCode()
+        // The stamp carries the model dir as well as the version code: a models/v1 -> v2
+        // bump must re-stage even when `versionCode` itself is unchanged.
+        val stampValue = "$version|$MODELS_SUBDIR"
         val stamp = File(workDir, STAMP_FILE)
-        val stampMatches = stamp.exists() && stamp.readText().trim() == version.toString()
+        val stampMatches = stamp.exists() && stamp.readText().trim() == stampValue
         for (name in KEYWORD_FILES) {
             val target = File(workDir, name)
             if (stampMatches && target.exists()) continue
@@ -65,7 +70,27 @@ class CrawlerConfig(
             if (stampMatches && target.exists()) continue
             openAsset("$ASSET_DIR/$MODELS_SUBDIR/$name").use { copyBinaryAtomically(it, target) }
         }
-        if (!stampMatches) stamp.writeText(version.toString())
+        if (!stampMatches) {
+            // The stamp changed, so any other model dir under models/ is a previous
+            // generation's (~26 MB of dead weight). Never touch the current dir.
+            deleteStaleModelDirs()
+            stamp.writeText(stampValue)
+        }
+    }
+
+    /**
+     * Deletes every immediate child dir of `workDir/models` that is not the current
+     * [MODELS_SUBDIR] generation (e.g. `v1` once the app ships `v2`). Sibling dirs only:
+     * the current one is never a candidate, so an in-flight crawler that resolves
+     * [modelsDir] keeps its files.
+     */
+    private fun deleteStaleModelDirs() {
+        val current = File(workDir, MODELS_SUBDIR).name
+        val parent = modelsDir.parentFile ?: return
+        for (child in parent.listFiles().orEmpty()) {
+            if (!child.isDirectory || child.name == current) continue
+            child.deleteRecursively()
+        }
     }
 
     /**
