@@ -74,9 +74,10 @@ class ControlServerSearchPageTest {
     }
 
     @Test fun js_linksDetailPagesSameOrigin() {
+        // webui-ux stage 1: the `…` link navigates in the same tab (no target/rel).
         assertTrue(page.contains("detail.href = '/torrent?hash=' + encodeURIComponent(r.info_hash || '')"))
-        assertTrue(page.contains("detail.target = '_blank'"))
-        assertTrue(page.contains("detail.rel = 'noopener'"))
+        assertFalse(page.contains("detail.target"))
+        assertFalse(page.contains("detail.rel"))
     }
 
     @Test fun js_prefillsTheQueryFromTheUrl() {

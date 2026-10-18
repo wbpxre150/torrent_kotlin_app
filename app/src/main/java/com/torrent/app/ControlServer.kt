@@ -615,7 +615,7 @@ class ControlServer(
             <table><tr><th>Name</th><th>State</th><th>PID</th><th>Uptime</th><th>Restarts</th><th>Control</th></tr>
             $daemonRows</table>
             <h2>Transmission</h2>
-            <p class="meta">RPC: <a href="$txLink" target="_blank">$txLink</a> (user: ${esc(cfg.transmission.username)})</p>
+            <p class="meta">RPC: <a href="$txLink">$txLink</a> (user: ${esc(cfg.transmission.username)})</p>
             $downloadsSection
             <h2>USB Storage</h2>
             $usbSection
@@ -1777,8 +1777,6 @@ class ControlServer(
                 // Same-origin detail page: this server serves /torrent itself
                 // (torrent-page stage 2), so no crawler proxy origin is needed.
                 detail.href = '/torrent?hash=' + encodeURIComponent(r.info_hash || '');
-                detail.target = '_blank';
-                detail.rel = 'noopener';
                 actions.appendChild(detail);
 
                 card.appendChild(actions);

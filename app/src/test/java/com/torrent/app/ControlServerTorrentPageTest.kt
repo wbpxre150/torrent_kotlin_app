@@ -68,6 +68,13 @@ class ControlServerTorrentPageTest {
         assertFalse(page.contains("<link "))
     }
 
+    @Test fun js_imdbOpensExternally() {
+        // webui-ux stage 1: IMDb is the one destination that keeps leaving the
+        // webview (so Android can offer the installed IMDb app).
+        assertTrue(page.contains("a.target = '_blank'"))
+        assertTrue(page.contains("a.rel = 'noopener noreferrer'"))
+    }
+
     @Test fun js_formatsSizesLikeTheCrawler() {
         // %.2f with 1024 steps — tp_format_size parity.
         assertTrue(page.contains("toFixed(2)"))
