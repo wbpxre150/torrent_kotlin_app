@@ -28,6 +28,16 @@ enum class ProcessState { STOPPED, STARTING, RUNNING, STOPPING }
  * stop()/restart() block for up to the SIGTERM grace period — never call them
  * from the main thread or an HTTP request handler. Status reads via [status]
  * are safe from any thread.
+ *
+ * Readiness: when [readinessProbe] is set, the supervisor stays in
+ * [ProcessState.STARTING] after the child is forked and publishes
+ * [ProcessState.RUNNING] only once the probe returns true (e.g. the daemon's
+ * RPC port answers). While the child is alive the probe is retried every
+ * [readinessPollMs]; a probe that throws counts as "not ready" and is retried.
+ * There is deliberately no readiness timeout — a daemon that never answers is
+ * reported as STARTING for as long as it stays alive, and an exit still takes
+ * the normal exit/backoff/restart path. With no probe (the default) the
+ * supervisor publishes RUNNING immediately after the fork.
  */
 class ProcessSupervisor(
     private val label: String,
@@ -41,6 +51,10 @@ class ProcessSupervisor(
     private val selfLogging: Boolean = false,
     private val pipelineMaxLines: Int = 200,
     private val graceMs: Long = DEFAULT_GRACE_MS,  // destroy() → destroyForcibly() window
+    // Optional readiness probe: while set, the supervisor stays STARTING after
+    // the fork until a probe returns true. See the class KDoc.
+    private val readinessProbe: (suspend () -> Boolean)? = null,
+    private val readinessPollMs: Long = 2000,      // delay between failed probes
 ) {
     companion object {
         private const val TAG = "ProcessSupervisor"
@@ -161,17 +175,30 @@ class ProcessSupervisor(
             }
             val now = System.currentTimeMillis()
             restarts++
+            // With a readiness probe the launch stays STARTING until the probe
+            // answers; without one it is RUNNING as soon as it is forked (the
+            // original behavior).
             _status.value = _status.value.copy(
-                state = ProcessState.RUNNING,
+                state = if (readinessProbe == null) ProcessState.RUNNING else ProcessState.STARTING,
                 pid = pidOf(proc),
                 startTimeMs = now,
                 restartCount = restarts,
             )
             Log.i(TAG, "[$label] started (restart #$restarts)")
 
-            // Drain stdout/stderr concurrently with waitFor
+            // Drain stdout/stderr concurrently with waitFor. While a readiness
+            // probe is configured it polls as a child coroutine; it is cancelled
+            // as soon as this launch ends (child exit, or the loop itself being
+            // cancelled by stop()), so a dead child's probe never lingers.
             val exited = try {
-                drainAndWait(proc)
+                coroutineScope {
+                    val readyJob = if (readinessProbe != null) launch { awaitReadiness() } else null
+                    try {
+                        drainAndWait(proc)
+                    } finally {
+                        readyJob?.cancel()
+                    }
+                }
             } finally {
                 synchronized(lifecycleLock) { if (child === proc) child = null }
             }
@@ -194,6 +221,52 @@ class ProcessSupervisor(
             Log.i(TAG, "[$label] restarting in ${delayMs}ms")
             delay(delayMs)
             backoffIndex = if (backoffIndex < BACKOFF_MS.size) backoffIndex + 1 else backoffIndex
+        }
+    }
+
+    /**
+     * Polls [readinessProbe] until it reports ready, then publishes
+     * [ProcessState.RUNNING]. Runs as a child coroutine of the launch's
+     * [coroutineScope], so it is cancelled when the child exits or the
+     * supervisor scope is cancelled by [stop].
+     *
+     * A probe that throws counts as not-ready (a daemon that is still binding
+     * its port often refuses connections). There is deliberately no timeout: we
+     * keep polling while the child is alive; if it dies, its exit drives the
+     * normal backoff/restart path.
+     */
+    private suspend fun awaitReadiness() {
+        val probe = readinessProbe ?: return
+        while (currentCoroutineContext().isActive) {
+            val ready = try {
+                probe()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.d(TAG, "[$label] readiness probe failed: ${e.javaClass.simpleName}: ${e.message}")
+                false
+            }
+            if (ready) {
+                // A stop() that raced the probe must never be overwritten by a
+                // late RUNNING: only publish from STARTING and only if we are
+                // not stopping. Other fields (logs, pid, …) are carried over.
+                val published = synchronized(lifecycleLock) {
+                    val cur = _status.value
+                    if (!stopping && cur.state == ProcessState.STARTING) {
+                        _status.value = cur.copy(state = ProcessState.RUNNING)
+                        true
+                    } else {
+                        false
+                    }
+                }
+                if (published) {
+                    Log.i(TAG, "[$label] ready (RPC probe succeeded)")
+                } else {
+                    Log.d(TAG, "[$label] ready but state is ${_status.value.state}, not publishing RUNNING")
+                }
+                return
+            }
+            delay(readinessPollMs)
         }
     }
 
