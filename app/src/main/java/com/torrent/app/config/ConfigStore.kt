@@ -38,7 +38,10 @@ class ConfigStore(context: Context) {
             treeMetadataWorkers = prefs.getInt(KEY_CRAWLER_METADATA_WORKERS, ConfigDefaults.CRAWLER.treeMetadataWorkers),
             treeInfohashQueueCapacity = prefs.getInt(KEY_CRAWLER_INFOHASH_QUEUE, ConfigDefaults.CRAWLER.treeInfohashQueueCapacity),
             treePeersQueueCapacity = prefs.getInt(KEY_CRAWLER_PEERS_QUEUE, ConfigDefaults.CRAWLER.treePeersQueueCapacity),
-            pornFilterEnabled = prefs.getBoolean(KEY_CRAWLER_PORN_FILTER, ConfigDefaults.CRAWLER.pornFilterEnabled),
+            // Persisted as a StringSet; sorted on load so the order is deterministic
+            // (an empty list = "save everything").
+            saveCategories = prefs.getStringSet(KEY_CRAWLER_SAVE_CATEGORIES, emptySet()).orEmpty().sorted(),
+            saveTvKinds = prefs.getStringSet(KEY_CRAWLER_SAVE_TV_KINDS, emptySet()).orEmpty().sorted(),
             languageFilterNonLatinThreshold = prefs.getInt(KEY_CRAWLER_LANG_THRESHOLD, ConfigDefaults.CRAWLER.languageFilterNonLatinThreshold),
             classifierEnabled = prefs.getBoolean(KEY_CRAWLER_CLASSIFIER_ENABLED, ConfigDefaults.CRAWLER.classifierEnabled),
             adultMode = prefs.getString(KEY_CRAWLER_ADULT_MODE, ConfigDefaults.CRAWLER.adultMode)!!,
@@ -120,7 +123,8 @@ class ConfigStore(context: Context) {
             .putInt(KEY_CRAWLER_METADATA_WORKERS, s.treeMetadataWorkers)
             .putInt(KEY_CRAWLER_INFOHASH_QUEUE, s.treeInfohashQueueCapacity)
             .putInt(KEY_CRAWLER_PEERS_QUEUE, s.treePeersQueueCapacity)
-            .putBoolean(KEY_CRAWLER_PORN_FILTER, s.pornFilterEnabled)
+            .putStringSet(KEY_CRAWLER_SAVE_CATEGORIES, s.saveCategories.toSet())
+            .putStringSet(KEY_CRAWLER_SAVE_TV_KINDS, s.saveTvKinds.toSet())
             .putInt(KEY_CRAWLER_LANG_THRESHOLD, s.languageFilterNonLatinThreshold)
             .putBoolean(KEY_CRAWLER_CLASSIFIER_ENABLED, s.classifierEnabled)
             .putString(KEY_CRAWLER_ADULT_MODE, s.adultMode)
@@ -249,7 +253,8 @@ class ConfigStore(context: Context) {
             .putInt(KEY_LKG_CRAWLER_METADATA_WORKERS, s.treeMetadataWorkers)
             .putInt(KEY_LKG_CRAWLER_INFOHASH_QUEUE, s.treeInfohashQueueCapacity)
             .putInt(KEY_LKG_CRAWLER_PEERS_QUEUE, s.treePeersQueueCapacity)
-            .putBoolean(KEY_LKG_CRAWLER_PORN_FILTER, s.pornFilterEnabled)
+            .putStringSet(KEY_LKG_CRAWLER_SAVE_CATEGORIES, s.saveCategories.toSet())
+            .putStringSet(KEY_LKG_CRAWLER_SAVE_TV_KINDS, s.saveTvKinds.toSet())
             .putInt(KEY_LKG_CRAWLER_LANG_THRESHOLD, s.languageFilterNonLatinThreshold)
             .putBoolean(KEY_LKG_CRAWLER_CLASSIFIER_ENABLED, s.classifierEnabled)
             .putString(KEY_LKG_CRAWLER_ADULT_MODE, s.adultMode)
@@ -281,7 +286,8 @@ class ConfigStore(context: Context) {
             treeMetadataWorkers = prefs.getInt(KEY_LKG_CRAWLER_METADATA_WORKERS, ConfigDefaults.CRAWLER.treeMetadataWorkers),
             treeInfohashQueueCapacity = prefs.getInt(KEY_LKG_CRAWLER_INFOHASH_QUEUE, ConfigDefaults.CRAWLER.treeInfohashQueueCapacity),
             treePeersQueueCapacity = prefs.getInt(KEY_LKG_CRAWLER_PEERS_QUEUE, ConfigDefaults.CRAWLER.treePeersQueueCapacity),
-            pornFilterEnabled = prefs.getBoolean(KEY_LKG_CRAWLER_PORN_FILTER, ConfigDefaults.CRAWLER.pornFilterEnabled),
+            saveCategories = prefs.getStringSet(KEY_LKG_CRAWLER_SAVE_CATEGORIES, emptySet()).orEmpty().sorted(),
+            saveTvKinds = prefs.getStringSet(KEY_LKG_CRAWLER_SAVE_TV_KINDS, emptySet()).orEmpty().sorted(),
             languageFilterNonLatinThreshold = prefs.getInt(KEY_LKG_CRAWLER_LANG_THRESHOLD, ConfigDefaults.CRAWLER.languageFilterNonLatinThreshold),
             classifierEnabled = prefs.getBoolean(KEY_LKG_CRAWLER_CLASSIFIER_ENABLED, ConfigDefaults.CRAWLER.classifierEnabled),
             adultMode = prefs.getString(KEY_LKG_CRAWLER_ADULT_MODE, ConfigDefaults.CRAWLER.adultMode)!!,
@@ -331,7 +337,8 @@ class ConfigStore(context: Context) {
         private const val KEY_CRAWLER_METADATA_WORKERS = "crawler_tree_metadata_workers"
         private const val KEY_CRAWLER_INFOHASH_QUEUE = "crawler_tree_infohash_queue_capacity"
         private const val KEY_CRAWLER_PEERS_QUEUE = "crawler_tree_peers_queue_capacity"
-        private const val KEY_CRAWLER_PORN_FILTER = "crawler_porn_filter_enabled"
+        private const val KEY_CRAWLER_SAVE_CATEGORIES = "crawler_save_categories"
+        private const val KEY_CRAWLER_SAVE_TV_KINDS = "crawler_save_tv_kinds"
         private const val KEY_CRAWLER_LANG_THRESHOLD = "crawler_language_filter_non_latin_threshold"
         private const val KEY_CRAWLER_CLASSIFIER_ENABLED = "crawler_classifier_enabled"
         private const val KEY_CRAWLER_ADULT_MODE = "crawler_adult_mode"
@@ -372,7 +379,8 @@ class ConfigStore(context: Context) {
         private const val KEY_LKG_CRAWLER_METADATA_WORKERS = "lkg_crawler_tree_metadata_workers"
         private const val KEY_LKG_CRAWLER_INFOHASH_QUEUE = "lkg_crawler_tree_infohash_queue_capacity"
         private const val KEY_LKG_CRAWLER_PEERS_QUEUE = "lkg_crawler_tree_peers_queue_capacity"
-        private const val KEY_LKG_CRAWLER_PORN_FILTER = "lkg_crawler_porn_filter_enabled"
+        private const val KEY_LKG_CRAWLER_SAVE_CATEGORIES = "lkg_crawler_save_categories"
+        private const val KEY_LKG_CRAWLER_SAVE_TV_KINDS = "lkg_crawler_save_tv_kinds"
         private const val KEY_LKG_CRAWLER_LANG_THRESHOLD = "lkg_crawler_language_filter_non_latin_threshold"
         private const val KEY_LKG_CRAWLER_CLASSIFIER_ENABLED = "lkg_crawler_classifier_enabled"
         private const val KEY_LKG_CRAWLER_ADULT_MODE = "lkg_crawler_adult_mode"

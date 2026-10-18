@@ -49,7 +49,11 @@ class CrawlerMaintenanceTest {
         assertEquals(MaintenanceAction.RECOVER_DATABASE, MaintenanceAction.fromRoute("recover-database"))
         assertEquals(MaintenanceAction.REBUILD_BLOOM_FILTER, MaintenanceAction.fromRoute("rebuild-bloom-filter"))
         assertEquals(MaintenanceAction.CLEAR_FAILURE_FILTER, MaintenanceAction.fromRoute("clear-failure-filter"))
-        assertEquals(MaintenanceAction.PORN_FILTER_UPDATE, MaintenanceAction.fromRoute("porn-filter-update"))
+        assertEquals(
+            MaintenanceAction.CATEGORY_FILTER_UPDATE,
+            MaintenanceAction.fromRoute("category-filter-update")
+        )
+        assertNull(MaintenanceAction.fromRoute("porn-filter-update"))
     }
 
     @Test fun fromRoute_isCaseInsensitiveAndUnknownIsNull() {
@@ -65,7 +69,7 @@ class CrawlerMaintenanceTest {
         assertEquals("--recover-database", MaintenanceAction.RECOVER_DATABASE.flag)
         assertEquals("--rebuild-bloom-filter", MaintenanceAction.REBUILD_BLOOM_FILTER.flag)
         assertEquals("--clear-failure-filter", MaintenanceAction.CLEAR_FAILURE_FILTER.flag)
-        assertEquals("--porn-filter-update", MaintenanceAction.PORN_FILTER_UPDATE.flag)
+        assertEquals("--category-filter-update", MaintenanceAction.CATEGORY_FILTER_UPDATE.flag)
     }
 
     @Test fun needsSpaceCheckOnlyForDbRewritingActions() {
@@ -74,7 +78,9 @@ class CrawlerMaintenanceTest {
         assertTrue(MaintenanceAction.RECOVER_DATABASE.needsSpaceCheck)
         assertFalse(MaintenanceAction.REBUILD_BLOOM_FILTER.needsSpaceCheck)
         assertFalse(MaintenanceAction.CLEAR_FAILURE_FILTER.needsSpaceCheck)
-        assertFalse(MaintenanceAction.PORN_FILTER_UPDATE.needsSpaceCheck)
+        // The purge re-scans, runs the language-filter pass and auto-compacts
+        // (VACUUM INTO), so it needs a DB-sized amount of free space.
+        assertTrue(MaintenanceAction.CATEGORY_FILTER_UPDATE.needsSpaceCheck)
     }
 
     @Test fun compact_refusedWhenNotEnoughFreeSpace() {
@@ -87,6 +93,14 @@ class CrawlerMaintenanceTest {
     @Test fun recoverDatabase_refusedWhenNotEnoughFreeSpace() {
         val m = newMaintenance(CapturingExecutor(), dbSize = 10_000L, freeSpace = 5_000L)
         val st = m.start(MaintenanceAction.RECOVER_DATABASE)
+        assertTrue(st.message, st.message.startsWith("refused: not enough free space"))
+        assertFalse(st.running)
+    }
+
+    @Test fun categoryFilterUpdate_refusedWhenNotEnoughFreeSpace() {
+        // The purge auto-compacts (VACUUM INTO), so it is space-gated like compact.
+        val m = newMaintenance(CapturingExecutor(), dbSize = 10_000L, freeSpace = 5_000L)
+        val st = m.start(MaintenanceAction.CATEGORY_FILTER_UPDATE)
         assertTrue(st.message, st.message.startsWith("refused: not enough free space"))
         assertFalse(st.running)
     }

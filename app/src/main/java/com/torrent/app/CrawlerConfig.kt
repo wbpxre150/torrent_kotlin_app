@@ -114,30 +114,36 @@ class CrawlerConfig(
     }
 
     /** The `config.ini` keys owned by the settings form, in stable render order. */
-    fun managedKeys(s: CrawlerSettings): Map<String, String> = linkedMapOf(
-        "dht_port" to s.dhtPort.toString(),
-        "log_level" to s.logLevel,
-        "nice_level" to s.niceLevel.toString(),
-        "num_trees" to s.numTrees.toString(),
-        "tree_find_node_workers" to s.treeFindNodeWorkers.toString(),
-        "tree_bep51_workers" to s.treeBep51Workers.toString(),
-        "tree_get_peers_workers" to s.treeGetPeersWorkers.toString(),
-        "tree_metadata_workers" to s.treeMetadataWorkers.toString(),
-        "tree_infohash_queue_capacity" to s.treeInfohashQueueCapacity.toString(),
-        "tree_peers_queue_capacity" to s.treePeersQueueCapacity.toString(),
-        "porn_filter_enabled" to (if (s.pornFilterEnabled) "1" else "0"),
-        "language_filter_non_latin_threshold" to s.languageFilterNonLatinThreshold.toString(),
-        "classifier_enabled" to (if (s.classifierEnabled) "1" else "0"),
-        // The C crawler compares adult_mode case-sensitively; normalise here.
-        "adult_mode" to s.adultMode.trim().lowercase(),
-        "adult_hide_threshold" to s.adultHideThreshold.toString(),
-        "adult_drop_threshold" to s.adultDropThreshold.toString(),
-        "bloom_capacity" to s.bloomCapacity.toString(),
-        "failure_bloom_capacity" to s.failureBloomCapacity.toString(),
-        "bloom_error_rate" to s.bloomErrorRate.toString(),
-        "http_port" to (if (s.lanDirect) s.proxyPort.toString() else s.crawlerHttpPort.toString()),
-        "http_bind" to (if (s.lanDirect) "0.0.0.0" else "127.0.0.1"),
-    )
+    fun managedKeys(s: CrawlerSettings): Map<String, String> {
+        val keys = linkedMapOf(
+            "dht_port" to s.dhtPort.toString(),
+            "log_level" to s.logLevel,
+            "nice_level" to s.niceLevel.toString(),
+            "num_trees" to s.numTrees.toString(),
+            "tree_find_node_workers" to s.treeFindNodeWorkers.toString(),
+            "tree_bep51_workers" to s.treeBep51Workers.toString(),
+            "tree_get_peers_workers" to s.treeGetPeersWorkers.toString(),
+            "tree_metadata_workers" to s.treeMetadataWorkers.toString(),
+            "tree_infohash_queue_capacity" to s.treeInfohashQueueCapacity.toString(),
+            "tree_peers_queue_capacity" to s.treePeersQueueCapacity.toString(),
+            "language_filter_non_latin_threshold" to s.languageFilterNonLatinThreshold.toString(),
+            "classifier_enabled" to (if (s.classifierEnabled) "1" else "0"),
+            // The C crawler compares adult_mode case-sensitively; normalise here.
+            "adult_mode" to s.adultMode.trim().lowercase(),
+            "adult_hide_threshold" to s.adultHideThreshold.toString(),
+            "adult_drop_threshold" to s.adultDropThreshold.toString(),
+            "bloom_capacity" to s.bloomCapacity.toString(),
+            "failure_bloom_capacity" to s.failureBloomCapacity.toString(),
+            "bloom_error_rate" to s.bloomErrorRate.toString(),
+            "http_port" to (if (s.lanDirect) s.proxyPort.toString() else s.crawlerHttpPort.toString()),
+            "http_bind" to (if (s.lanDirect) "0.0.0.0" else "127.0.0.1"),
+        )
+        // Category selection: an empty list means "save everything", which is the
+        // crawler's own default — so the key is omitted rather than written empty.
+        taxonomyList(s.saveCategories)?.let { keys[SAVE_CATEGORIES_KEY] = it }
+        taxonomyList(s.saveTvKinds)?.let { keys[SAVE_TV_KINDS_KEY] = it }
+        return keys
+    }
 
     /**
      * Renders the full `config.ini` text for [s]: the current file (or the seed
@@ -151,6 +157,15 @@ class CrawlerConfig(
         var text = setKeys(base, managedKeys(s))
         val advanced = CrawlerKeys.parseAdvanced(s.advancedOverrides)
         if (advanced.ok) text = setKeys(text, advanced.entries)
+        // Clearing the selection must also clear the key: leaving a stale
+        // `save_categories` behind would keep filtering to the old choice.
+        text = unsetKeys(
+            text,
+            buildList {
+                if (taxonomyList(s.saveCategories) == null) add(SAVE_CATEGORIES_KEY)
+                if (taxonomyList(s.saveTvKinds) == null) add(SAVE_TV_KINDS_KEY)
+            },
+        )
         return applyPinnedKeys(text)
     }
 
@@ -204,6 +219,21 @@ class CrawlerConfig(
 
         /** Classifier model dir, work-dir relative (mirrors crawler `classifier_model_dir`). */
         const val MODELS_SUBDIR = "models/v2"
+
+        /** `save_categories` — categories to keep; the key is omitted when none is selected. */
+        const val SAVE_CATEGORIES_KEY = "save_categories"
+
+        /** `save_tv_kinds` — tv kinds to keep within tv/anime; omitted when none is selected. */
+        const val SAVE_TV_KINDS_KEY = "save_tv_kinds"
+
+        /**
+         * Comma-joined, lowercased taxonomy selection for [config.ini], or null when
+         * nothing is selected — the crawler reads an absent key as "save everything".
+         */
+        fun taxonomyList(names: Collection<String>): String? {
+            val cleaned = names.map { it.trim().lowercase() }.filter { it.isNotEmpty() }
+            return if (cleaned.isEmpty()) null else cleaned.joinToString(",")
+        }
 
         /**
          * Binary model assets shipped under `assets/dht_crawler/models/v2/` and staged
@@ -265,6 +295,21 @@ class CrawlerConfig(
                 if (key !in seen) out.add("$key = $value")
             }
             return out.joinToString("\n")
+        }
+
+        /**
+         * Drops every assignment of [keys] from [ini], preserving the rest of the text
+         * (comments, ordering). Same-prefix keys are left untouched.
+         */
+        fun unsetKeys(ini: String, keys: Collection<String>): String {
+            if (keys.isEmpty()) return ini
+            return ini.split("\n").filterNot { line ->
+                val trimmed = line.trim()
+                val isKeyLine = trimmed.isNotEmpty() &&
+                    !trimmed.startsWith("#") && !trimmed.startsWith(";")
+                val eq = if (isKeyLine) line.indexOf('=') else -1
+                eq > 0 && line.substring(0, eq).trim() in keys
+            }.joinToString("\n")
         }
 
         /**

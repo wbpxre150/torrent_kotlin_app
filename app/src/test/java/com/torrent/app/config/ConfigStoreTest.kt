@@ -210,7 +210,8 @@ class ConfigStoreTest {
                 treeMetadataWorkers = 40,
                 treeInfohashQueueCapacity = 2500,
                 treePeersQueueCapacity = 2500,
-                pornFilterEnabled = false,
+                saveCategories = listOf("tv", "anime"),
+                saveTvKinds = listOf("episode", "daily"),
                 languageFilterNonLatinThreshold = 50,
                 classifierEnabled = false,
                 adultMode = "drop",
@@ -238,7 +239,8 @@ class ConfigStoreTest {
         assertEquals(40, c.treeMetadataWorkers)
         assertEquals(2500, c.treeInfohashQueueCapacity)
         assertEquals(2500, c.treePeersQueueCapacity)
-        assertFalse(c.pornFilterEnabled)
+        assertEquals(listOf("anime", "tv"), c.saveCategories) // stored as a set, sorted on load
+        assertEquals(listOf("daily", "episode"), c.saveTvKinds)
         assertEquals(50, c.languageFilterNonLatinThreshold)
         assertFalse(c.classifierEnabled)
         assertEquals("drop", c.adultMode)
@@ -267,7 +269,9 @@ class ConfigStoreTest {
         assertEquals(12, c.treeMetadataWorkers)
         assertEquals(500, c.treeInfohashQueueCapacity)
         assertEquals(500, c.treePeersQueueCapacity)
-        assertTrue(c.pornFilterEnabled)
+        // Empty selection = save everything (both keys are omitted from config.ini).
+        assertTrue(c.saveCategories.isEmpty())
+        assertTrue(c.saveTvKinds.isEmpty())
         assertEquals(33, c.languageFilterNonLatinThreshold)
         assertTrue(c.classifierEnabled)
         assertEquals("tag", c.adultMode)
@@ -291,6 +295,7 @@ class ConfigStoreTest {
                 enabled = true, numTrees = 32, logLevel = "WARN",
                 classifierEnabled = false, adultMode = "drop",
                 adultHideThreshold = 0.8, adultDropThreshold = 0.95,
+                saveCategories = listOf("movie", "tv"), saveTvKinds = listOf("season_pack"),
             )
         )
         val restored = s.restoreCrawlerLastKnownGood()
@@ -302,6 +307,8 @@ class ConfigStoreTest {
         assertEquals("drop", restored.adultMode)
         assertEquals(0.8, restored.adultHideThreshold, 1e-6)
         assertEquals(0.95, restored.adultDropThreshold, 1e-6)
+        assertEquals(listOf("movie", "tv"), restored.saveCategories)
+        assertEquals(listOf("season_pack"), restored.saveTvKinds)
     }
 
     @Test fun clearCrawlerLastKnownGood_removesSnapshot() {

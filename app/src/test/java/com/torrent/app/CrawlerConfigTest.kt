@@ -87,6 +87,25 @@ class CrawlerConfigTest {
         assertEquals("0", ini["ssh_backup_enabled"])
     }
 
+    // --- category selection (save_categories / save_tv_kinds) ---
+
+    @Test fun taxonomyList_joinsLowercasedTrimmedNames() {
+        assertEquals("tv,anime", CrawlerConfig.taxonomyList(listOf(" TV ", "Anime")))
+        assertEquals("daily", CrawlerConfig.taxonomyList(listOf("daily", "")))
+    }
+
+    @Test fun taxonomyList_emptySelectionMeansSaveEverything() {
+        assertNull(CrawlerConfig.taxonomyList(emptyList()))
+        assertNull("blank names are not a selection", CrawlerConfig.taxonomyList(listOf("", "  ")))
+    }
+
+    @Test fun unsetKeys_removesOnlyTheNamedAssignments() {
+        val ini = "# comment\nsave_categories = tv\nnum_trees = 8\nsave_tv_kinds=episode\n"
+        val out = CrawlerConfig.unsetKeys(ini, listOf(CrawlerConfig.SAVE_CATEGORIES_KEY))
+        assertEquals("# comment\nnum_trees = 8\nsave_tv_kinds=episode\n", out)
+        assertEquals(ini, CrawlerConfig.unsetKeys(ini, emptyList()))
+    }
+
     // --- writeAtomically ---
 
     @Test fun writeAtomically_writesContentAndLeavesNoTempFile() {
@@ -151,6 +170,12 @@ class CrawlerConfigTest {
         assertNull(ini["ssh_user"])
         assertNull(ini["ssh_dest_path"])
         assertNull(ini["ssh_key_path"])
+        // The keyword porn filter is gone from the crawler (remove-porn-filter patch) and
+        // the category selection is absent by default: absent means "save everything".
+        assertNull(ini["porn_filter_enabled"])
+        assertNull(ini["porn_filter_keyword_file"])
+        assertNull(ini["save_categories"])
+        assertNull(ini["save_tv_kinds"])
         for ((key, value) in ini) {
             assertFalse("value for $key must not contain a desktop path: $value", value.contains("/home"))
         }
@@ -429,6 +454,48 @@ class CrawlerConfigTest {
             val after = CrawlerConfig.parseIni(cfg.configFile.readText())
             assertNull(after["not_a_real_key"])
             assertFalse(after.containsKey("not_a_real_key"))
+        }
+
+        @Test fun renderManaged_writesCategorySelectionAsCommaJoinedLowercase() {
+            val cfg = configWithRealDefaultAsset()
+            cfg.ensureLayout()
+
+            cfg.applySettings(
+                CrawlerSettings(
+                    saveCategories = listOf("TV", "Anime"),
+                    saveTvKinds = listOf("episode", "DAILY"),
+                )
+            )
+            val ini = CrawlerConfig.parseIni(cfg.configFile.readText())
+            assertEquals("tv,anime", ini[CrawlerConfig.SAVE_CATEGORIES_KEY])
+            assertEquals("episode,daily", ini[CrawlerConfig.SAVE_TV_KINDS_KEY])
+            assertFalse(ini.containsKey("porn_filter_enabled"))
+        }
+
+        @Test fun renderManaged_omitsCategoryKeysWhenNothingIsSelected() {
+            val cfg = configWithRealDefaultAsset()
+            cfg.ensureLayout()
+
+            cfg.applySettings(CrawlerSettings(numTrees = 4))
+            val ini = CrawlerConfig.parseIni(cfg.configFile.readText())
+            assertFalse("an empty selection must not write the key", ini.containsKey(CrawlerConfig.SAVE_CATEGORIES_KEY))
+            assertFalse(ini.containsKey(CrawlerConfig.SAVE_TV_KINDS_KEY))
+        }
+
+        @Test fun renderManaged_clearingTheSelectionRemovesTheStaleKeys() {
+            val cfg = configWithRealDefaultAsset()
+            cfg.ensureLayout()
+            // An install that previously filtered, then cleared the selection: an
+            // omitted key alone would leave the stale filter in place.
+            cfg.configFile.writeText(
+                cfg.configFile.readText() +
+                    "save_categories = tv\nsave_tv_kinds = episode\n"
+            )
+
+            cfg.applySettings(CrawlerSettings())
+            val ini = CrawlerConfig.parseIni(cfg.configFile.readText())
+            assertFalse(ini.containsKey(CrawlerConfig.SAVE_CATEGORIES_KEY))
+            assertFalse(ini.containsKey(CrawlerConfig.SAVE_TV_KINDS_KEY))
         }
 
         @Test fun renderManaged_lanDirectBindsAllInterfacesOnProxyPort() {

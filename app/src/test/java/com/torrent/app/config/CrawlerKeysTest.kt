@@ -48,7 +48,7 @@ class CrawlerKeysTest {
     @Test fun parseAdvanced_rejectsPathKeys() {
         // (backup_path is also a backup key and is covered by the backup test)
         for (key in listOf(
-            "db_path", "bloom_path", "bep51_cache_path", "porn_filter_keyword_file",
+            "db_path", "bloom_path", "bep51_cache_path",
             "classifier_model_dir", "hard_block_file"
         )) {
             val r = CrawlerKeys.parseAdvanced("$key=/tmp/x")
@@ -74,6 +74,52 @@ class CrawlerKeysTest {
             assertFalse("$key must be rejected", r.ok)
             assertTrue(r.errors.any { it.contains(key) && it.contains("form", true) })
         }
+    }
+
+    @Test fun knownKeys_carryTheCategorySelectionAndDroppedPornFilterKeys() {
+        assertTrue("save_categories must be known", "save_categories" in CrawlerKeys.KNOWN_KEYS)
+        assertTrue("save_tv_kinds must be known", "save_tv_kinds" in CrawlerKeys.KNOWN_KEYS)
+        // The crawler no longer parses these (remove-porn-filter patch): a key it
+        // would ignore must not be offered as known or overridable.
+        for (key in listOf("porn_filter_enabled", "porn_filter_keyword_file")) {
+            assertFalse("$key must no longer be known", key in CrawlerKeys.KNOWN_KEYS)
+            assertFalse("$key must not be path-managed", key in CrawlerKeys.PATH_KEYS)
+            assertFalse("$key must not be form-managed", key in CrawlerKeys.FORM_MANAGED_KEYS)
+            assertFalse("$key must not be advanced-overridable", key in CrawlerKeys.ALLOWED_ADVANCED_KEYS)
+        }
+        // The language-filter alias survives the porn-filter removal.
+        assertTrue("porn_filter_non_latin_threshold", "porn_filter_non_latin_threshold" in CrawlerKeys.KNOWN_KEYS)
+    }
+
+    @Test fun categorySelectionKeys_areFormManaged() {
+        for (key in listOf("save_categories", "save_tv_kinds")) {
+            assertTrue("$key must be form-managed", key in CrawlerKeys.FORM_MANAGED_KEYS)
+            assertFalse("$key must not be path-managed", key in CrawlerKeys.PATH_KEYS)
+            assertFalse("$key must not be backup-managed", key in CrawlerKeys.BACKUP_KEYS)
+            assertFalse("$key must not be advanced-overridable", key in CrawlerKeys.ALLOWED_ADVANCED_KEYS)
+        }
+        val r = CrawlerKeys.parseAdvanced("save_categories=tv")
+        assertFalse(r.ok)
+        assertTrue(r.errors.any { it.contains("save_categories") && it.contains("form", true) })
+    }
+
+    @Test fun taxonomy_matchesTheCrawlerTables() {
+        assertEquals(
+            listOf(
+                "unknown", "movie", "tv", "anime", "music", "audiobook",
+                "ebook", "comic", "software", "game", "image", "other"
+            ),
+            CrawlerTaxonomy.CATEGORIES
+        )
+        assertEquals(
+            listOf(
+                "none", "episode", "multi_episode", "season_pack", "multi_season",
+                "complete_series", "daily"
+            ),
+            CrawlerTaxonomy.TV_KINDS
+        )
+        assertEquals("category names must be unique", 12, CrawlerTaxonomy.CATEGORIES.toSet().size)
+        assertEquals("tv-kind names must be unique", 7, CrawlerTaxonomy.TV_KINDS.toSet().size)
     }
 
     @Test fun parseAdvanced_allowsLanguageFilterAlias() {

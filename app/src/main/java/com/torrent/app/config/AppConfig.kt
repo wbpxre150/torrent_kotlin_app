@@ -32,7 +32,16 @@ data class CrawlerSettings(
     val treeMetadataWorkers: Int = 12,
     val treeInfohashQueueCapacity: Int = 500,
     val treePeersQueueCapacity: Int = 500,
-    val pornFilterEnabled: Boolean = true,
+    /**
+     * `save_categories`: category names to keep ([CrawlerTaxonomy.CATEGORIES]);
+     * empty = save everything (the key is omitted from `config.ini`).
+     */
+    val saveCategories: List<String> = emptyList(),
+    /**
+     * `save_tv_kinds`: tv kinds to keep within tv/anime ([CrawlerTaxonomy.TV_KINDS]);
+     * empty = keep all kinds.
+     */
+    val saveTvKinds: List<String> = emptyList(),
     val languageFilterNonLatinThreshold: Int = 33,
     /** Ingest-time classifier (`classifier_enabled`; default on). */
     val classifierEnabled: Boolean = true,

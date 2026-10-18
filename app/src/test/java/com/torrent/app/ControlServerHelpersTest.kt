@@ -57,7 +57,7 @@ class ControlServerHelpersTest {
         val m = ControlServer.parseForm(
             "enabled=&wifiOnly=&lanDirect=&logLevel=WARN&dhtPort=6882&niceLevel=-5"
                 + "&numTrees=8&treeFindNodeWorkers=2&treeBep51Workers=5&treeGetPeersWorkers=12&treeMetadataWorkers=40"
-                + "&treeInfohashQueueCapacity=100&treePeersQueueCapacity=200&pornFilterEnabled="
+                + "&treeInfohashQueueCapacity=100&treePeersQueueCapacity=200"
                 + "&languageFilterNonLatinThreshold=50&bloomCapacity=1000&failureBloomCapacity=2000"
                 + "&bloomErrorRate=0.005&advancedOverrides=bep51_cache_capacity=77&proxyPort=8090&crawlerHttpPort=8091"
                 + "&classifierEnabled=&adultMode=drop&adultHideThreshold=0.9&adultDropThreshold=0.995")
@@ -75,7 +75,6 @@ class ControlServerHelpersTest {
         assertEquals(40, s.treeMetadataWorkers)
         assertEquals(100, s.treeInfohashQueueCapacity)
         assertEquals(200, s.treePeersQueueCapacity)
-        assertTrue(s.pornFilterEnabled)
         assertEquals(50, s.languageFilterNonLatinThreshold)
         assertEquals(1000, s.bloomCapacity)
         assertEquals(2000, s.failureBloomCapacity)
@@ -113,7 +112,8 @@ class ControlServerHelpersTest {
 
     @Test fun crawlerSettingsFromForm_keepsCurrentWhenBlankOrMissing() {
         val current = CrawlerSettings(
-            dhtPort = 6881, logLevel = "DEBUG", advancedOverrides = "x=1", bloomErrorRate = 0.002)
+            dhtPort = 6881, logLevel = "DEBUG", advancedOverrides = "x=1", bloomErrorRate = 0.002,
+            saveCategories = listOf("tv", "anime"), saveTvKinds = listOf("daily"))
         val s = ControlServer.crawlerSettingsFromForm(mapOf("numTrees" to "4", "bloomErrorRate" to ""), current)
         assertEquals(4, s.numTrees)
         assertEquals(6881, s.dhtPort)
@@ -121,7 +121,10 @@ class ControlServerHelpersTest {
         assertEquals(0.002, s.bloomErrorRate, 0.0)
         assertEquals("x=1", s.advancedOverrides)
         assertFalse(s.enabled)
-        assertFalse(s.pornFilterEnabled)
+        // The category selection is not in the form yet (Stage 4 adds the chips):
+        // an apply must keep the stored selection instead of resetting it.
+        assertEquals(listOf("tv", "anime"), s.saveCategories)
+        assertEquals(listOf("daily"), s.saveTvKinds)
     }
 
     @Test fun backupStatusJson_idleStatus() {

@@ -34,11 +34,11 @@ object CrawlerKeys {
         // Metadata fetcher
         "max_concurrent_connections", "tcp_connect_timeout_sec", "connection_timeout_sec",
         "max_connection_lifetime_sec",
-        // Pornography content filter
-        "porn_filter_enabled", "porn_filter_keyword_file",
         // Ingest-time classifier + adult handling (Stage 5/6)
         "classifier_enabled", "classifier_model_dir",
         "adult_mode", "adult_hide_threshold", "adult_drop_threshold", "hard_block_file",
+        // Categories to save (empty list = save everything)
+        "save_categories", "save_tv_kinds",
         // Language filter
         "language_filter_non_latin_threshold", "porn_filter_non_latin_threshold",
         // Thread trees
@@ -72,7 +72,6 @@ object CrawlerKeys {
         "db_path", "bloom_path", "bep51_cache_path",
         "backup_path", "ssh_dest_path", "ssh_key_path", "ssh_bookmark_path",
         "rclone_dest_path", "rclone_bookmark_path",
-        "porn_filter_keyword_file",
         "classifier_model_dir", "hard_block_file",
     )
 
@@ -90,7 +89,7 @@ object CrawlerKeys {
         "num_trees",
         "tree_find_node_workers", "tree_bep51_workers", "tree_get_peers_workers",
         "tree_metadata_workers", "tree_infohash_queue_capacity", "tree_peers_queue_capacity",
-        "porn_filter_enabled", "language_filter_non_latin_threshold",
+        "language_filter_non_latin_threshold", "save_categories", "save_tv_kinds",
         "classifier_enabled", "adult_mode", "adult_hide_threshold", "adult_drop_threshold",
         "bloom_capacity", "failure_bloom_capacity", "bloom_error_rate",
         "http_port", "http_bind",

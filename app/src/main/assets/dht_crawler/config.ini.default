@@ -55,9 +55,13 @@ rclone_remote=r2
 rclone_dest_path=dht-backup/dht_crawler_backup
 rclone_bookmark_path=data/rclone_backup_ids.txt
 
-# ==== Pornography Content Filter ====
-porn_filter_enabled=1
-porn_filter_keyword_file=porn_filter_keywords.txt
+# ==== Categories To Save ====
+# save_categories / save_tv_kinds: comma-separated taxonomy names (case-insensitive)
+# selecting what ingest keeps; unknown names are logged and ignored. Both keys are
+# written by the app's settings form, and are absent here on purpose: an unset or
+# empty value saves everything.
+#   save_categories = unknown,movie,tv,anime,music,audiobook,ebook,comic,software,game,image,other
+#   save_tv_kinds = none,episode,multi_episode,season_pack,multi_season,complete_series,daily
 
 # ==== Ingest-Time Classifier & Adult Handling ====
 # Ingest-time fastText classifier (models/v2). The app stages the model files and

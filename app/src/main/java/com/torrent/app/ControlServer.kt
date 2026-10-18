@@ -831,7 +831,6 @@ class ControlServer(
                 <p class="meta">Estimated worker threads: <span id="est-threads"></span><span id="est-warn" style="display:none;color:#c5221f"> — above ${CrawlerKeys.THREAD_WARN_THRESHOLD}; the default config uses ~1216</span></p>
               </fieldset>
               <fieldset class="card"><legend>Filters</legend>
-                <label class="row"><input type="checkbox" name="pornFilterEnabled" ${checked(s.pornFilterEnabled)}> Porn filter</label>
                 <label>Non-Latin language threshold (0..100)<input name="languageFilterNonLatinThreshold" value="${s.languageFilterNonLatinThreshold}"></label>
               </fieldset>
               <fieldset class="card"><legend>Adult content handling</legend>
@@ -840,8 +839,7 @@ class ControlServer(
                 <label>Adult hide threshold (0..1; only used by tag mode)<input type="number" step="any" name="adultHideThreshold" value="${s.adultHideThreshold}"></label>
                 <label>Adult drop threshold (0..1; only used by drop mode)<input type="number" step="any" name="adultDropThreshold" value="${s.adultDropThreshold}"></label>
                 <p class="meta">The hard-block list (<code>hard_block.txt</code>) always drops matching names. <em>tag</em> stores
-                adult rows (hidden above the hide threshold); <em>drop</em> discards rows at or above the drop threshold. The
-                keyword porn filter above only runs while the classifier cannot decide (disabled, or its models are missing).</p>
+                adult rows (hidden above the hide threshold); <em>drop</em> discards rows at or above the drop threshold.</p>
               </fieldset>
               <fieldset class="card"><legend>Bloom filters (changing these invalidates the persisted filters)</legend>
                 <label>Bloom capacity<input name="bloomCapacity" value="${s.bloomCapacity}"></label>
@@ -2920,7 +2918,10 @@ class ControlServer(
             treeMetadataWorkers = form["treeMetadataWorkers"]?.toIntOrNull() ?: current.treeMetadataWorkers,
             treeInfohashQueueCapacity = form["treeInfohashQueueCapacity"]?.toIntOrNull() ?: current.treeInfohashQueueCapacity,
             treePeersQueueCapacity = form["treePeersQueueCapacity"]?.toIntOrNull() ?: current.treePeersQueueCapacity,
-            pornFilterEnabled = form.containsKey("pornFilterEnabled"),
+            // Stage 4 owns the category/tv-kind chips; until then the form
+            // carries no selection, so keep the stored one.
+            saveCategories = current.saveCategories,
+            saveTvKinds = current.saveTvKinds,
             languageFilterNonLatinThreshold = form["languageFilterNonLatinThreshold"]?.toIntOrNull() ?: current.languageFilterNonLatinThreshold,
             classifierEnabled = form.containsKey("classifierEnabled"),
             adultMode = form["adultMode"]?.takeIf { it.isNotEmpty() }?.trim()?.lowercase() ?: current.adultMode,
