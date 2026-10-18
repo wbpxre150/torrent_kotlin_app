@@ -830,30 +830,44 @@ class DaemonService : Service() {
      * [applyCrawlerSettings]).
      */
     private fun runCrawlerApply(s: com.torrent.app.config.CrawlerSettings) {
-        val previous = configStore.load().crawler
         val crawlerConfig = CrawlerConfig(this)
         crawlerConfig.ensureLayout()
+        // Stage 12: a classifier model-dir bump invalidates every stored threshold, so
+        // migrate BEFORE the previous-settings snapshot (a later rollback must not
+        // resurrect v1 thresholds) and before anything can start the crawler.
+        val migrated = migrateClassifierVersion(crawlerConfig)
+        // The reset is unconditional: it wins over the thresholds the user submitted.
+        val effective = if (migrated) {
+            s.copy(
+                adultHideThreshold = ConfigDefaults.CRAWLER.adultHideThreshold,
+                adultDropThreshold = ConfigDefaults.CRAWLER.adultDropThreshold,
+            )
+        } else {
+            s
+        }
+        // Captured after the migration, so the LKG snapshot holds the reset thresholds.
+        val previous = configStore.load().crawler
 
         // Save the new settings, snapshotting the previous ones (settings and
         // config.ini) for the rollback below.
         configStore.snapshotCrawlerLastKnownGood(previous)
-        configStore.saveCrawler(s)
+        configStore.saveCrawler(effective)
         crawlerConfig.snapshotLastKnownGood()
 
         setCrawlerApplyStatus(CrawlerApplyPhase.STOPPING, "stopping crawler (60 s grace)")
         stopCrawlerSupervisors()
 
         setCrawlerApplyStatus(CrawlerApplyPhase.WRITING, "writing config.ini")
-        crawlerConfig.applySettings(s)
+        crawlerConfig.applySettings(effective)
         // Keep the authenticated proxy in sync (lanDirect / proxyPort change).
-        syncCrawlerProxy(s)
+        syncCrawlerProxy(effective)
 
         val wifiUp = wifiGateMonitor.state.value.wifi
-        if (!CrawlerGate.shouldRun(s.enabled, s.wifiOnly, wifiUp)) {
-            crawlerPausedNoWifi = s.enabled && s.wifiOnly && !wifiUp
+        if (!CrawlerGate.shouldRun(effective.enabled, effective.wifiOnly, wifiUp)) {
+            crawlerPausedNoWifi = effective.enabled && effective.wifiOnly && !wifiUp
             setCrawlerApplyStatus(
                 CrawlerApplyPhase.OK,
-                if (!s.enabled) "applied; crawler disabled" else "applied; paused (no wifi)")
+                if (!effective.enabled) "applied; crawler disabled" else "applied; paused (no wifi)")
             return
         }
 
@@ -1294,10 +1308,16 @@ class DaemonService : Service() {
      *
      * The reset is unconditional (a value tuned against `models/v1` score distributions
      * is invalid under `models/v2`, not merely stale) and idempotent via the persisted
-     * model-dir sentinel. Runs inside [startCrawlerSupervisor]'s try/catch: a failure
-     * here is logged by the caller and never blocks the crawler's start.
+     * model-dir sentinel. Runs on the crawler-control executor inside the calling
+     * block's try/catch (both crawler start paths: [runCrawlerApply] and
+     * [startCrawlerSupervisor]); a migration failure aborts that start/apply attempt
+     * — it is logged by the caller and the apply path surfaces FAILED — without
+     * crash-looping the service.
+     *
+     * @return true when the thresholds were migrated (the sentinel did not match),
+     *   false when it already matched this build's model generation.
      */
-    private fun migrateClassifierVersion(crawlerConfig: CrawlerConfig) {
+    private fun migrateClassifierVersion(crawlerConfig: CrawlerConfig): Boolean {
         val previous = configStore.load().crawler
         val newHide = ConfigDefaults.CRAWLER.adultHideThreshold
         val newDrop = ConfigDefaults.CRAWLER.adultDropThreshold
@@ -1314,9 +1334,12 @@ class DaemonService : Service() {
             },
             writeStoredModelDir = { configStore.setClassifierModelVersion(it) },
         )
-        if (migration.run(CrawlerConfig.MODELS_SUBDIR)) {
+        return if (migration.run(CrawlerConfig.MODELS_SUBDIR)) {
             // Re-render so the daemon starts with the reset thresholds, not the old ones.
             crawlerConfig.applySettings(configStore.load().crawler)
+            true
+        } else {
+            false
         }
     }
 
