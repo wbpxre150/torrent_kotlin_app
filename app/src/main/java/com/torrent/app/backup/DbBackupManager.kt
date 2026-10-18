@@ -11,6 +11,7 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ThreadFactory
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * One S3 object PUT of the compressed incremental DB dump (plan 2, Stage 3).
@@ -71,7 +72,10 @@ data class DbBackupStatus(
  *
  * A periodic check (every [CHECK_INTERVAL_MINUTES] minutes, first one
  * [FIRST_CHECK_DELAY_MINUTES] after [start]) drains the incremental backlog
- * in bounded chunks, at most once per calendar day (per [zone]); a manual
+ * in bounded chunks, at most once per calendar day (per [zone]) while the
+ * backlog is caught up; a still-capped check instead chains a fast
+ * [FAST_FOLLOW_DELAY_MS] follow-up check, so a large backlog drains
+ * near-continuously (see "Near-continuous backlog drain" below). A manual
  * trigger (dashboard) bypasses the daily gate only — the configured/busy/
  * wifi gates always apply. Every check runs on [executor] (a single-thread
  * [ScheduledExecutorService] by default) so at most one upload is in flight
@@ -93,12 +97,25 @@ data class DbBackupStatus(
  * [CrawlerDbDumper.DEFAULT_MAX_NEW_TORRENT_IDS_PER_DUMP] new torrent ids and
  * flags the truncation via [DbDumpOutcome.Dump.capped] (materializing the
  * whole backlog in RAM used to OOM-crash-loop the process). One check
- * therefore uploads at most [MAX_CHUNKS_PER_CHECK] chunks — up to 8,000
- * torrents per check — and stops early on the first chunk that is NOT
- * capped. The daily date is persisted only when the backlog is drained (the
- * check's final chunk was uncapped), so a still-capped check leaves the date
- * unwritten and the next periodic tick (15 minutes later) continues the
- * drain from the advanced bookmark.
+ * therefore uploads at most [MAX_CHUNKS_PER_CHECK] chunks — up to 128,000
+ * torrents per check, with only one bounded chunk in memory at a time — and
+ * stops early on the first chunk that is NOT capped. The daily date is
+ * persisted only when the backlog is drained (the check's final chunk was
+ * uncapped).
+ *
+ * Near-continuous backlog drain (the initial ~84 GB DB is a year-plus of work
+ * at four chunks per 15-minute tick): a periodic check that ends still capped
+ * schedules exactly ONE one-shot follow-up check on [executor],
+ * [fastFollowUpDelayMs] milliseconds later (default [FAST_FOLLOW_DELAY_MS]),
+ * which continues from the advanced bookmark. A follow-up that also ends
+ * capped schedules the next one, so the chain drains back to back;
+ * [followUpPending] keeps at most one follow-up pending and [stop] cancels it
+ * (the single-thread executor's shutdown drops queued and scheduled tasks).
+ * The chain ends on the first check that is uncapped (the backlog caught up —
+ * the daily date is then written as today, so follow-up and periodic ticks
+ * skip until tomorrow), on FAILED, or on any skip (the periodic
+ * [CHECK_INTERVAL_MINUTES] cadence is then the retry path). Steady state is
+ * unchanged: one check per day at the same 15-minute cadence.
  *
  * Upload-first ordering (the critical invariant): the [DbBookmark] is
  * advanced to a chunk's [DbDumpOutcome.Dump.newCursor] ONLY after that
@@ -122,6 +139,7 @@ class DbBackupManager(
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val zone: ZoneId = ZoneId.systemDefault(),
     private val executor: ScheduledExecutorService = defaultExecutor(),
+    private val fastFollowUpDelayMs: Long = FAST_FOLLOW_DELAY_MS,
     private val readLastSuccessDate: () -> String? = { null },
     private val writeLastSuccessDate: (String) -> Unit = {},
 ) {
@@ -145,6 +163,13 @@ class DbBackupManager(
     private var started = false
     @Volatile
     private var inFlightFlag = false
+
+    /**
+     * True while a fast follow-up check is scheduled: set when [runCheck]
+     * chains one, cleared the moment it starts running (so the next capped
+     * check can chain again, but never more than one follow-up is pending).
+     */
+    private val followUpPending = AtomicBoolean(false)
 
     /**
      * Queues an upload check on [executor] and returns the resulting
@@ -386,9 +411,11 @@ class DbBackupManager(
             DbBackupState.SUCCESS,
             if (last.capped) {
                 // Budget exhausted while still capped: the daily date is
-                // deliberately NOT written (see the class KDoc), so the next
-                // periodic check continues the drain.
-                "$message; backlog continues next check " +
+                // deliberately NOT written (see the class KDoc), and a
+                // periodic check chains a fast follow-up instead of waiting
+                // for the next 15-minute tick.
+                if (!manual) scheduleFastFollowUp()
+                "$message; backlog continues " +
                     "(capped at torrent id ${cursor.lastTorrentId})"
             } else {
                 message
@@ -410,7 +437,31 @@ class DbBackupManager(
 
     /** Stops the scheduler; a queued/running check is dropped. */
     fun stop() {
+        // shutdownNow() also drops (cancels) a pending fast follow-up: it is
+        // an ordinary scheduled task of this executor.
+        followUpPending.set(false)
         executor.shutdownNow()
+    }
+
+    /**
+     * Chains ONE fast follow-up periodic check while the backlog is still
+     * capped, on the same single-thread [executor]. [followUpPending] makes
+     * this idempotent — a second capped check (e.g. a periodic tick landing
+     * between two follow-ups) never stacks another one — and it is cleared
+     * when the follow-up starts running, so a follow-up that also ends capped
+     * chains the next one. A rejecting (shut-down) executor is a no-op.
+     */
+    private fun scheduleFastFollowUp() {
+        if (!followUpPending.compareAndSet(false, true)) return
+        try {
+            executor.schedule({
+                // Cleared first: this check may itself end capped and chain.
+                followUpPending.set(false)
+                uploadNow(manual = false)
+            }, fastFollowUpDelayMs, TimeUnit.MILLISECONDS)
+        } catch (e: RejectedExecutionException) {
+            followUpPending.set(false)
+        }
     }
 
     /** Local calendar date (per [clock]/[zone]) of "today", `yyyy-MM-dd`. */
@@ -452,15 +503,25 @@ class DbBackupManager(
         const val CHECK_INTERVAL_MINUTES = 15L
 
         /**
-         * Upper bound on the chunks one check uploads. Keeps a single
-         * check's wall time (and its network usage) bounded while still
-         * draining the backlog across checks — with the dumper's 2,000-new-
-         * torrent-id cap that is up to 8,000 torrents per check. Chunks left
-         * over are picked up by the next periodic tick (15 minutes later),
-         * because a check that exhausts this budget while still capped leaves
-         * the daily date unwritten.
+         * Delay before a capped periodic check's fast follow-up runs. While
+         * chunks remain the backlog is drained near-continuously (a chain of
+         * these); once a check ends uncapped the normal
+         * [CHECK_INTERVAL_MINUTES] cadence takes over again. Injected via the
+         * constructor ([fastFollowUpDelayMs]) so tests stay deterministic.
          */
-        const val MAX_CHUNKS_PER_CHECK = 4
+        const val FAST_FOLLOW_DELAY_MS = 15_000L
+
+        /**
+         * Upper bound on the chunks one check uploads (the real stop signal is
+         * the first uncapped chunk). Per-chunk memory is already bounded —
+         * the dumper's ~16 MB SQL budget and its 2,000-new-torrent-id cap,
+         * freed before the next chunk — so the chunk count does not widen the
+         * heap envelope. With 64 chunks that is up to 128,000 torrents per
+         * check; a check that exhausts this budget while still capped leaves
+         * the daily date unwritten and chains a fast follow-up check
+         * ([FAST_FOLLOW_DELAY_MS] later).
+         */
+        const val MAX_CHUNKS_PER_CHECK = 64
 
         private fun defaultExecutor(): ScheduledExecutorService =
             Executors.newSingleThreadScheduledExecutor(ThreadFactory {

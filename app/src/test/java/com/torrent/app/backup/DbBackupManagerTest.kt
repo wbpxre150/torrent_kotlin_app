@@ -13,10 +13,13 @@ import org.junit.rules.TemporaryFolder
 import java.io.File
 import java.io.IOException
 import java.time.ZoneOffset
+import java.util.concurrent.Delayed
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.ThreadFactory
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -25,9 +28,12 @@ import java.util.concurrent.atomic.AtomicInteger
  * upload-first bookmark ordering (success advances the bookmark; every
  * PUT failure leaves it unchanged so the same range is retried), the
  * calendar-day gate (fake clock), the manual bypass (daily gate only),
- * and the single-flight refusal. [DbBackupManager.runCheck] is invoked
- * directly (synchronously) so the tests are deterministic; a no-op
- * [ScheduledExecutorService] stands in for the real scheduler.
+ * the single-flight refusal, the bounded chunk drain, and the fast follow-up
+ * chain that drains a large backlog near-continuously (a capped periodic
+ * check chains ONE one-shot follow-up on the same executor).
+ * [DbBackupManager.runCheck] is invoked directly (synchronously) so the tests
+ * are deterministic; a no-op [ScheduledExecutorService] stands in for the real
+ * scheduler and records the follow-ups instead of running them.
  */
 private fun testDumpOutcome(
     cursor: DbBookmark = DbBookmark(10, 2),
@@ -87,19 +93,47 @@ class DbBackupManagerTest {
         }
     }
 
-    /** Captures submitted runnables without running them (post-shutdown: rejects). */
+    /** Minimal never-completing [ScheduledFuture] stand-in for recorded one-shots. */
+    private object NeverFuture : ScheduledFuture<Any?> {
+        override fun getDelay(unit: TimeUnit): Long = 0L
+        override fun compareTo(other: Delayed): Int = 0
+        override fun cancel(mayInterruptIfRunning: Boolean): Boolean = false
+        override fun isCancelled(): Boolean = false
+        override fun isDone(): Boolean = false
+        override fun get(): Any? = throw UnsupportedOperationException("never completes")
+        override fun get(timeout: Long, unit: TimeUnit): Any? =
+            throw UnsupportedOperationException("never completes")
+    }
+
+    /**
+     * Captures submitted runnables without running them (post-shutdown:
+     * rejects). One-shot [schedule] calls (the fast backlog follow-up) are
+     * recorded with their delay instead of being handed to a real timer, so a
+     * test can assert the chain and run each link by hand.
+     */
     private class NoopScheduledExecutorService :
         ScheduledExecutorService by Executors.newSingleThreadScheduledExecutor(ThreadFactory {
             Thread(it, "noop-sched-test").apply { isDaemon = true }
         }) {
+        /** One recorded one-shot task: its delay in milliseconds and the task. */
+        class OneShot(val delayMs: Long, val task: Runnable)
+
         val submitted = AtomicInteger(0)
         @Volatile var last: Runnable? = null
+        /** One-shots recorded by [schedule], in call order. */
+        val oneShots = mutableListOf<OneShot>()
         @Volatile private var shutdown = false
 
         override fun execute(command: Runnable) {
             if (shutdown) throw RejectedExecutionException("shut down")
             submitted.incrementAndGet()
             last = command
+        }
+
+        override fun schedule(command: Runnable, delay: Long, unit: TimeUnit): ScheduledFuture<*> {
+            if (shutdown) throw RejectedExecutionException("shut down")
+            oneShots += OneShot(unit.toMillis(delay), command)
+            return NeverFuture
         }
 
         override fun shutdownNow(): List<Runnable> {
@@ -123,13 +157,14 @@ class DbBackupManagerTest {
 
     private fun newManager(
         dbFile: File,
-        dumper: FakeDumper,
+        dumper: DbDumper,
         uploader: FakeUploader,
         settings: BackupSettings = settings(),
         busy: Boolean = false,
         wifi: Boolean = true,
         clock: () -> Long = { DAY1 },
         executor: ScheduledExecutorService = NoopScheduledExecutorService(),
+        fastFollowUpDelayMs: Long = DbBackupManager.FAST_FOLLOW_DELAY_MS,
         bookmarkFile: File = File(tmp.root, "db_bookmark.txt"),
         lastSuccessDate: () -> String? = { null },
         writeLastSuccessDate: (String) -> Unit = {},
@@ -144,6 +179,7 @@ class DbBackupManagerTest {
         clock = clock,
         zone = ZoneOffset.UTC,
         executor = executor,
+        fastFollowUpDelayMs = fastFollowUpDelayMs,
         readLastSuccessDate = lastSuccessDate,
         writeLastSuccessDate = writeLastSuccessDate,
     )
@@ -730,16 +766,19 @@ class DbBackupManagerTest {
 
     @Test fun cappedSuccessDoesNotWriteDailyDateAndDrainsNextCheck() {
         val up = FakeUploader()
+        val budget = DbBackupManager.MAX_CHUNKS_PER_CHECK
         // The drain loop only ends capped when its per-check budget is used
         // up, so this check needs a full budget of capped chunks; the next
         // check then gets the uncapped tail.
-        val d = FakeDumper(outcomes = mutableListOf(
-            chunkDump(DbBookmark(4, 2), "db/incremental_20231114_1-4.sql.gz", capped = true),
-            chunkDump(DbBookmark(8, 2), "db/incremental_20231114_5-8.sql.gz", capped = true),
-            chunkDump(DbBookmark(12, 2), "db/incremental_20231114_9-12.sql.gz", capped = true),
-            chunkDump(DbBookmark(16, 2), "db/incremental_20231114_13-16.sql.gz", capped = true),
-            chunkDump(DbBookmark(20, 2), "db/incremental_20231114_17-20.sql.gz", capped = false),
-        ))
+        val outcomes = MutableList<DbDumpOutcome>(budget) { i ->
+            chunkDump(
+                DbBookmark(4L * (i + 1), 2),
+                "db/incremental_20231114_chunk$i.sql.gz",
+                capped = true)
+        }
+        outcomes += chunkDump(DbBookmark(4L * (budget + 1), 2),
+            "db/incremental_20231114_tail.sql.gz", capped = false)
+        val d = FakeDumper(outcomes = outcomes)
         val bookmarkFile = File(tmp.root, "db_bookmark.txt")
         DbBookmark.write(bookmarkFile, DbBookmark.FIRST_RUN)
         var stored: String? = null
@@ -753,24 +792,25 @@ class DbBackupManagerTest {
         assertEquals(DbBackupState.SUCCESS, first.state)
         // Every budgeted chunk was uploaded, each followed by its own bookmark
         // write, but the daily date was deliberately NOT persisted (the
-        // backlog is still capped): the next tick the same day continues the
-        // drain instead of waiting for tomorrow.
-        assertEquals(DbBackupManager.MAX_CHUNKS_PER_CHECK, up.calls)
-        assertEquals(DbBookmark(16, 2), DbBookmark.read(bookmarkFile))
+        // backlog is still capped): the drain continues from the advanced
+        // bookmark instead of waiting for tomorrow.
+        assertEquals(budget, up.calls)
+        assertEquals(DbBookmark(4L * budget, 2), DbBookmark.read(bookmarkFile))
         assertNull(stored)
-        assertTrue(first.message, first.message.contains("backlog continues next check"))
+        assertTrue(first.message, first.message.contains("backlog continues"))
         val second = m.runCheck(manual = false)
         assertEquals(DbBackupState.SUCCESS, second.state)
-        assertEquals(DbBackupManager.MAX_CHUNKS_PER_CHECK + 1, up.calls)
+        assertEquals(budget + 1, up.calls)
         // Continued from the last uploaded chunk's cursor, not from scratch.
-        assertEquals(DbBookmark(16, 2), d.lastBookmark)
-        assertEquals(DbBookmark(20, 2), DbBookmark.read(bookmarkFile))
+        assertEquals(DbBookmark(4L * budget, 2), d.lastBookmark)
+        assertEquals(DbBookmark(4L * (budget + 1), 2), DbBookmark.read(bookmarkFile))
         assertEquals("2023-11-14", stored)
     }
 
     @Test fun drainLoopUploadsUpToMaxChunksPerCheck() {
         val up = FakeUploader()
-        val d = FakeDumper(outcomes = MutableList(DbBackupManager.MAX_CHUNKS_PER_CHECK + 1) { i ->
+        val budget = DbBackupManager.MAX_CHUNKS_PER_CHECK
+        val d = FakeDumper(outcomes = MutableList<DbDumpOutcome>(budget + 1) { i ->
             chunkDump(
                 cursor = DbBookmark(4L * (i + 1), 2),
                 objectKey = "db/incremental_20231114_chunk$i.sql.gz",
@@ -789,19 +829,20 @@ class DbBackupManagerTest {
         )
         val st = m.runCheck(manual = false)
         assertEquals(DbBackupState.SUCCESS, st.state)
-        // The budget caps one check: 4 chunks (8,000 torrents at the dumper's
-        // 2,000-id cap), and the 5th scripted chunk is never asked for.
-        assertEquals(DbBackupManager.MAX_CHUNKS_PER_CHECK, up.calls)
-        assertEquals(DbBackupManager.MAX_CHUNKS_PER_CHECK, d.calls)
-        assertEquals(DbBookmark(16, 2), DbBookmark.read(bookmarkFile))
+        // The budget caps one check (2,000 torrents per chunk at the dumper's
+        // id cap); the extra scripted chunk is never asked for.
+        assertEquals(budget, up.calls)
+        assertEquals(budget, d.calls)
+        assertEquals(DbBookmark(4L * budget, 2), DbBookmark.read(bookmarkFile))
         assertNull(stored)
-        assertTrue(st.message, st.message.contains("uploaded 4 chunks"))
-        assertTrue(st.message, st.message.contains("(18 statements)"))
+        val totalStatements = (0 until budget).sumOf { 3 + it }
+        assertTrue(st.message, st.message.contains("uploaded $budget chunks"))
+        assertTrue(st.message, st.message.contains("($totalStatements statements)"))
         assertTrue(st.message, st.message.contains(
-            "backlog continues next check (capped at torrent id 16)"))
+            "backlog continues (capped at torrent id ${4L * budget})"))
         // Status fields describe the LAST successful PUT (DbBackupStatus KDoc).
-        assertEquals("db/incremental_20231114_chunk3.sql.gz", st.objectKey)
-        assertEquals(6, st.statementCount)
+        assertEquals("db/incremental_20231114_chunk${budget - 1}.sql.gz", st.objectKey)
+        assertEquals(3 + budget - 1, st.statementCount)
         assertEquals(up.lastBody!!.size.toLong(), st.sqlBytes)
         assertEquals(up.lastBody!!.size.toLong(), st.uploadedBytes)
         assertEquals(DAY1, st.lastSuccess)
@@ -864,6 +905,144 @@ class DbBackupManagerTest {
         // chunk (and nothing before it).
         assertEquals(DbBookmark(4, 2), DbBookmark.read(bookmarkFile))
         assertNull(stored)
+    }
+
+    // --- fast follow-up chain (near-continuous backlog drain) ---
+
+    /**
+     * Advances the cursor four torrents per chunk and always reports more rows
+     * beyond it, i.e. a backlog that never catches up inside one check.
+     */
+    private fun alwaysCappedDumper(seen: MutableList<DbBookmark> = mutableListOf()) =
+        object : DbDumper {
+            override fun dump(dbFile: File, bookmark: DbBookmark): DbDumpOutcome {
+                seen += bookmark
+                val next = DbBookmark(bookmark.lastTorrentId + 4, 2)
+                return chunkDump(
+                    next,
+                    "db/incremental_20231114_${next.lastTorrentId}.sql.gz",
+                    capped = true)
+            }
+        }
+
+    @Test fun cappedPeriodicCheckChainsFastFollowUpThatKeepsDraining() {
+        val up = FakeUploader()
+        val seen = mutableListOf<DbBookmark>()
+        val noop = NoopScheduledExecutorService()
+        val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        var stored: String? = null
+        val m = newManager(
+            dbFile(), alwaysCappedDumper(seen), up,
+            executor = noop,
+            fastFollowUpDelayMs = 250,
+            bookmarkFile = bookmarkFile,
+            lastSuccessDate = { stored },
+            writeLastSuccessDate = { stored = it },
+        )
+        m.uploadNow(manual = false)
+        noop.last!!.run()
+        val budget = DbBackupManager.MAX_CHUNKS_PER_CHECK
+        assertEquals(DbBackupState.SUCCESS, m.status.state)
+        assertEquals(budget, up.calls)
+        // Still capped: the daily date is NOT written.
+        assertNull(stored)
+        // Exactly one fast follow-up was chained — after the injected delay,
+        // not on the 15-minute periodic tick.
+        assertEquals(1, noop.oneShots.size)
+        assertEquals(250L, noop.oneShots[0].delayMs)
+        val persisted = DbBookmark.read(bookmarkFile)
+        // Running it issues another check ...
+        noop.oneShots[0].task.run()
+        assertEquals(2, noop.submitted.get())
+        noop.last!!.run()
+        assertEquals(2 * budget, up.calls)
+        // ... which resumes from the bookmark the capped check persisted.
+        assertEquals(persisted, seen[budget])
+        // Still capped: the follow-up chains the next one (near-continuous).
+        assertEquals(2, noop.oneShots.size)
+        assertEquals(250L, noop.oneShots[1].delayMs)
+    }
+
+    @Test fun uncappedPeriodicCheckSchedulesNoFollowUpAndWritesDailyDate() {
+        val up = FakeUploader()
+        val noop = NoopScheduledExecutorService()
+        val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        DbBookmark.write(bookmarkFile, DbBookmark.FIRST_RUN)
+        var stored: String? = null
+        val m = newManager(
+            dbFile(), FakeDumper(), up,
+            executor = noop,
+            fastFollowUpDelayMs = 250,
+            bookmarkFile = bookmarkFile,
+            lastSuccessDate = { stored },
+            writeLastSuccessDate = { stored = it },
+        )
+        m.uploadNow(manual = false)
+        noop.last!!.run()
+        assertEquals(DbBackupState.SUCCESS, m.status.state)
+        // Caught up: no fast follow-up, and the daily date is written (steady
+        // state: one upload per day on the 15-minute cadence).
+        assertEquals(0, noop.oneShots.size)
+        assertEquals("2023-11-14", stored)
+        // The next periodic tick the same day is skipped by the daily gate.
+        m.uploadNow(manual = false)
+        noop.last!!.run()
+        assertTrue(m.status.message, m.status.message.contains("already uploaded today"))
+        assertEquals(1, up.calls)
+        assertEquals(0, noop.oneShots.size)
+    }
+
+    @Test fun failedCheckSchedulesNoFollowUp() {
+        val up = FakeUploader().apply {
+            results += S3PutResult.Success(200, "etag")
+            results += S3PutResult.ClientError(403, "Forbidden")
+        }
+        val noop = NoopScheduledExecutorService()
+        val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        DbBookmark.write(bookmarkFile, DbBookmark.FIRST_RUN)
+        val m = newManager(
+            dbFile(), alwaysCappedDumper(), up,
+            executor = noop,
+            fastFollowUpDelayMs = 250,
+            bookmarkFile = bookmarkFile,
+        )
+        m.uploadNow(manual = false)
+        noop.last!!.run()
+        assertEquals(DbBackupState.FAILED, m.status.state)
+        assertEquals(2, up.calls)
+        // No chain on failure: the 15-minute periodic tick is the retry path.
+        assertEquals(0, noop.oneShots.size)
+        // Upload-first still holds: the failed chunk's cursor is not persisted.
+        assertEquals(DbBookmark(3, 2), DbBookmark.read(bookmarkFile))
+    }
+
+    @Test fun secondCappedCheckDoesNotStackASecondFollowUp() {
+        val up = FakeUploader()
+        val noop = NoopScheduledExecutorService()
+        val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        val m = newManager(
+            dbFile(), alwaysCappedDumper(), up,
+            executor = noop,
+            fastFollowUpDelayMs = 250,
+            bookmarkFile = bookmarkFile,
+        )
+        m.uploadNow(manual = false)
+        noop.last!!.run()
+        val budget = DbBackupManager.MAX_CHUNKS_PER_CHECK
+        assertEquals(1, noop.oneShots.size)
+        // A periodic check lands while the follow-up is still pending: it ends
+        // capped too, but must not stack a second follow-up.
+        m.uploadNow(manual = false)
+        noop.last!!.run()
+        assertEquals(2 * budget, up.calls)
+        assertEquals(DbBackupState.SUCCESS, m.status.state)
+        assertEquals(1, noop.oneShots.size)
+        // Once the pending follow-up starts (clearing the guard) the chain
+        // resumes and the still-capped check schedules the next link.
+        noop.oneShots[0].task.run()
+        noop.last!!.run()
+        assertEquals(3 * budget, up.calls)
+        assertEquals(2, noop.oneShots.size)
     }
 
     @Test fun oomInCheckMarksFailedAndReleasesInFlight() {
