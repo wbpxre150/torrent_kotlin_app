@@ -104,4 +104,56 @@ class ControlServerSearchPageTest {
         assertFalse(page.contains("Pick a category to browse"))
         assertTrue(page.contains("Pick your filters, then Search or Randomize"))
     }
+
+    @Test fun js_chipFocusMode_helpersExistAndAreWired() {
+        // webui-ux stage 4: pressing a chip focuses it (its siblings disappear) and
+        // re-pressing it reverts the row to its default chip.
+        assertTrue(page.contains("function chipFocus("))
+        assertTrue(page.contains("function revealRow("))
+        assertTrue(
+            "category handler must use the focus helper",
+            handlerBody("el('category-grid').onclick").contains("chipFocus("),
+        )
+        assertTrue(
+            "tv-kind handler must use the focus helper",
+            handlerBody("el('tv-kind-row').onclick").contains("chipFocus("),
+        )
+        assertFalse(
+            "the Adult control keeps its plain select-only behaviour",
+            handlerBody("el('adult-control').onclick").contains("chipFocus("),
+        )
+    }
+
+    @Test fun js_chipFocusMode_hidesSiblingsWithTheHiddenClass() {
+        // Visibility is toggled with the existing `.hidden` class only: no chip is
+        // removed from the DOM, so selectOnly()/aria-pressed keep working.
+        assertTrue(page.contains("classList.add('hidden')"))
+        assertTrue(page.contains("classList.remove('hidden')"))
+    }
+
+    @Test fun js_chipFocusMode_revertResetsToRowDefaults() {
+        // Re-pressing the focused chip restores the full row and the default
+        // selection: All for the category grid, None for the TV-kind row.
+        assertTrue(page.contains("sel.category = null"))
+        assertTrue(page.contains("sel.tv_kind = null"))
+        assertTrue(page.contains(".chip[data-category=\"\"]"))
+        assertTrue(page.contains(".chip[data-tv-kind=\"none\"]"))
+    }
+
+    @Test fun js_chipFocusMode_handlersStayNetworkFree() {
+        for (marker in listOf("el('category-grid').onclick", "el('tv-kind-row').onclick")) {
+            val body = handlerBody(marker)
+            assertFalse("$marker must not load results", body.contains("send("))
+            assertFalse("$marker must not call sendBrowse", body.contains("sendBrowse"))
+        }
+    }
+
+    /** The body of the inline handler starting at [marker], up to its closing `};`. */
+    private fun handlerBody(marker: String): String {
+        val start = page.indexOf(marker)
+        assertTrue("missing handler $marker", start >= 0)
+        val end = page.indexOf("};", start)
+        assertTrue("unterminated handler $marker", end > start)
+        return page.substring(start, end)
+    }
 }

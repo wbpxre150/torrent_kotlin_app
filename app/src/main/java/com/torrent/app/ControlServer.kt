@@ -1973,20 +1973,57 @@ class ControlServer(
                 current = null;
               }
 
+              // Focus mode: pressing a chip selects it and hides its siblings; pressing
+              // the pressed chip again reverts the row to its default and unhides it.
+              // Returns true when this call was a revert (chip was already pressed).
+              function chipFocus(row, chip, defaultChip) {
+                if (chip.getAttribute('aria-pressed') === 'true') {
+                  selectOnly(row, defaultChip);
+                  revealRow(row);
+                  return true;
+                }
+                selectOnly(row, chip);
+                var chips = row.querySelectorAll('.chip');
+                for (var i = 0; i < chips.length; i++) {
+                  if (chips[i] === chip) {
+                    chips[i].classList.remove('hidden');
+                  } else {
+                    chips[i].classList.add('hidden');
+                  }
+                }
+                return false;
+              }
+              function revealRow(row) {
+                var chips = row.querySelectorAll('.chip');
+                for (var i = 0; i < chips.length; i++) {
+                  chips[i].classList.remove('hidden');
+                }
+              }
               el('category-grid').onclick = function (ev) {
                 var t = ev.target;
                 var cat = t && t.getAttribute ? t.getAttribute('data-category') : null;
                 if (cat == null) return;
-                selectOnly(el('category-grid'), t);
+                var grid = el('category-grid');
+                var allChip = grid.querySelector('.chip[data-category=""]');
+                var tvRow = el('tv-kind-row');
+                if (chipFocus(grid, t, allChip)) {
+                  sel.category = null;
+                  tvRow.setAttribute('hidden', '');
+                  sel.tv_kind = null;
+                  selectOnly(tvRow, tvRow.querySelector('.chip[data-tv-kind="none"]'));
+                  revealRow(tvRow);
+                  clearResults();
+                  return;
+                }
                 sel.category = cat === '' ? null : cat;
                 clearResults();
-                var tvRow = el('tv-kind-row');
                 if (cat === 'tv' || cat === 'anime') {
                   tvRow.removeAttribute('hidden');
                 } else {
                   tvRow.setAttribute('hidden', '');
                   sel.tv_kind = null;
                   selectOnly(tvRow, tvRow.querySelector('.chip[data-tv-kind="none"]'));
+                  revealRow(tvRow);
                 }
               };
 
@@ -1994,7 +2031,13 @@ class ControlServer(
                 var t = ev.target;
                 var k = t && t.getAttribute ? t.getAttribute('data-tv-kind') : null;
                 if (k == null) return;
-                selectOnly(el('tv-kind-row'), t);
+                var row = el('tv-kind-row');
+                var noneChip = row.querySelector('.chip[data-tv-kind="none"]');
+                if (chipFocus(row, t, noneChip)) {
+                  sel.tv_kind = null;
+                  clearResults();
+                  return;
+                }
                 sel.tv_kind = k === 'none' ? null : k;
                 clearResults();
               };
