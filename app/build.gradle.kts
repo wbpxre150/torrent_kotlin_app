@@ -422,7 +422,8 @@ tasks.register("prepareDhtCrawlerSrc") {
             "bep51-periodic-cache-save.patch",
             "restore-database.patch",
             "clear-failure-filter.patch",
-            "remove-porn-filter.patch"
+            "remove-porn-filter.patch",
+            "save-categories.patch"
         )) {
             project.exec {
                 commandLine("patch", "-p1", "-d", destDir.absolutePath, "-i", file("$destDir/patches/$patchName").absolutePath)
