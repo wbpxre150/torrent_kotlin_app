@@ -2501,10 +2501,7 @@ class ControlServer(
          * object/array renders as a collapsible section keyed by a stable
          * path ("supervisor", "trees.2", "trees.2.queues"); the user's
          * expand/collapse choices live in the page's `openOverrides` map
-         * and survive every re-render. The summary strip also carries a
-         * Backfill cell (stage 8: `classifier.backfill`) that stays hidden
-         * unless the crawler reports a usable backfill object. The
-         * `running:false` fallback payload
+         * and survive every re-render. The `running:false` fallback payload
          * swaps the sections for a status banner and recovers on its own
          * when real stats resume.
          */
@@ -2545,7 +2542,6 @@ class ControlServer(
               <div><b>Indexed files</b><span id="s-files">—</span></div>
               <div><b>New torrents (1h)</b><span id="s-last-hour">—</span></div>
               <div><b>Timestamp</b><span id="s-timestamp">—</span></div>
-              <div id="bf-cell" style="display:none"><b>Backfill</b><span id="s-backfill">—</span></div>
             </div>
             <div id="banner" class="banner stop">Waiting for the first stats push…</div>
             <div id="tree"></div>
@@ -2610,35 +2606,6 @@ class ControlServer(
               function fmtInt(v) {
                 if (typeof v !== 'number' || !isFinite(v)) return '—';
                 return v.toLocaleString();
-              }
-
-              // Stage 8: the crawler's resumable backfill/re-classify job
-              // reports itself under classifier.backfill. The cell stays
-              // hidden unless that object is present and usable, so an older
-              // crawler binary (no field) or an unavailable classifier
-              // (available:false) never shows a misleading line.
-              function renderBackfill(data) {
-                var cell = el('bf-cell');
-                var out = el('s-backfill');
-                var bf = data && data.classifier ? data.classifier.backfill : null;
-                if (!bf || typeof bf !== 'object' || bf.available === false ||
-                    typeof bf.state !== 'string' || bf.state === '') {
-                  out.textContent = '—';
-                  cell.style.display = 'none';
-                  return;
-                }
-                var text;
-                if (bf.state === 'running') {
-                  text = 'running \u2014 ' + fmtInt(bf.done) + '/' + fmtInt(bf.total) +
-                      ' rows' + (typeof bf.rate_rows_s === 'number' && isFinite(bf.rate_rows_s)
-                          ? ' (' + Math.round(bf.rate_rows_s).toLocaleString() + ' rows/s)' : '');
-                } else if (bf.state === 'complete') {
-                  text = 'complete \u2014 ' + fmtInt(bf.done) + '/' + fmtInt(bf.total) + ' rows';
-                } else {
-                  text = bf.state;
-                }
-                out.textContent = text;
-                cell.style.display = '';
               }
 
               function defaultOpen(depth) {
@@ -2717,7 +2684,6 @@ class ControlServer(
                 el('s-last-hour').textContent = fmtScalar(data ? data.torrents_last_hour : null);
                 el('s-timestamp').textContent = fmtScalar(data ? data.timestamp : null);
                 el('updated').textContent = lastFrameAt ? lastFrameAt.toLocaleTimeString() : '—';
-                renderBackfill(data);
                 var banner = el('banner');
                 var tree = el('tree');
                 if (!data) {
