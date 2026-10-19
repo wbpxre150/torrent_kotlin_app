@@ -1224,11 +1224,19 @@ class DaemonService : Service() {
             "Services active — tap to open"
         }
 
+        val shutdownIntent = PendingIntent.getService(
+            this,
+            1,
+            Intent(this, DaemonService::class.java).setAction(ACTION_SHUTDOWN_AND_EXIT),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Torrent App running")
             .setContentText(contentText)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(pendingIntent)
+            .addAction(android.R.drawable.ic_lock_power_off, "Shutdown", shutdownIntent)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
