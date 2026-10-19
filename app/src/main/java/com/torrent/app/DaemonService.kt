@@ -673,7 +673,10 @@ class DaemonService : Service() {
     /** Runs on the dedicated ftp-control thread; never on the service main thread. */
     private fun runOnFtpControl(block: () -> Unit) {
         try { ftpControlExecutor.execute { block() } }
-        catch (e: RejectedExecutionException) { /* service shutting down */ }
+        // Defensive only: the companion ftp-control executor is never shut
+        // down (it survives a graceful stop so a restarted service reuses it),
+        // so this rejection is unreachable today.
+        catch (e: RejectedExecutionException) { /* not reachable; see above */ }
     }
 
     /**
@@ -1685,6 +1688,19 @@ class DaemonService : Service() {
             },
             GracefulShutdownPlanner.Step("stop-ftp") {
                 stopSupervisorForShutdown(FTP_LABEL)
+                // Also drop the cached registration: [stopSupervisorForShutdown]
+                // unregisters the supervisor from [supervisors] but leaves
+                // [ftpSupervisor]/[ftpBindIp] pointing at it, and a same-IP
+                // restart then hits [registerFtpSupervisor]'s "same IP, not
+                // forced" early return — the FTP daemon would run again without
+                // ever being re-listed (no daemons-table row, no dashboard stop)
+                // and a second graceful stop would leave it running. Cleared
+                // under the registration lock so it cannot race a concurrent
+                // gate/settings registration.
+                synchronized(ftpRegistrationLock) {
+                    ftpSupervisor = null
+                    ftpBindIp = null
+                }
             },
             GracefulShutdownPlanner.Step("stop-transmission") {
                 stopSupervisorForShutdown(TRANSMISSION_LABEL)

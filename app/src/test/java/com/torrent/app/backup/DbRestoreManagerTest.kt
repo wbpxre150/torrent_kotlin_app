@@ -433,6 +433,22 @@ class DbRestoreManagerTest {
         assertEquals(0, flags.stopCount)
     }
 
+    @Test fun restoreNowAfterStopThenStartIsAccepted() {
+        val restorer = FakeRestorer()
+        val runner = FakeRunner()
+        val (m, flags, _) = newManager(restorer, runner)
+        m.stop()
+        // The restart path re-arms the manager: a restore requested after the
+        // daemons are started again must be accepted, not refused forever.
+        m.start()
+
+        val st = m.restoreNow()
+
+        assertEquals(DbRestoreState.RUNNING, st.state)
+        assertTrue(st.message, st.message.contains("queued"))
+        assertEquals(0, flags.stopCount)
+    }
+
     @Test fun chainStartingAtNonZeroId_succeedsAndSurfacesChainStart() {
         val restorer = FakeRestorer()
         val runner = FakeRunner()

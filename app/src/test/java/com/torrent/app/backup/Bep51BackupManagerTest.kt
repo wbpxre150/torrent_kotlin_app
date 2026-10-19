@@ -377,6 +377,25 @@ class Bep51BackupManagerTest {
         assertEquals(0, up.calls)
     }
 
+    @Test fun stopThenStartAcceptsANewUpload() {
+        val up = FakeUploader()
+        val noop = NoopScheduledExecutorService()
+        val m = newManager(validCacheFile(), up, executor = noop)
+        // Accepted and queued, but never run: stop()'s shutdownNow() drops it,
+        // so the wrapper's finally never releases the in-flight guard. Only
+        // stop() itself can, or the manager stays wedged for the rest of the
+        // process lifetime (the service instance survives a graceful stop).
+        m.uploadNow(manual = true)
+        m.stop()
+        m.start()
+        val st = m.uploadNow(manual = true)
+        assertFalse(st.message, st.message.contains("already running"))
+        assertFalse(st.message, st.message.contains("shutting down"))
+        // Not asserted as "upload queued": start() rebuilt a real executor, so
+        // the check may already have written its outcome.
+        m.stop()
+    }
+
     @Test fun dailyGateSkipUpdatesLastAttemptAndKeepsPriorState() {
         val up = FakeUploader()
         var stored: String? = null

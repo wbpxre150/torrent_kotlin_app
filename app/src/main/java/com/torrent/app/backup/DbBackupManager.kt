@@ -466,6 +466,14 @@ class DbBackupManager(
             executor.shutdownNow()
             executorStopped = true
             started = false
+            // A check accepted by uploadNow() but still QUEUED is dropped here
+            // without ever running, so its wrapper's finally never clears the
+            // guard: without this, every later upload (manual and periodic) is
+            // refused as "already running" for the rest of the process
+            // lifetime — the service instance survives a graceful stop. Safe to
+            // clear here: stop() is the only place the executor is torn down,
+            // so no live check can be running against the released guard.
+            inFlightFlag = false
         }
     }
 

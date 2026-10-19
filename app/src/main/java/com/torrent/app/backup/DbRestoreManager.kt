@@ -326,7 +326,7 @@ class DbRestoreManager(
      * stop and the restart (a restore accepted mid-teardown would run against
      * the crawler being SIGTERMed).
      */
-    fun stop() { stopped = true }
+    fun stop() { synchronized(lock) { stopped = true } }
 
     /**
      * Re-arms the manager after a [stop]: called from DaemonService's restart
