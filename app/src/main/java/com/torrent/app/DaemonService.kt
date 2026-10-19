@@ -122,6 +122,14 @@ class DaemonService : Service() {
     // SIGTERM grace; onDestroy falls back to the historical fire-and-forget
     // crawler stop, since a ~60 s block on the main thread would ANR.
     @Volatile private var shutdownThreadId: Long? = null
+    // Stage 1 of "stop everything, then close the app": [requestShutdownAndExit]
+    // records the exit intent here FIRST and only then asks for the teardown, so
+    // an already in-flight cycle's completion hook (the only place the process is
+    // ever killed) sees it and exits. onDestroy never consults it: a
+    // system-initiated destroy must not kill the process.
+    private val shutdownExitGate = ShutdownExitGate {
+        android.os.Process.killProcess(android.os.Process.myPid())
+    }
 
     private lateinit var safSocketFile: java.io.File
     private lateinit var safIpcServer: SafIpcServer
@@ -393,12 +401,30 @@ class DaemonService : Service() {
         fun setCrawlerSaveCategories(categories: List<String>) =
             this@DaemonService.setCrawlerSaveCategories(categories)
         fun requestGracefulShutdown(): Boolean = this@DaemonService.requestGracefulShutdown()
+        fun requestShutdownAndExit() = this@DaemonService.requestShutdownAndExit()
         fun isShutdownRequested(): Boolean = this@DaemonService.isShutdownRequested()
     }
 
     override fun onBind(intent: Intent?): IBinder = LocalBinder()
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_SHUTDOWN_AND_EXIT) {
+            // Shutdown control (Stage 2 adds the notification action): stop every
+            // daemon and then close the app. Only an explicit action counts — a
+            // null intent here is a sticky redelivery, never a shutdown.
+            // Returns at once; the process dies from the teardown's completion
+            // hook minutes-to-seconds later, so START_NOT_STICKY keeps the system
+            // from resurrecting a service the user asked to close.
+            if (!shutdownExitGate.isExitRequested) {
+                // Keeps the foreground/notification contract of a start command
+                // (startForegroundService must foreground within 5 s) without
+                // restarting any server: the teardown stops them all anyway.
+                startForegroundWithNotification()
+            }
+            requestShutdownAndExit()
+            return START_NOT_STICKY
+        }
+
         _state.value = ServiceState.Starting
 
         ensureUsbGateway()
@@ -1624,6 +1650,15 @@ class DaemonService : Service() {
             try {
                 planner.run()
             } finally {
+                // Exit hook (Shutdown control: stop everything, then close the
+                // app). Consulted BEFORE the claim is cleared and only on this
+                // executor path — never in onDestroy's inline run, where a
+                // system-initiated destroy must leave the process alive.
+                // Ordering with requestShutdownAndExit(), which records the exit
+                // intent before asking for the teardown: a request that arrived
+                // while this cycle was in flight is seen here, so the cycle that
+                // is already running is the one that closes the app.
+                shutdownExitGate.onShutdownCycleCompleted()
                 // The cycle is over: a later shutdown cycle must be accepted
                 // again. Reached only on the shutdown executor, where cycles
                 // are strictly serialized by the planner's in-flight guard, so
@@ -1653,6 +1688,29 @@ class DaemonService : Service() {
 
     /** True while a graceful shutdown is claimed or in flight (see [requestGracefulShutdown]). */
     fun isShutdownRequested(): Boolean = shutdownRequested.get()
+
+    /**
+     * Stops every daemon (the full ordered, graceful teardown) and then CLOSES
+     * the app: the process is killed by [shutdownExitGate] from the teardown
+     * executor once a shutdown cycle has completed (see [ShutdownExitGate]).
+     *
+     * Used by the in-app Shutdown control and, from Stage 2, the notification
+     * action — both route through [ACTION_SHUTDOWN_AND_EXIT] / the binder.
+     *
+     * The exit intent is recorded BEFORE the teardown is requested, so a request
+     * arriving while a cycle is already in flight still exits — from that
+     * in-flight cycle's completion — instead of waiting for one that never starts.
+     * Non-blocking: the caller (binder/main thread) returns at once and the
+     * process dies seconds to ~78 s later, after the graces have run.
+     */
+    fun requestShutdownAndExit() {
+        shutdownExitGate.requestExit()
+        // Reuses the graceful path verbatim: it serializes the teardown on the
+        // shutdown executor and its completion hook is what actually exits.
+        // Returns false when a cycle is already in flight — that cycle's
+        // completion sees the intent recorded above.
+        requestGracefulShutdown()
+    }
 
     /**
      * The ordered teardown, shared by [requestGracefulShutdown] and [onDestroy];
@@ -1814,6 +1872,11 @@ class DaemonService : Service() {
         const val FTP_LABEL = "ftp_server"
         const val TRANSMISSION_LABEL = "transmission"
         const val CRAWLER_GRACE_MS = 60_000L
+        // Shutdown control: start-command action meaning "stop every daemon, then
+        // close the app" (onStartCommand → requestShutdownAndExit). The in-app
+        // button calls the binder method directly; Stage 2's notification action
+        // will send this action instead.
+        const val ACTION_SHUTDOWN_AND_EXIT = "com.torrent.app.action.SHUTDOWN_AND_EXIT"
 
 
         // The apply job watches the restarted crawler for a crash loop for

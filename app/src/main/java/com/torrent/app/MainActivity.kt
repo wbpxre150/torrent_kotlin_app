@@ -143,7 +143,9 @@ class MainActivity : ComponentActivity() {
                                 // Arms the auto-start suppression before asking the service,
                                 // so the Stopped state that ends the teardown cannot relaunch it.
                                 shutdownRequested = true
-                                boundService?.requestGracefulShutdown()
+                                // Stops every daemon and then closes the app: the service
+                                // kills the process from its teardown completion hook.
+                                boundService?.requestShutdownAndExit()
                             },
                             onStart = {
                                 // Disarms the suppression: the LaunchedEffect above then sees
