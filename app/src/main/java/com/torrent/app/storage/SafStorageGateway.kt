@@ -197,9 +197,9 @@ class SafStorageGateway(
         freeSpaceExecutor.execute {
             try {
                 val free = probeFreeSpaceViaFd()
-                if (free != Long.MAX_VALUE) {
-                    cachedFreeSpace = free to System.currentTimeMillis()
-                }
+                // Cache failures too (Long.MAX_VALUE): the TTL then throttles
+                // re-probes on the failure path exactly like the success path.
+                cachedFreeSpace = free to System.currentTimeMillis()
             } catch (e: Exception) {
                 Log.w(TAG, "free-space refresh failed: ${e.message}")
             } finally {
@@ -213,12 +213,27 @@ class SafStorageGateway(
      *
      * COLUMN_AVAILABLE_BYTES is unpopulated for removable volumes on AOSP
      * (reportAvailableBytes stays false), and StorageStatsManager has no UUID
-     * for portable volumes. A probe document is created in the tree root so we
-     * can open it and fstatvfs its fd, which returns the free space of the
-     * exact filesystem the tree lives on. The probe is deleted in [finally].
+     * for portable volumes. [Os.fstatvfs] only needs *any* fd on the target
+     * filesystem, so the primary path opens the cached tree-root document
+     * read-only: zero writes to the USB tree. Only if that open (or the
+     * fstatvfs on it) fails do we fall back to the older create-probe-document
+     * path, which is deleted in [finally].
      */
     private fun probeFreeSpaceViaFd(): Long {
         val rootUri = cache[""] ?: return Long.MAX_VALUE
+
+        // Primary: read-only fd on the tree root. Zero outbound writes.
+        var rootPfd: ParcelFileDescriptor? = null
+        try {
+            rootPfd = resolver.openFileDescriptor(rootUri, "r")
+            if (rootPfd != null) return fstatvfsFree(rootPfd)
+        } catch (e: Exception) {
+            Log.w(TAG, "availableBytes root fstatvfs failed: ${e.message}")
+        } finally {
+            try { rootPfd?.close() } catch (_: Exception) {}
+        }
+
+        // Fallback: create+delete a probe document (two directory-entry writes).
         var pfd: ParcelFileDescriptor? = null
         var probeUri: Uri? = null
         return try {
@@ -227,9 +242,7 @@ class SafStorageGateway(
                 ?: return Long.MAX_VALUE
             pfd = resolver.openFileDescriptor(probeUri, "r")
                 ?: return Long.MAX_VALUE
-            val st = Os.fstatvfs(pfd.fileDescriptor)
-            val free = st.f_bavail * st.f_frsize
-            if (free < 0) Long.MAX_VALUE else free
+            fstatvfsFree(pfd)
         } catch (e: Exception) {
             Log.w(TAG, "availableBytes fstatvfs failed: ${e.message}")
             Long.MAX_VALUE
@@ -240,6 +253,13 @@ class SafStorageGateway(
                 catch (e: Exception) { Log.w(TAG, "availableBytes: could not delete probe: ${e.message}") }
             }
         }
+    }
+
+    /** fstatvfs on [pfd] and return free bytes; [Long.MAX_VALUE] if unavailable/negative. */
+    private fun fstatvfsFree(pfd: ParcelFileDescriptor): Long {
+        val st = Os.fstatvfs(pfd.fileDescriptor)
+        val free = st.f_bavail * st.f_frsize
+        return if (free < 0) Long.MAX_VALUE else free
     }
 
     override fun exists(relPath: String): Boolean = resolveUri(relPath) != null
@@ -636,7 +656,7 @@ class SafStorageGateway(
     }
     companion object {
         private const val TAG = "SafStorageGateway"
-        private const val FREE_SPACE_TTL_MS = 5_000L
+        private const val FREE_SPACE_TTL_MS = 30_000L
         private const val FREE_SPACE_PROBE_NAME = ".tr-freespace-probe"
         private const val RO_CACHE_MAX_ENTRIES = 4096
     }
