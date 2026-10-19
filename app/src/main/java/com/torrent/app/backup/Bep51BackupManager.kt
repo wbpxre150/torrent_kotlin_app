@@ -85,7 +85,7 @@ class Bep51BackupManager(
     private val clientFactory: (BackupSettings) -> S3Uploader,
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val zone: ZoneId = ZoneId.systemDefault(),
-    private val executor: ScheduledExecutorService = defaultExecutor(),
+    private var executor: ScheduledExecutorService = defaultExecutor(),
     private val readLastSuccessDate: () -> String? = { null },
     private val writeLastSuccessDate: (String) -> Unit = {},
 ) {
@@ -96,6 +96,13 @@ class Bep51BackupManager(
     private val lock = Any()
     @Volatile
     private var started = false
+    /**
+     * Set by [stop] when it shuts [executor] down; [start] then rebuilds the
+     * executor instead of scheduling on a dead one. Not gated on
+     * `executor.isShutdown` so an injected executor behaves the same way.
+     */
+    @Volatile
+    private var executorStopped = false
     @Volatile
     private var inFlight = false
 
@@ -289,17 +296,36 @@ class Bep51BackupManager(
         }
     }
 
-    /** Schedules the periodic (daily-gated) check; idempotent. */
+    /**
+     * Schedules the periodic (daily-gated) check; idempotent. Re-arms after a
+     * [stop] with a fresh executor — the service instance survives a graceful
+     * stop, so the daemons' restart path calls start() again.
+     */
     fun start() {
-        if (started) return
-        started = true
-        executor.scheduleWithFixedDelay({ uploadNow(manual = false) },
-            FIRST_CHECK_DELAY_MINUTES, CHECK_INTERVAL_MINUTES, TimeUnit.MINUTES)
+        synchronized(lock) {
+            if (started) return
+            if (executorStopped) {
+                executor = defaultExecutor()
+                executorStopped = false
+            }
+            started = true
+            // Scheduled under the same lock as the stop: no shutdownNow() can
+            // land between the rebuild check and the schedule.
+            executor.scheduleWithFixedDelay({ uploadNow(manual = false) },
+                FIRST_CHECK_DELAY_MINUTES, CHECK_INTERVAL_MINUTES, TimeUnit.MINUTES)
+        }
     }
 
-    /** Stops the scheduler; a queued/running check is dropped. */
+    /**
+     * Stops the scheduler; a queued/running check is dropped. Resets the
+     * lifecycle flags AFTER the shutdown so a later [start] fully re-arms.
+     */
     fun stop() {
-        executor.shutdownNow()
+        synchronized(lock) {
+            executor.shutdownNow()
+            executorStopped = true
+            started = false
+        }
     }
 
     /** Local calendar date (per [clock]/[zone]) of "today", `yyyy-MM-dd`. */

@@ -102,11 +102,6 @@ class DaemonService : Service() {
     // onStartCommand, stopped in onDestroy BEFORE the supervisor stops so a
     // restart never races the destroy.
     private lateinit var ftpHangWatchdog: FtpHangWatchdog
-    // Plan 07 §2.6: FTP supervisor stop/start/rebuild run on a dedicated
-    // single-thread executor, never on the service main thread.
-    private val ftpControlExecutor = Executors.newSingleThreadExecutor(ThreadFactory {
-        Thread(it, "ftp-control").apply { isDaemon = true }
-    })
 
     // Graceful shutdown (Stage 1): the ordered teardown runs on a dedicated
     // single-thread executor (see [shutdownExecutor]), never on the main thread,
@@ -419,6 +414,10 @@ class DaemonService : Service() {
         wifiGateMonitor.start()
         bep51Backup.start()
         dbBackup.start()
+        // Re-arms the restore manager stopped by the graceful teardown: this
+        // service instance survives the stop, so without this Start would leave
+        // every restore refused with "service is shutting down".
+        dbRestore.start()
         observeWifiForFtp()
         observeWifiForCrawler()
         startSupervisors()
@@ -1623,8 +1622,16 @@ class DaemonService : Service() {
                 planner.run()
             } finally {
                 // The cycle is over: a later shutdown cycle must be accepted
-                // again. The planner rejects overlap, so this cannot race the
-                // still-running teardown.
+                // again. Reached only on the shutdown executor, where cycles
+                // are strictly serialized by the planner's in-flight guard, so
+                // this reset never races a teardown that is still running.
+                // (The RejectedExecutionException fallback below reuses this
+                // same Runnable on a throwaway thread: it is unreachable while
+                // the executor is never shut down, and if it ever did fire the
+                // planner would still keep overlap out — but the shared
+                // Runnable's head would clobber shutdownThreadId and this
+                // finally would clear the claim mid-flight. Accepted as
+                // unreachable rather than made safe.)
                 shutdownRequested.set(false)
             }
         }
@@ -1673,9 +1680,6 @@ class DaemonService : Service() {
                 dbBackup.stop()
                 dbRestore.stop()
             },
-            GracefulShutdownPlanner.Step("stop-ftp-control") {
-                ftpControlExecutor.shutdownNow()
-            },
             GracefulShutdownPlanner.Step("stop-crawler") {
                 stopCrawlerForShutdown()
             },
@@ -1698,7 +1702,13 @@ class DaemonService : Service() {
                 ftpSafIpcServer.stop()
             },
             GracefulShutdownPlanner.Step("stop-gateway") {
+                // Cleared, not just shut down: the service instance survives a
+                // graceful stop, and ensureUsbGateway() only re-creates the
+                // gateway when the field is null. A live restart must build a
+                // fresh one from the persisted tree URI — the old gateway's
+                // free-space executor is gone, so availableBytes() would throw.
                 gateway?.shutdown()
+                gateway = null
             },
             GracefulShutdownPlanner.Step("release-locks") {
                 releaseLocks()
@@ -1802,6 +1812,17 @@ class DaemonService : Service() {
         // launched. The thread is a daemon and dies with the process.
         private val crawlerControlExecutor = Executors.newSingleThreadExecutor(ThreadFactory {
             Thread(it, "crawler-control").apply { isDaemon = true }
+        })
+
+        // Plan 07 §2.6: FTP supervisor stop/start/rebuild run on a dedicated
+        // single-thread executor, never on the service main thread. Process-wide
+        // and NEVER shut down (the same reason as crawlerControlExecutor): the
+        // service instance outlives a graceful stop, so the FTP daemon can be
+        // started again afterwards and a pending task from a previous service
+        // instance must serialize ahead of any new instance's task instead of
+        // being rejected.
+        private val ftpControlExecutor = Executors.newSingleThreadExecutor(ThreadFactory {
+            Thread(it, "ftp-control").apply { isDaemon = true }
         })
 
         // The graceful teardown runs on these threads (see requestGracefulShutdown).

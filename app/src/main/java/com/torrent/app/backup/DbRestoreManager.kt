@@ -319,8 +319,22 @@ class DbRestoreManager(
         }
     }
 
-    /** Marks the manager shut down; further [restoreNow] calls are refused. */
+    /**
+     * Marks the manager shut down; further [restoreNow] calls are refused. The
+     * flag is cleared again by [start] — the service instance survives a
+     * graceful stop, and the refusal only has to fence the window between this
+     * stop and the restart (a restore accepted mid-teardown would run against
+     * the crawler being SIGTERMed).
+     */
     fun stop() { stopped = true }
+
+    /**
+     * Re-arms the manager after a [stop]: called from DaemonService's restart
+     * path (onStartCommand), so a restore requested after the daemons are
+     * started again is accepted instead of being refused forever. This manager
+     * owns no executor, so there is nothing else to rebuild.
+     */
+    fun start() { synchronized(lock) { stopped = false } }
 
     private fun prefixDir(settings: BackupSettings): String = settings.r2DbObjectPrefix + "/"
 

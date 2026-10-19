@@ -46,15 +46,14 @@ class GracefulShutdownPlannerTest {
     @Test fun completedCycleIsReArmedAndRunsEveryStepAgain() {
         val log = mutableListOf<String>()
         val p = planner(log)
+        val expected = listOf("jobs", "crawler", "ftp", "transmission", "locks")
         assertTrue(p.run())
-        val afterFirst = log.toList()
-        assertTrue(p.run())
-        assertEquals(
-            listOf("jobs", "crawler", "ftp", "transmission", "locks"),
-            afterFirst,
-        )
-        assertEquals(afterFirst + afterFirst, log)
         assertTrue(p.isCompleted)
+        assertEquals(expected, log.toList())
+        // Re-armed after completion: the second cycle runs every step again.
+        assertTrue(p.run())
+        assertTrue(p.isCompleted)
+        assertEquals(expected + expected, log)
     }
 
     @Test fun reArmedCycleReportsInFlightAgain() {
