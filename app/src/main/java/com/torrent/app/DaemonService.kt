@@ -108,18 +108,20 @@ class DaemonService : Service() {
         Thread(it, "ftp-control").apply { isDaemon = true }
     })
 
-    // Graceful shutdown (Stage 1): the ordered teardown runs on this dedicated
-    // thread, never on the main thread, because its crawler step AWAITS the
-    // SIGTERM grace (up to CRAWLER_GRACE_MS + 2 s) so dht_crawler can flush its
-    // SQLite batch, save its bloom filter and run the final WAL checkpoint.
-    // Shut down once the run completes.
-    private val shutdownExecutor = Executors.newSingleThreadExecutor(ThreadFactory {
-        Thread(it, "graceful-shutdown").apply { isDaemon = true }
-    })
+    // Graceful shutdown (Stage 1): the ordered teardown runs on a dedicated
+    // single-thread executor (see [shutdownExecutor]), never on the main thread,
+    // because its crawler step AWAITS the SIGTERM grace (up to
+    // CRAWLER_GRACE_MS + 2 s) so dht_crawler can flush its SQLite batch, save its
+    // bloom filter and run the final WAL checkpoint. The executor is process-wide
+    // and NEVER shut down: the service instance survives a graceful stop (the
+    // activity stays bound, so stopSelf() does not destroy it), so a second
+    // shutdown cycle must serialize behind the first instead of being rejected.
     // Built lazily (it closes over collaborators assigned in onCreate) and
-    // shared with onDestroy, so the ordered teardown runs at most once.
+    // shared with onDestroy, so the ordered teardown is serialized (one cycle at
+    // a time, re-runnable once the previous cycle completed).
     private val shutdownPlanner: GracefulShutdownPlanner by lazy { buildShutdownPlanner() }
-    // Set when [requestGracefulShutdown] claims the shutdown (first caller wins).
+    // Set while a graceful teardown is claimed/in flight; reset when the cycle
+    // completes so a later cycle (daemons started again) is accepted.
     private val shutdownRequested = java.util.concurrent.atomic.AtomicBoolean(false)
     // Thread id of the graceful-shutdown run. Only that run AWAITS the crawler's
     // SIGTERM grace; onDestroy falls back to the historical fire-and-forget
@@ -424,14 +426,17 @@ class DaemonService : Service() {
     }
 
     override fun onDestroy() {
-        // Both teardown entry points share ONE idempotent planner, so nothing
-        // destructive runs twice (Ktor stop(), supervisor.stop(), executor
-        // shutdownNow, lock release): whichever path gets here second no-ops.
+        // Both teardown entry points share ONE serialized planner, so a cycle in
+        // flight is never run twice (Ktor stop(), supervisor.stop(), executor
+        // shutdownNow, lock release): whichever path gets here while it runs no-ops.
         // When requestGracefulShutdown() won, its thread performed the ordered
-        // teardown and this call is reached from its stopSelf(); when the
-        // system/service destroy came first, the same ordered teardown runs
-        // inline here (the crawler stop stays fire-and-forget on this thread —
-        // blocking the main thread for its 60 s SIGTERM grace would ANR).
+        // teardown and this call is reached from its stopSelf() (still in flight,
+        // so it no-ops); when the system/service destroy came first, the same
+        // ordered teardown runs inline here (the crawler stop stays
+        // fire-and-forget on this thread — blocking the main thread for its 60 s
+        // SIGTERM grace would ANR).
+        // This inline run is also the last teardown the instance gets, so it starts
+        // a fresh cycle even if a previous one had already completed.
         shutdownPlanner.run()
         super.onDestroy()
     }
@@ -1252,7 +1257,7 @@ class DaemonService : Service() {
         val nativeLibDir = applicationInfo.nativeLibraryDir
         val workDir = File(filesDir, "daemons"); val logDir = File(filesDir, "logs")
         val transmission = ProcessSupervisor(
-            label = "transmission", binaryName = "libtransmissiond.so",
+            label = TRANSMISSION_LABEL, binaryName = "libtransmissiond.so",
             args = listOf("--foreground", "--config-dir", transmissionConfig.configDir.absolutePath,
                 "--logfile", File(logDir, "transmission.log").absolutePath, "--log-level=info"),
             nativeLibraryDir = nativeLibDir, workDir = workDir, logDir = logDir,
@@ -1590,48 +1595,59 @@ class DaemonService : Service() {
     }
 
     /**
-     * Requests an ordered, idempotent, GRACEFUL teardown. Unlike a
+     * Requests an ordered, GRACEFUL teardown. Unlike a
      * system-initiated destroy it AWAITS the crawler's SIGTERM grace (up to
      * [CRAWLER_GRACE_MS] + 2 s) so dht_crawler can flush its SQLite batch, save
      * its bloom filter and run the final WAL TRUNCATE checkpoint before the
-     * process goes away. Runs on a dedicated single-thread executor (never the
-     * main thread), so the caller never blocks; repeated calls are no-ops.
+     * process goes away. Runs on a process-wide single-thread executor (never the
+     * main thread), so the caller never blocks. One cycle at a time: a request
+     * made while a teardown is IN FLIGHT is a no-op, but once a cycle COMPLETED a
+     * new request is accepted — the daemons may have been started again and the
+     * service instance survives a graceful stop (the activity stays bound, so
+     * stopSelf() does not destroy it).
      *
      * The teardown is sequential: worst case is roughly the crawler grace (62 s)
      * plus the FTP/transmission graces and the Ktor stop timeout — do not
      * promise callers a ~60 s completion.
      *
-     * @return false when a shutdown had already been requested.
+     * @return false when a shutdown is already in flight.
      */
     fun requestGracefulShutdown(): Boolean {
         if (!shutdownRequested.compareAndSet(false, true)) return false
         val planner = shutdownPlanner
-        try {
-            shutdownExecutor.execute {
-                // Marks this run as the one allowed to block on the crawler's
-                // SIGTERM grace (see stopCrawlerForShutdown).
-                shutdownThreadId = Thread.currentThread().id
-                try {
-                    planner.run()
-                } finally {
-                    shutdownExecutor.shutdown()
-                }
+        val teardown = Runnable {
+            // Marks this run as the one allowed to block on the crawler's
+            // SIGTERM grace (see stopCrawlerForShutdown).
+            shutdownThreadId = Thread.currentThread().id
+            try {
+                planner.run()
+            } finally {
+                // The cycle is over: a later shutdown cycle must be accepted
+                // again. The planner rejects overlap, so this cannot race the
+                // still-running teardown.
+                shutdownRequested.set(false)
             }
+        }
+        try {
+            shutdownExecutor.execute(teardown)
         } catch (e: RejectedExecutionException) {
-            // The executor is already shut down: run the teardown inline rather
-            // than dropping it. The crawler stop stays fire-and-forget here.
+            // Defensive only: [shutdownExecutor] is process-wide and never shut
+            // down, so this cannot happen. Never run the (up to ~78 s) teardown
+            // inline here — the caller is the binder/main thread, so that would
+            // ANR. A throwaway daemon thread keeps the teardown off the caller.
             android.util.Log.w("DaemonService", "shutdown executor rejected: ${e.message}")
-            planner.run()
+            Thread(teardown, "graceful-shutdown-fallback").apply { isDaemon = true }.start()
         }
         return true
     }
 
-    /** True once the graceful shutdown has been requested (see [requestGracefulShutdown]). */
+    /** True while a graceful shutdown is claimed or in flight (see [requestGracefulShutdown]). */
     fun isShutdownRequested(): Boolean = shutdownRequested.get()
 
     /**
      * The ordered teardown, shared by [requestGracefulShutdown] and [onDestroy];
-     * the planner guarantees it runs at most once. Order matters: observers
+     * the planner runs one cycle at a time (a caller arriving mid-cycle no-ops,
+     * a completed cycle can be re-run). Order matters: observers
      * that could restart a daemon stop first, the crawler is awaited before its
      * SAF-free stop, the FTP daemon stops before ftp-saf.sock goes away, the
      * dashboard outlives the daemons, and the locks/notification go last.
@@ -1667,7 +1683,7 @@ class DaemonService : Service() {
                 stopSupervisorForShutdown(FTP_LABEL)
             },
             GracefulShutdownPlanner.Step("stop-transmission") {
-                stopSupervisorForShutdown("transmission")
+                stopSupervisorForShutdown(TRANSMISSION_LABEL)
             },
             GracefulShutdownPlanner.Step("stop-crawler-proxy") {
                 crawlerProxy?.stop()
@@ -1770,6 +1786,7 @@ class DaemonService : Service() {
         const val NOTIFICATION_ID = 1
         const val CRAWLER_LABEL = "dht_crawler"
         const val FTP_LABEL = "ftp_server"
+        const val TRANSMISSION_LABEL = "transmission"
         const val CRAWLER_GRACE_MS = 60_000L
 
 
@@ -1785,6 +1802,17 @@ class DaemonService : Service() {
         // launched. The thread is a daemon and dies with the process.
         private val crawlerControlExecutor = Executors.newSingleThreadExecutor(ThreadFactory {
             Thread(it, "crawler-control").apply { isDaemon = true }
+        })
+
+        // The graceful teardown runs on these threads (see requestGracefulShutdown).
+        // Process-wide and NEVER shut down, for the same reason as
+        // crawlerControlExecutor: the service instance outlives a graceful stop
+        // (the activity stays bound, so stopSelf() does not destroy it), so a
+        // second shutdown cycle must queue behind the first instead of being
+        // rejected — and every cycle runs off the caller (binder/main) thread,
+        // where the crawler's 60 s SIGTERM grace would ANR.
+        private val shutdownExecutor = Executors.newSingleThreadExecutor(ThreadFactory {
+            Thread(it, "graceful-shutdown").apply { isDaemon = true }
         })
 
         // Per-label executors for dashboard start/stop/restart (see

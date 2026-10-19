@@ -22,14 +22,62 @@ class GracefulShutdownPlannerTest {
         assertEquals(listOf("jobs", "crawler", "ftp", "transmission", "locks"), log)
     }
 
-    @Test fun secondRequestIsNoOp() {
+    @Test fun secondRunWhileInFlightIsNoOp() {
+        val log = mutableListOf<String>()
+        lateinit var p: GracefulShutdownPlanner
+        var nested: Boolean? = null
+        p = GracefulShutdownPlanner(
+            steps = listOf(
+                GracefulShutdownPlanner.Step("outer-1") { log.add("outer-1") },
+                GracefulShutdownPlanner.Step("re-enter") {
+                    // Overlapping request (e.g. onDestroy during a graceful run).
+                    nested = p.run()
+                    log.add("re-enter")
+                },
+                GracefulShutdownPlanner.Step("outer-2") { log.add("outer-2") },
+            ),
+        )
+        assertTrue(p.run())
+        assertEquals(false, nested)
+        // The nested call executed nothing: each step ran exactly once.
+        assertEquals(listOf("outer-1", "re-enter", "outer-2"), log)
+    }
+
+    @Test fun completedCycleIsReArmedAndRunsEveryStepAgain() {
         val log = mutableListOf<String>()
         val p = planner(log)
         assertTrue(p.run())
-        assertFalse(p.run())
-        assertFalse(p.run())
-        assertEquals(5, log.size)
-        assertEquals(listOf("jobs", "crawler", "ftp", "transmission", "locks"), log)
+        val afterFirst = log.toList()
+        assertTrue(p.run())
+        assertEquals(
+            listOf("jobs", "crawler", "ftp", "transmission", "locks"),
+            afterFirst,
+        )
+        assertEquals(afterFirst + afterFirst, log)
+        assertTrue(p.isCompleted)
+    }
+
+    @Test fun reArmedCycleReportsInFlightAgain() {
+        val log = mutableListOf<String>()
+        var inFlightSeen = false
+        lateinit var p: GracefulShutdownPlanner
+        p = GracefulShutdownPlanner(
+            steps = listOf(
+                GracefulShutdownPlanner.Step("probe") {
+                    if (p.isRequested && !p.isCompleted) {
+                        log.add("in-flight")
+                        inFlightSeen = true
+                    }
+                },
+            ),
+        )
+        p.run()
+        assertTrue(p.isCompleted)
+        inFlightSeen = false
+        assertTrue(p.run())
+        assertTrue(inFlightSeen)
+        assertTrue(p.isCompleted)
+        assertEquals(listOf("in-flight", "in-flight"), log)
     }
 
     @Test fun exposesRequestedAndCompletedState() {

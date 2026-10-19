@@ -145,6 +145,13 @@ class MainActivity : ComponentActivity() {
                                 shutdownRequested = true
                                 boundService?.requestGracefulShutdown()
                             },
+                            onStart = {
+                                // Disarms the suppression: the LaunchedEffect above then sees
+                                // `Stopped && !requested` and relaunches the daemons. Only this
+                                // explicit tap clears the flag (a binder/poll clear would
+                                // restart the daemons right after the user stopped them).
+                                shutdownRequested = false
+                            },
                         )
                     }
                 }
@@ -211,6 +218,7 @@ fun MainScreen(
     onGrantUsb: () -> Unit,
     shutdownRequested: Boolean,
     onShutdown: () -> Unit,
+    onStart: () -> Unit,
 ) {
     val context = LocalContext.current
     val showConnection = wifiIp.isNotEmpty() && authToken.isNotEmpty()
@@ -269,7 +277,7 @@ fun MainScreen(
         // existing one below (before the QR) keep the top content and the QR on the edges.
         Spacer(modifier = Modifier.weight(1f))
         Button(
-            onClick = onShutdown,
+            onClick = { if (showsStartAffordance(serviceState, shutdownRequested)) onStart() else onShutdown() },
             enabled = shutdownButtonEnabled(serviceState, shutdownRequested),
         ) { Text(shutdownButtonLabel(serviceState, shutdownRequested)) }
 
@@ -296,15 +304,30 @@ internal fun shouldAutoStartService(state: ServiceState, shutdownRequested: Bool
     !shutdownRequested && state is ServiceState.Stopped
 
 /**
- * The Shutdown button is inert once a teardown is in flight (or already requested),
- * so repeat taps during the up-to-~78 s teardown cannot queue a second shutdown.
+ * Once a graceful teardown has COMPLETED (state `Stopped` while the suppression is still
+ * armed) the button stops being a Shutdown button and becomes the explicit way back: the
+ * daemons only restart on this tap, never by a poll/binder callback (that would loop
+ * straight back into a shutdown, or start them again right after the user stopped them).
+ */
+internal fun showsStartAffordance(state: ServiceState, shutdownRequested: Boolean): Boolean =
+    shutdownRequested && state is ServiceState.Stopped
+
+/**
+ * The button is inert once a teardown is in flight (or already requested), so repeat taps
+ * during the up-to-~78 s teardown cannot queue a second shutdown. The one exception is the
+ * Start affordance after a completed teardown, which is enabled on purpose.
  */
 internal fun shutdownButtonEnabled(state: ServiceState, shutdownRequested: Boolean): Boolean =
-    !shutdownRequested && state !is ServiceState.Stopping && state !is ServiceState.Stopped
+    if (shutdownRequested) showsStartAffordance(state, shutdownRequested)
+    else state !is ServiceState.Stopping && state !is ServiceState.Stopped
 
-/** Label for the Shutdown button; shows the in-flight teardown state. */
+/** Label for the button; shows the in-flight teardown state and the Start affordance. */
 internal fun shutdownButtonLabel(state: ServiceState, shutdownRequested: Boolean): String =
-    if (!shutdownButtonEnabled(state, shutdownRequested)) "Stopping…" else "Shutdown"
+    when {
+        showsStartAffordance(state, shutdownRequested) -> "Start daemons"
+        shutdownButtonEnabled(state, shutdownRequested) -> "Shutdown"
+        else -> "Stopping…"
+    }
 
 @Composable
 fun WizardScreen(
