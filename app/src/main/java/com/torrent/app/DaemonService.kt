@@ -1454,6 +1454,13 @@ class DaemonService : Service() {
      * a [setCrawlerEnabled] start queued right after it (same serialized
      * executor) already launches the crawler with the chosen mode — the crawler
      * reads `adult_mode` only at startup.
+     *
+     * Because the daemon reads that key ONLY at startup, the write also restarts
+     * a crawler that is already STARTING/RUNNING (see [restartCrawlerIfRunning])
+     * so it re-reads `config.ini`: on-device the running crawler stayed in `tag`
+     * mode while `config.ini` said `adult_mode=drop`, and it kept saving adult
+     * torrents. A STOPPED crawler is not started here (first-run: the write must
+     * land before the later start) and a STOPPING one is left to finish.
      */
     fun setCrawlerAdultMode(mode: String) {
         val next = configStore.load().crawler.copy(adultMode = mode)
@@ -1464,6 +1471,7 @@ class DaemonService : Service() {
                     val crawlerConfig = CrawlerConfig(this)
                     crawlerConfig.ensureLayout()
                     crawlerConfig.applySettings(next)
+                    restartCrawlerIfRunning()
                 } catch (e: Exception) {
                     android.util.Log.e("DaemonService", "crawler adult-mode write failed", e)
                 }
@@ -1479,9 +1487,15 @@ class DaemonService : Service() {
      * into `config.ini` as `save_categories`. Queued on the crawler-control
      * executor for the same reason as [setCrawlerAdultMode]: the write lands
      * before a [setCrawlerEnabled] start queued after it on the same serialized
-     * executor, and the crawler reads `save_categories` only at startup (a later
-     * write needs an apply/restart to take effect). An empty list means "save all
-     * categories" — the config writer omits the key in that case.
+     * executor.
+     *
+     * The crawler reads `save_categories` only at startup, so like
+     * [setCrawlerAdultMode] the write restarts a crawler that is already
+     * STARTING/RUNNING (see [restartCrawlerIfRunning]) — a write needs the
+     * daemon to re-read `config.ini` to take effect; an apply/restart used to be
+     * the only thing that did that. A STOPPED crawler is not started here and a
+     * STOPPING one is left to finish. An empty list means "save all categories"
+     * — the config writer omits the key in that case.
      */
     fun setCrawlerSaveCategories(categories: List<String>) {
         val next = configStore.load().crawler.copy(saveCategories = categories)
@@ -1492,6 +1506,7 @@ class DaemonService : Service() {
                     val crawlerConfig = CrawlerConfig(this)
                     crawlerConfig.ensureLayout()
                     crawlerConfig.applySettings(next)
+                    restartCrawlerIfRunning()
                 } catch (e: Exception) {
                     android.util.Log.e("DaemonService", "crawler save-categories write failed", e)
                 }
@@ -1499,6 +1514,38 @@ class DaemonService : Service() {
         } catch (e: RejectedExecutionException) {
             // Service shutting down: the store write above still lands and the
             // next apply renders it into config.ini.
+        }
+    }
+
+    /**
+     * Restarts a STARTING/RUNNING crawler so it re-reads `config.ini` after a
+     * settings write. Must run on the crawler-control executor, AFTER the write
+     * landed: the crawler reads `adult_mode` / `save_categories` only at startup,
+     * so without this a write to a running crawler is invisible until something
+     * else restarts it.
+     *
+     * Never starts a STOPPED crawler (first-run: [setCrawlerAdultMode] /
+     * [setCrawlerSaveCategories] are called before [setCrawlerEnabled] /
+     * [startCrawlerSupervisor], which launch it against the fresh config) and
+     * never touches a STOPPING one — its stop is in flight and the wifi-gate
+     * observer owns the decision to start again. The restart itself is gated like
+     * a manual one (see [restartDaemon]): while paused (`crawler.enabled=false`,
+     * or wifi-only with wifi down) refuse it and let the gate observer manage the
+     * crawler, so the two cannot fight.
+     */
+    private fun restartCrawlerIfRunning() {
+        val state = crawlerSupervisor?.status?.value?.state
+        if (!CrawlerRestartPolicy.shouldRestart(state)) return
+        val c = configStore.load().crawler
+        if (!CrawlerGate.shouldRun(c.enabled, c.wifiOnly, wifiGateMonitor.state.value.wifi)) {
+            return
+        }
+        try {
+            // Same registration/restart pair as restartDaemon(CRAWLER_LABEL).
+            registerCrawlerSupervisor(emptyList()).restart()
+        } catch (e: Exception) {
+            // The write already landed: a failed relaunch is logged, not thrown.
+            android.util.Log.e("DaemonService", "crawler restart after settings write failed", e)
         }
     }
 
