@@ -889,8 +889,8 @@ class ControlServer(
                 <p class="meta"><strong>Checked categories are saved</strong> to the database;
                 <strong>unchecked categories are dropped</strong> when the crawler finds them. The
                 <em>Category filter update</em> button in the maintenance section below then deletes the
-                existing database rows of every unchecked category. Tick at
-                least one category.</p>
+                existing database rows of every unchecked category, plus every adult-tagged
+                torrent (as tagged by the classifier). Tick at least one category.</p>
                 <div class="pick">$categoryToggles</div>
                 <div id="save-tv-kind-row"$tvKindRowHidden>
                   <h3>TV kinds — applies to TV and anime torrents only</h3>
@@ -1064,8 +1064,8 @@ class ControlServer(
               crawler is stopped first and restarted afterwards if enabled (and wifi is up).</p>
               <p class="meta"><strong>Category filter update</strong> deletes the database rows of every
               category you left unchecked in <em>Categories to save</em> above (and of the unchecked TV
-              kinds inside TV/anime rows), updates the crawler's stats and stops there — it does not
-              compact the database (use <em>Compact database</em> for that).</p>
+              kinds inside TV/anime rows), plus every adult-tagged torrent, updates the crawler's stats
+              and stops there — it does not compact the database (use <em>Compact database</em> for that).</p>
               <div id="maint-btns">$buttons</div>
               <div id="maint-status" class="meta">Maintenance: idle</div>
               <pre id="maint-log" class="apply-log loglines" style="display:none"></pre>
@@ -1091,7 +1091,8 @@ class ControlServer(
         MaintenanceAction.REBUILD_BLOOM_FILTER -> "Rebuild the bloom filters from the database"
         MaintenanceAction.CLEAR_FAILURE_FILTER -> "Clear the failure filter"
         MaintenanceAction.CATEGORY_FILTER_UPDATE ->
-            "Delete all torrents in unchecked categories from the database"
+            "Delete all torrents in unchecked categories and adult-tagged torrents " +
+                "from the database"
     }
 
     /** The BEP51 cache backup section on the crawler panel (Stage 4). */

@@ -131,7 +131,9 @@ class ControlServerCrawlerCategoriesTest {
         assertTrue(
             "the help text must say the maintenance button deletes unchecked rows",
             html.contains("deletes the") &&
-                html.contains("existing database rows of every unchecked category"))
+                html.contains("existing database rows of every unchecked category, plus every adult-tagged"))
+        assertTrue("the help text must say adult-tagged rows go too",
+            html.contains("torrent (as tagged by the classifier)"))
         assertFalse("the auto-compact was dropped, so the help text must not promise it",
             html.contains("compacts the database"))
         // The paragraph wraps in the source, so only a single-line fragment matches.
@@ -151,7 +153,11 @@ class ControlServerCrawlerCategoriesTest {
             html.contains(">Category filter update</button>"))
         assertTrue(
             "the confirm() must say what is deleted",
-            html.contains("Delete all torrents in unchecked categories from the database?"))
+            html.contains(
+                "Delete all torrents in unchecked categories and adult-tagged torrents from the database?"))
+        assertTrue(
+            "the maintenance text must say the adult-tagged rows go too",
+            html.contains("plus every adult-tagged torrent, updates the crawler's stats"))
         assertFalse("the confirm() must not promise a compaction", html.contains("and compact it?"))
         assertTrue(
             "the section must point back at the selection",
