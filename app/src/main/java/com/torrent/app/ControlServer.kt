@@ -908,10 +908,10 @@ class ControlServer(
               <fieldset class="card"><legend>Adult content handling</legend>
                 <label class="row"><input type="checkbox" name="classifierEnabled" ${checked(s.classifierEnabled)}> Ingest-time classifier (on by default)</label>
                 <label>Adult mode<select name="adultMode">$adultModeOptions</select></label>
-                <label>Adult hide threshold (0..1; only used by tag mode)<input type="number" step="any" name="adultHideThreshold" value="${s.adultHideThreshold}"></label>
-                <label>Adult drop threshold (0..1; only used by drop mode)<input type="number" step="any" name="adultDropThreshold" value="${s.adultDropThreshold}"></label>
+                <label>Adult hide threshold (0..1)<input type="number" step="any" name="adultHideThreshold" value="${s.adultHideThreshold}"></label>
                 <p class="meta">The hard-block list (<code>hard_block.txt</code>) always drops matching names. <em>tag</em> stores
-                adult rows (hidden above the hide threshold); <em>drop</em> discards rows at or above the drop threshold.</p>
+                adult rows (hidden at or above the hide threshold); <em>drop</em> discards every adult-tagged row, i.e.
+                everything at or above the hide threshold.</p>
               </fieldset>
               <fieldset class="card"><legend>Bloom filters (changing these invalidates the persisted filters)</legend>
                 <label>Bloom capacity<input name="bloomCapacity" value="${s.bloomCapacity}"></label>
@@ -3169,7 +3169,6 @@ ${categoryChips(enabled)}
                 classifierEnabled = f.containsKey("classifierEnabled"),
                 adultMode = f["adultMode"]?.takeIf { it.isNotEmpty() }?.trim()?.lowercase() ?: current.adultMode,
                 adultHideThreshold = f["adultHideThreshold"]?.toDoubleOrNull() ?: current.adultHideThreshold,
-                adultDropThreshold = f["adultDropThreshold"]?.toDoubleOrNull() ?: current.adultDropThreshold,
                 bloomCapacity = f["bloomCapacity"]?.toIntOrNull() ?: current.bloomCapacity,
                 failureBloomCapacity = f["failureBloomCapacity"]?.toIntOrNull() ?: current.failureBloomCapacity,
                 bloomErrorRate = f["bloomErrorRate"]?.toDoubleOrNull() ?: current.bloomErrorRate,

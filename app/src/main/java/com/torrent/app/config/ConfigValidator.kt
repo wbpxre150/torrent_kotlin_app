@@ -66,7 +66,6 @@ object ConfigValidator {
         if (s.failureBloomCapacity <= 0) errors.add("failure bloom capacity must be > 0")
         errors.addAll(validateAdultMode(s.adultMode).errors)
         errors.addAll(validateFraction("adult hide threshold", s.adultHideThreshold))
-        errors.addAll(validateFraction("adult drop threshold", s.adultDropThreshold))
         errors.addAll(CrawlerKeys.parseAdvanced(s.advancedOverrides).errors)
 
         return errors
@@ -86,8 +85,7 @@ object ConfigValidator {
     /**
      * Adult probability thresholds must be inside `(0, 1]`. 0 is rejected: for
      * `adult_hide_threshold` it is the crawler's hidden "use the manifest"
-     * escape hatch and for `adult_drop_threshold` it would discard every
-     * classified row — neither is something the form should write.
+     * escape hatch, which is not something the form should write.
      */
     fun validateFraction(name: String, value: Double): List<String> =
         if (value > 0.0 && value <= 1.0) emptyList()

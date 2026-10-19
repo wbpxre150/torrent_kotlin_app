@@ -163,7 +163,9 @@ class CrawlerConfigTest {
         assertEquals("models/v2", ini["classifier_model_dir"])
         assertEquals("tag", ini["adult_mode"])
         assertEquals("0.897417", ini["adult_hide_threshold"])
-        assertEquals("0.993899", ini["adult_drop_threshold"])
+        // The drop threshold is gone with drop-all-adult-tagged semantics: the key
+        // must not be rendered at all (the crawler ignores it as unknown).
+        assertNull(ini["adult_drop_threshold"])
         assertEquals("hard_block.txt", ini["hard_block_file"])
         assertNull(ini["backup_path"])
         assertNull(ini["ssh_host"])
@@ -533,7 +535,7 @@ class CrawlerConfigTest {
             assertEquals(CrawlerConfig.MODELS_SUBDIR, ini["classifier_model_dir"])
             assertEquals("tag", ini["adult_mode"])
             assertEquals("0.897417", ini["adult_hide_threshold"])
-            assertEquals("0.993899", ini["adult_drop_threshold"])
+            assertNull(ini["adult_drop_threshold"])
             assertEquals(CrawlerConfig.HARD_BLOCK_FILE, ini["hard_block_file"])
         }
 
@@ -546,7 +548,7 @@ class CrawlerConfigTest {
             cfg.applySettings(
                 CrawlerSettings(
                     classifierEnabled = false, adultMode = "DROP",
-                    adultHideThreshold = 0.75, adultDropThreshold = 0.9,
+                    adultHideThreshold = 0.75,
                 )
             )
             val text = cfg.configFile.readText()
@@ -556,7 +558,8 @@ class CrawlerConfigTest {
             // The C crawler compares adult_mode case-sensitively: the writer normalises it.
             assertEquals("drop", ini["adult_mode"])
             assertEquals("0.75", ini["adult_hide_threshold"])
-            assertEquals("0.9", ini["adult_drop_threshold"])
+            // The vestigial drop threshold is never written back into config.ini.
+            assertNull(ini["adult_drop_threshold"])
             assertEquals("6", ini["tree_parallel_peers"])
             // App-owned path keys are re-asserted on every write (existing installs
             // seeded before Stage 6 get them too).

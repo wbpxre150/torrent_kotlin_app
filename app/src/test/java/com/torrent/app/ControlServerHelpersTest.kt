@@ -90,7 +90,7 @@ class ControlServerHelpersTest {
                 + "&treeInfohashQueueCapacity=100&treePeersQueueCapacity=200"
                 + "&languageFilterNonLatinThreshold=50&bloomCapacity=1000&failureBloomCapacity=2000"
                 + "&bloomErrorRate=0.005&advancedOverrides=bep51_cache_capacity=77&proxyPort=8090&crawlerHttpPort=8091"
-                + "&classifierEnabled=&adultMode=drop&adultHideThreshold=0.9&adultDropThreshold=0.995"
+                + "&classifierEnabled=&adultMode=drop&adultHideThreshold=0.9"
                 + "&saveCategories=tv&saveCategories=movie&saveTvKinds=episode&saveTvKinds=daily")
         val s = parseSettings(m)
         assertTrue(s.enabled)
@@ -116,7 +116,6 @@ class ControlServerHelpersTest {
         assertTrue(s.classifierEnabled)
         assertEquals("drop", s.adultMode)
         assertEquals(0.9, s.adultHideThreshold, 0.0)
-        assertEquals(0.995, s.adultDropThreshold, 0.0)
         // Taxonomy order, not post order: ConfigStore sorts on load anyway, and
         // the config.ini line then follows the crawler's own index order.
         assertEquals(listOf("movie", "tv"), s.saveCategories)
@@ -162,19 +161,17 @@ class ControlServerHelpersTest {
     @Test fun crawlerSettingsFromForm_adultFieldsFallBackToCurrent() {
         val current = CrawlerSettings(
             classifierEnabled = true, adultMode = "drop",
-            adultHideThreshold = 0.5, adultDropThreshold = 0.6)
+            adultHideThreshold = 0.5)
         val s = parseSettings(
             mapOf(
                 "saveCategories" to listOf("tv"),
                 "adultMode" to listOf(""),
                 "adultHideThreshold" to listOf("not-a-number"),
-                "adultDropThreshold" to listOf(""),
             ),
             current)
         assertFalse("checkbox absence means off, like the other toggles", s.classifierEnabled)
         assertEquals("drop", s.adultMode)
         assertEquals(0.5, s.adultHideThreshold, 0.0)
-        assertEquals(0.6, s.adultDropThreshold, 0.0)
     }
 
     @Test fun crawlerSettingsFromForm_adultModeIsNormalised() {

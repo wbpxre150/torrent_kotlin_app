@@ -849,7 +849,6 @@ class DaemonService : Service() {
         val effective = if (migrated) {
             s.copy(
                 adultHideThreshold = ConfigDefaults.CRAWLER.adultHideThreshold,
-                adultDropThreshold = ConfigDefaults.CRAWLER.adultDropThreshold,
             )
         } else {
             s
@@ -1341,17 +1340,15 @@ class DaemonService : Service() {
     private fun migrateClassifierVersion(crawlerConfig: CrawlerConfig): Boolean {
         val previous = configStore.load().crawler
         val newHide = ConfigDefaults.CRAWLER.adultHideThreshold
-        val newDrop = ConfigDefaults.CRAWLER.adultDropThreshold
         val migration = ClassifierModelVersionMigration(
             readStoredModelDir = { configStore.classifierModelVersion() },
             resetThresholds = {
                 android.util.Log.i(
                     "DaemonService",
                     "classifier model generation changed to ${CrawlerConfig.MODELS_SUBDIR}: " +
-                        "resetting adult thresholds hide ${previous.adultHideThreshold} -> $newHide, " +
-                        "drop ${previous.adultDropThreshold} -> $newDrop"
+                        "resetting adult hide threshold ${previous.adultHideThreshold} -> $newHide"
                 )
-                configStore.resetClassifierThresholds(newHide, newDrop)
+                configStore.resetClassifierThresholds(newHide)
             },
             writeStoredModelDir = { configStore.setClassifierModelVersion(it) },
         )

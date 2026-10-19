@@ -36,7 +36,7 @@ object CrawlerKeys {
         "max_connection_lifetime_sec",
         // Ingest-time classifier + adult handling (Stage 5/6)
         "classifier_enabled", "classifier_model_dir",
-        "adult_mode", "adult_hide_threshold", "adult_drop_threshold", "hard_block_file",
+        "adult_mode", "adult_hide_threshold", "hard_block_file",
         // Categories to save (empty list = save everything)
         "save_categories", "save_tv_kinds",
         // Language filter
@@ -90,7 +90,7 @@ object CrawlerKeys {
         "tree_find_node_workers", "tree_bep51_workers", "tree_get_peers_workers",
         "tree_metadata_workers", "tree_infohash_queue_capacity", "tree_peers_queue_capacity",
         "language_filter_non_latin_threshold", "save_categories", "save_tv_kinds",
-        "classifier_enabled", "adult_mode", "adult_hide_threshold", "adult_drop_threshold",
+        "classifier_enabled", "adult_mode", "adult_hide_threshold",
         "bloom_capacity", "failure_bloom_capacity", "bloom_error_rate",
         "http_port", "http_bind",
     )

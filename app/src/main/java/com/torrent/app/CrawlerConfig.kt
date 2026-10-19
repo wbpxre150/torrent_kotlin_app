@@ -131,7 +131,6 @@ class CrawlerConfig(
             // The C crawler compares adult_mode case-sensitively; normalise here.
             "adult_mode" to s.adultMode.trim().lowercase(),
             "adult_hide_threshold" to s.adultHideThreshold.toString(),
-            "adult_drop_threshold" to s.adultDropThreshold.toString(),
             "bloom_capacity" to s.bloomCapacity.toString(),
             "failure_bloom_capacity" to s.failureBloomCapacity.toString(),
             "bloom_error_rate" to s.bloomErrorRate.toString(),

@@ -68,7 +68,7 @@ class CrawlerKeysTest {
     @Test fun parseAdvanced_rejectsFormManagedKeysWithFormHint() {
         for (key in listOf(
             "http_port", "http_bind", "num_trees", "bloom_capacity", "log_level",
-            "classifier_enabled", "adult_mode", "adult_hide_threshold", "adult_drop_threshold"
+            "classifier_enabled", "adult_mode", "adult_hide_threshold"
         )) {
             val r = CrawlerKeys.parseAdvanced("$key=1")
             assertFalse("$key must be rejected", r.ok)
@@ -161,7 +161,7 @@ class CrawlerKeysTest {
         // else parseAdvanced would report it as an unknown key.
         for (key in listOf(
             "classifier_enabled", "classifier_model_dir", "adult_mode",
-            "adult_hide_threshold", "adult_drop_threshold", "hard_block_file"
+            "adult_hide_threshold", "hard_block_file"
         )) {
             assertTrue("$key must be known", key in CrawlerKeys.KNOWN_KEYS)
         }
@@ -172,12 +172,26 @@ class CrawlerKeysTest {
         // rendered by the settings form — none may be set from the textarea.
         for (key in listOf(
             "classifier_enabled", "classifier_model_dir", "adult_mode",
-            "adult_hide_threshold", "adult_drop_threshold", "hard_block_file"
+            "adult_hide_threshold", "hard_block_file"
         )) {
             assertFalse("$key must not be advanced-overridable", key in CrawlerKeys.ALLOWED_ADVANCED_KEYS)
         }
         assertEquals("tag", CrawlerKeys.ADULT_MODES.first())
         assertEquals(listOf("tag", "drop"), CrawlerKeys.ADULT_MODES)
+    }
+
+    @Test fun adultDropThresholdKey_isGoneWithTheDropAllSemantics() {
+        // The C crawler no longer parses adult_drop_threshold (drop mode discards
+        // every adult-tagged row at adult_hide_threshold). A key it would silently
+        // skip must not be known, form-managed or overridable here either.
+        val key = "adult_drop_threshold"
+        assertFalse("$key must no longer be known", key in CrawlerKeys.KNOWN_KEYS)
+        assertFalse("$key must not be form-managed", key in CrawlerKeys.FORM_MANAGED_KEYS)
+        assertFalse("$key must not be path-managed", key in CrawlerKeys.PATH_KEYS)
+        assertFalse("$key must not be advanced-overridable", key in CrawlerKeys.ALLOWED_ADVANCED_KEYS)
+        val r = CrawlerKeys.parseAdvanced("$key=0.9")
+        assertFalse(r.ok)
+        assertTrue(r.errors.any { it.contains("unknown key") })
     }
 
     @Test fun allowedAdvancedKeys_excludePathBackupAndFormKeys() {

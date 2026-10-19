@@ -181,15 +181,12 @@ class ConfigValidatorTest {
         // 0 is the crawler's hidden "use the manifest threshold" escape hatch: never written by the form.
         val hide = ConfigValidator.validateCrawler(validCrawler().copy(adultHideThreshold = 0.0))
         assertTrue(hide.any { it.contains("adult hide threshold") })
-        val drop = ConfigValidator.validateCrawler(validCrawler().copy(adultDropThreshold = 1.5))
-        assertTrue(drop.any { it.contains("adult drop threshold") })
     }
 
     @Test fun crawlerDefaults_includeAdultHandling() {
         assertTrue(validCrawler().classifierEnabled)
         assertEquals("tag", validCrawler().adultMode)
         assertEquals(0.897417, validCrawler().adultHideThreshold, 0.0)
-        assertEquals(0.993899, validCrawler().adultDropThreshold, 0.0)
     }
 
     @Test fun crawlerAdvancedWithBackupKey_fails() {

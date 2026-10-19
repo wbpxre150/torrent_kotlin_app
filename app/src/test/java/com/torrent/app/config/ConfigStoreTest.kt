@@ -216,7 +216,6 @@ class ConfigStoreTest {
                 classifierEnabled = false,
                 adultMode = "drop",
                 adultHideThreshold = 0.75,
-                adultDropThreshold = 0.9,
                 bloomCapacity = 12_000_000,
                 failureBloomCapacity = 12_000_000,
                 bloomErrorRate = 0.002,
@@ -245,7 +244,6 @@ class ConfigStoreTest {
         assertFalse(c.classifierEnabled)
         assertEquals("drop", c.adultMode)
         assertEquals(0.75, c.adultHideThreshold, 1e-6)
-        assertEquals(0.9, c.adultDropThreshold, 1e-6)
         assertEquals(12_000_000, c.bloomCapacity)
         assertEquals(12_000_000, c.failureBloomCapacity)
         assertEquals(0.002, c.bloomErrorRate, 1e-6)
@@ -276,7 +274,6 @@ class ConfigStoreTest {
         assertTrue(c.classifierEnabled)
         assertEquals("tag", c.adultMode)
         assertEquals(0.897417, c.adultHideThreshold, 1e-6)
-        assertEquals(0.993899, c.adultDropThreshold, 1e-6)
         assertEquals(30_000_000, c.bloomCapacity)
         assertEquals(30_000_000, c.failureBloomCapacity)
         assertEquals(0.001, c.bloomErrorRate, 1e-6)
@@ -294,7 +291,7 @@ class ConfigStoreTest {
             CrawlerSettings(
                 enabled = true, numTrees = 32, logLevel = "WARN",
                 classifierEnabled = false, adultMode = "drop",
-                adultHideThreshold = 0.8, adultDropThreshold = 0.95,
+                adultHideThreshold = 0.8,
                 saveCategories = listOf("movie", "tv"), saveTvKinds = listOf("season_pack"),
             )
         )
@@ -306,7 +303,6 @@ class ConfigStoreTest {
         assertFalse(restored.classifierEnabled)
         assertEquals("drop", restored.adultMode)
         assertEquals(0.8, restored.adultHideThreshold, 1e-6)
-        assertEquals(0.95, restored.adultDropThreshold, 1e-6)
         assertEquals(listOf("movie", "tv"), restored.saveCategories)
         assertEquals(listOf("season_pack"), restored.saveTvKinds)
     }
@@ -329,25 +325,24 @@ class ConfigStoreTest {
         val s = store()
         // A user-customized value plus a snapshot taken with it: the v1-tuned numbers
         // must be gone from BOTH views, or a rollback would restore them.
-        s.saveCrawler(CrawlerSettings(adultHideThreshold = 0.5, adultDropThreshold = 0.6))
+        s.saveCrawler(CrawlerSettings(adultHideThreshold = 0.5))
         s.snapshotCrawlerLastKnownGood(
             CrawlerSettings(
-                adultHideThreshold = 0.5, adultDropThreshold = 0.6,
+                adultHideThreshold = 0.5,
                 classifierEnabled = false, numTrees = 16,
             )
         )
 
-        s.resetClassifierThresholds(0.897417, 0.993899)
+        s.resetClassifierThresholds(0.897417)
 
         val live = s.load().crawler
         assertEquals(0.897417, live.adultHideThreshold, 1e-6)
-        assertEquals(0.993899, live.adultDropThreshold, 1e-6)
         assertEquals("0.897417", prefs().getString("lkg_crawler_adult_hide_threshold", null))
-        assertEquals("0.993899", prefs().getString("lkg_crawler_adult_drop_threshold", null))
+        // The removed drop-threshold key is never persisted again.
+        assertNull(prefs().getString("lkg_crawler_adult_drop_threshold", null))
         val lkg = s.restoreCrawlerLastKnownGood()
         assertNotNull(lkg)
         assertEquals(0.897417, lkg!!.adultHideThreshold, 1e-6)
-        assertEquals(0.993899, lkg.adultDropThreshold, 1e-6)
         // The rest of the snapshot is untouched by the threshold reset.
         assertFalse(lkg.classifierEnabled)
         assertEquals(16, lkg.numTrees)

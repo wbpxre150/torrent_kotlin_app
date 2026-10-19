@@ -48,13 +48,12 @@ data class CrawlerSettings(
     /** `adult_mode`: `"tag"` stores adult rows, `"drop"` discards them (C `config.c` default: tag). */
     val adultMode: String = "tag",
     /**
-     * `adult_hide_threshold`: adult probability above which a stored row is hidden.
+     * `adult_hide_threshold`: adult probability at or above which an adult-tagged row
+     * is hidden (`adult_mode=tag`) or discarded (`adult_mode=drop`).
      * Calibrated default from `models/v2/manifest.json`; the crawler reads 0 as
      * "take the manifest threshold", which the form never writes.
      */
     val adultHideThreshold: Double = 0.897417,
-    /** `adult_drop_threshold`: only used by `adult_mode=drop` (calibrated default). */
-    val adultDropThreshold: Double = 0.993899,
     val bloomCapacity: Int = 30_000_000,
     val failureBloomCapacity: Int = 30_000_000,
     val bloomErrorRate: Double = 0.001,
