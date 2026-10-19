@@ -1,0 +1,78 @@
+package com.torrent.app
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class GracefulShutdownPlannerTest {
+
+    private fun planner(
+        log: MutableList<String>,
+        onError: (String, Throwable) -> Unit = { _, _ -> },
+        names: List<String> = listOf("jobs", "crawler", "ftp", "transmission", "locks"),
+    ) = GracefulShutdownPlanner(
+        steps = names.map { name -> GracefulShutdownPlanner.Step(name) { log.add(name) } },
+        onError = onError,
+    )
+
+    @Test fun runsEveryStepInDeclaredOrder() {
+        val log = mutableListOf<String>()
+        planner(log).run()
+        assertEquals(listOf("jobs", "crawler", "ftp", "transmission", "locks"), log)
+    }
+
+    @Test fun secondRequestIsNoOp() {
+        val log = mutableListOf<String>()
+        val p = planner(log)
+        assertTrue(p.run())
+        assertFalse(p.run())
+        assertFalse(p.run())
+        assertEquals(5, log.size)
+        assertEquals(listOf("jobs", "crawler", "ftp", "transmission", "locks"), log)
+    }
+
+    @Test fun exposesRequestedAndCompletedState() {
+        val p = planner(mutableListOf())
+        assertFalse(p.isRequested)
+        assertFalse(p.isCompleted)
+        p.run()
+        assertTrue(p.isRequested)
+        assertTrue(p.isCompleted)
+    }
+
+    @Test fun requestedIsSetWhileStepsAreStillRunning() {
+        var requestedDuringStep = false
+        lateinit var p: GracefulShutdownPlanner
+        p = GracefulShutdownPlanner(
+            steps = listOf(GracefulShutdownPlanner.Step("first") {
+                requestedDuringStep = p.isRequested && !p.isCompleted
+            }),
+        )
+        p.run()
+        assertTrue(requestedDuringStep)
+        assertTrue(p.isCompleted)
+    }
+
+    @Test fun failingStepIsReportedAndRemainingStepsStillRun() {
+        val log = mutableListOf<String>()
+        val errors = mutableListOf<String>()
+        val p = GracefulShutdownPlanner(
+            steps = listOf(
+                GracefulShutdownPlanner.Step("ok-1") { log.add("ok-1") },
+                GracefulShutdownPlanner.Step("boom") { throw IllegalStateException("nope") },
+                GracefulShutdownPlanner.Step("ok-2") { log.add("ok-2") },
+            ),
+            onError = { name, _ -> errors.add(name) },
+        )
+        assertTrue(p.run())
+        assertEquals(listOf("ok-1", "ok-2"), log)
+        assertEquals(listOf("boom"), errors)
+        assertTrue(p.isCompleted)
+    }
+
+    @Test fun stepNamesPreserveDeclaredOrder() {
+        val p = planner(mutableListOf())
+        assertEquals(listOf("jobs", "crawler", "ftp", "transmission", "locks"), p.stepNames())
+    }
+}

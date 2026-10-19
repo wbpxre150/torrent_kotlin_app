@@ -34,6 +34,7 @@ import kotlinx.coroutines.launch
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadFactory
+import java.util.concurrent.TimeUnit
 import org.json.JSONObject
 import com.torrent.app.config.CrawlerGate
 import com.torrent.app.config.ClassifierModelVersionMigration
@@ -106,6 +107,24 @@ class DaemonService : Service() {
     private val ftpControlExecutor = Executors.newSingleThreadExecutor(ThreadFactory {
         Thread(it, "ftp-control").apply { isDaemon = true }
     })
+
+    // Graceful shutdown (Stage 1): the ordered teardown runs on this dedicated
+    // thread, never on the main thread, because its crawler step AWAITS the
+    // SIGTERM grace (up to CRAWLER_GRACE_MS + 2 s) so dht_crawler can flush its
+    // SQLite batch, save its bloom filter and run the final WAL checkpoint.
+    // Shut down once the run completes.
+    private val shutdownExecutor = Executors.newSingleThreadExecutor(ThreadFactory {
+        Thread(it, "graceful-shutdown").apply { isDaemon = true }
+    })
+    // Built lazily (it closes over collaborators assigned in onCreate) and
+    // shared with onDestroy, so the ordered teardown runs at most once.
+    private val shutdownPlanner: GracefulShutdownPlanner by lazy { buildShutdownPlanner() }
+    // Set when [requestGracefulShutdown] claims the shutdown (first caller wins).
+    private val shutdownRequested = java.util.concurrent.atomic.AtomicBoolean(false)
+    // Thread id of the graceful-shutdown run. Only that run AWAITS the crawler's
+    // SIGTERM grace; onDestroy falls back to the historical fire-and-forget
+    // crawler stop, since a ~60 s block on the main thread would ANR.
+    @Volatile private var shutdownThreadId: Long? = null
 
     private lateinit var safSocketFile: java.io.File
     private lateinit var safIpcServer: SafIpcServer
@@ -376,6 +395,8 @@ class DaemonService : Service() {
         fun setCrawlerAdultMode(mode: String) = this@DaemonService.setCrawlerAdultMode(mode)
         fun setCrawlerSaveCategories(categories: List<String>) =
             this@DaemonService.setCrawlerSaveCategories(categories)
+        fun requestGracefulShutdown(): Boolean = this@DaemonService.requestGracefulShutdown()
+        fun isShutdownRequested(): Boolean = this@DaemonService.isShutdownRequested()
     }
 
     override fun onBind(intent: Intent?): IBinder = LocalBinder()
@@ -403,30 +424,15 @@ class DaemonService : Service() {
     }
 
     override fun onDestroy() {
-        rollbackJob?.cancel()
-        controlServer.stop()
-        bep51Backup.stop()
-        dbBackup.stop()
-        dbRestore.stop()
-        crawlerProxy?.stop()
-        crawlerProxy = null
-        ftpObservingJob?.cancel()
-        // Stage 4: stop the hang watchdog before the supervisor below so a
-        // pending restart cannot race the destroy (runOnFtpControl also drops
-        // work once ftpControlExecutor shuts down).
-        ftpHangWatchdog.stop()
-        crawlerObservingJob?.cancel()
-        ftpControlExecutor.shutdownNow()
-        // The ftp_server supervisor stops inside stopSupervisors() (it is
-        // registered in [supervisors]) — BEFORE the IPC servers below, since
-        // the daemon needs ftp-saf.sock alive while it shuts down.
-        stopSupervisors()
-        safIpcServer.stop()
-        ftpSafIpcServer.stop()
-        gateway?.shutdown()
-        _state.value = ServiceState.Stopping
-        releaseLocks()
-        _state.value = ServiceState.Stopped
+        // Both teardown entry points share ONE idempotent planner, so nothing
+        // destructive runs twice (Ktor stop(), supervisor.stop(), executor
+        // shutdownNow, lock release): whichever path gets here second no-ops.
+        // When requestGracefulShutdown() won, its thread performed the ordered
+        // teardown and this call is reached from its stopSelf(); when the
+        // system/service destroy came first, the same ordered teardown runs
+        // inline here (the crawler stop stays fire-and-forget on this thread —
+        // blocking the main thread for its 60 s SIGTERM grace would ANR).
+        shutdownPlanner.run()
         super.onDestroy()
     }
 
@@ -1583,20 +1589,164 @@ class DaemonService : Service() {
             readinessProbe = { crawlerStatsReachable() })
     }
 
-    private fun stopSupervisors() {
-        // The crawler has a long (60 s) SIGTERM grace and never uses SAF, so it
-        // stops on the crawler-control executor and is NOT awaited here — the
-        // SAF gateway shutdown in onDestroy must not block on it. All other
-        // supervisors (transmission uses SAF) stop synchronously, as before.
-        // The crawler stop is queued first so it runs in parallel with transmission's.
-        // It looks the crawler up when it runs (not now), so a start that is still
-        // queued on the executor is registered first and then stopped here too.
-        crawlerControlExecutor.execute { stopCrawlerSupervisors() }
-        // Includes ftp_server (stage 3): it stops while ftp-saf.sock is still
-        // alive (the IPC servers stop after this in onDestroy).
-        val others = supervisors.filter { it.status.value.label != CRAWLER_LABEL }
-        for (s in others) s.stop()
-        supervisors.removeAll(others.toSet())
+    /**
+     * Requests an ordered, idempotent, GRACEFUL teardown. Unlike a
+     * system-initiated destroy it AWAITS the crawler's SIGTERM grace (up to
+     * [CRAWLER_GRACE_MS] + 2 s) so dht_crawler can flush its SQLite batch, save
+     * its bloom filter and run the final WAL TRUNCATE checkpoint before the
+     * process goes away. Runs on a dedicated single-thread executor (never the
+     * main thread), so the caller never blocks; repeated calls are no-ops.
+     *
+     * The teardown is sequential: worst case is roughly the crawler grace (62 s)
+     * plus the FTP/transmission graces and the Ktor stop timeout — do not
+     * promise callers a ~60 s completion.
+     *
+     * @return false when a shutdown had already been requested.
+     */
+    fun requestGracefulShutdown(): Boolean {
+        if (!shutdownRequested.compareAndSet(false, true)) return false
+        val planner = shutdownPlanner
+        try {
+            shutdownExecutor.execute {
+                // Marks this run as the one allowed to block on the crawler's
+                // SIGTERM grace (see stopCrawlerForShutdown).
+                shutdownThreadId = Thread.currentThread().id
+                try {
+                    planner.run()
+                } finally {
+                    shutdownExecutor.shutdown()
+                }
+            }
+        } catch (e: RejectedExecutionException) {
+            // The executor is already shut down: run the teardown inline rather
+            // than dropping it. The crawler stop stays fire-and-forget here.
+            android.util.Log.w("DaemonService", "shutdown executor rejected: ${e.message}")
+            planner.run()
+        }
+        return true
+    }
+
+    /** True once the graceful shutdown has been requested (see [requestGracefulShutdown]). */
+    fun isShutdownRequested(): Boolean = shutdownRequested.get()
+
+    /**
+     * The ordered teardown, shared by [requestGracefulShutdown] and [onDestroy];
+     * the planner guarantees it runs at most once. Order matters: observers
+     * that could restart a daemon stop first, the crawler is awaited before its
+     * SAF-free stop, the FTP daemon stops before ftp-saf.sock goes away, the
+     * dashboard outlives the daemons, and the locks/notification go last.
+     */
+    private fun buildShutdownPlanner() = GracefulShutdownPlanner(
+        steps = listOf(
+            GracefulShutdownPlanner.Step("state-stopping") {
+                _state.value = ServiceState.Stopping
+            },
+            GracefulShutdownPlanner.Step("cancel-jobs") {
+                rollbackJob?.cancel()
+                ftpObservingJob?.cancel()
+                crawlerObservingJob?.cancel()
+            },
+            GracefulShutdownPlanner.Step("stop-observers") {
+                // Stop the hang watchdog and the wifi gate BEFORE the supervisors:
+                // both can restart daemons (rebuildFtpSupervisor / gate collectors)
+                // and must not fire mid-shutdown. Also stop the backup schedulers,
+                // which would otherwise wake up and touch a dying crawler.
+                ftpHangWatchdog.stop()
+                wifiGateMonitor.stop()
+                bep51Backup.stop()
+                dbBackup.stop()
+                dbRestore.stop()
+            },
+            GracefulShutdownPlanner.Step("stop-ftp-control") {
+                ftpControlExecutor.shutdownNow()
+            },
+            GracefulShutdownPlanner.Step("stop-crawler") {
+                stopCrawlerForShutdown()
+            },
+            GracefulShutdownPlanner.Step("stop-ftp") {
+                stopSupervisorForShutdown(FTP_LABEL)
+            },
+            GracefulShutdownPlanner.Step("stop-transmission") {
+                stopSupervisorForShutdown("transmission")
+            },
+            GracefulShutdownPlanner.Step("stop-crawler-proxy") {
+                crawlerProxy?.stop()
+                crawlerProxy = null
+            },
+            // After the HTTP responses to the shutdown request are flushed.
+            GracefulShutdownPlanner.Step("stop-control-server") {
+                controlServer.stop()
+            },
+            GracefulShutdownPlanner.Step("stop-ipc") {
+                safIpcServer.stop()
+                ftpSafIpcServer.stop()
+            },
+            GracefulShutdownPlanner.Step("stop-gateway") {
+                gateway?.shutdown()
+            },
+            GracefulShutdownPlanner.Step("release-locks") {
+                releaseLocks()
+            },
+            GracefulShutdownPlanner.Step("stop-foreground") {
+                // stopSelf() is a no-op on the onDestroy path (already going away).
+                ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            },
+            GracefulShutdownPlanner.Step("state-stopped") {
+                _state.value = ServiceState.Stopped
+            },
+        ),
+        onError = { step, e ->
+            android.util.Log.w("DaemonService", "shutdown step '$step' failed: ${e.message}")
+        },
+    )
+
+    /**
+     * Stops (SIGTERM, awaited — so never call it on the main thread) and
+     * unregisters every supervisor carrying [label].
+     */
+    private fun stopSupervisorForShutdown(label: String) {
+        val targets = supervisors.filter { it.status.value.label == label }
+        for (s in targets) {
+            try {
+                s.stop()
+            } catch (e: Exception) {
+                android.util.Log.w("DaemonService", "$label stop failed: ${e.message}")
+            }
+        }
+        supervisors.removeAll(targets.toSet())
+    }
+
+    /**
+     * Stops the crawler supervisor, AWAITING its SIGTERM grace when the teardown
+     * runs on the shutdown thread (the point of the graceful path: the crawler
+     * must get time to flush). The stop is always submitted to
+     * [crawlerControlExecutor] — never called inline — so a pending stop from a
+     * previous service instance stays serialized ahead of any new launch.
+     * [onDestroy] runs the same planner inline on the main thread, where
+     * blocking for the grace would ANR: there the stop stays fire-and-forget,
+     * as it always was.
+     */
+    private fun stopCrawlerForShutdown() {
+        val stop = Runnable { stopCrawlerSupervisors() }
+        val onShutdownThread = shutdownThreadId == Thread.currentThread().id
+        if (!onShutdownThread) {
+            crawlerControlExecutor.execute(stop)
+            return
+        }
+        val stopped = try {
+            crawlerControlExecutor.submit(stop)
+        } catch (e: RejectedExecutionException) {
+            android.util.Log.w("DaemonService", "crawler stop rejected: ${e.message}")
+            return
+        }
+        try {
+            stopped.get(CRAWLER_GRACE_MS + 5_000L, TimeUnit.MILLISECONDS)
+        } catch (e: Exception) {
+            // Timeout/interrupt: stop() has already SIGKILLed the child by now;
+            // never let the crawler delay the rest of the teardown.
+            android.util.Log.w("DaemonService", "crawler shutdown wait ended: ${e.message}")
+        }
     }
 
     /**
