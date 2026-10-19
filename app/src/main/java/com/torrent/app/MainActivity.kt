@@ -27,6 +27,7 @@ import androidx.compose.material3.*
 import androidx.compose.material3.Button
 import androidx.compose.runtime.*
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -81,9 +82,13 @@ class MainActivity : ComponentActivity() {
         val bindIntent = Intent(this, DaemonService::class.java)
         bindService(bindIntent, serviceConnection, Context.BIND_AUTO_CREATE)
 
-        // Start foreground service (no-op if already running)
-        val fgIntent = Intent(this, DaemonService::class.java)
-        ContextCompat.startForegroundService(this, fgIntent)
+        // Start foreground service (no-op if already running). Only on a FRESH launch:
+        // a recreated activity (rotation) leaves the decision to the auto-start effect in
+        // setContent below, so a user-requested shutdown is not undone by rotating.
+        if (savedInstanceState == null) {
+            val fgIntent = Intent(this, DaemonService::class.java)
+            ContextCompat.startForegroundService(this, fgIntent)
+        }
 
         // Periodic WiFi IP refresh
         lifecycleScope.launch {
@@ -103,9 +108,11 @@ class MainActivity : ComponentActivity() {
             val token by authToken.collectAsState()
             val ip by wifiIp.collectAsState()
 
-            // Auto-start when service is stopped
-            LaunchedEffect(serviceState.value) {
-                if (serviceState.value is ServiceState.Stopped) {
+            // Auto-start when service is stopped, unless the user asked for a shutdown.
+            // The flag is saveable: a rotation keeps the suppression, a fresh launch clears it.
+            var shutdownRequested by rememberSaveable { mutableStateOf(false) }
+            LaunchedEffect(serviceState.value, shutdownRequested) {
+                if (shouldAutoStartService(serviceState.value, shutdownRequested)) {
                     startOrRestartService()
                 }
             }
@@ -131,6 +138,13 @@ class MainActivity : ComponentActivity() {
                             wifiIp = ip,
                             safStatus = safStatus.collectAsState().value,
                             onGrantUsb = { usbTreeLauncher.launch(null) },
+                            shutdownRequested = shutdownRequested,
+                            onShutdown = {
+                                // Arms the auto-start suppression before asking the service,
+                                // so the Stopped state that ends the teardown cannot relaunch it.
+                                shutdownRequested = true
+                                boundService?.requestGracefulShutdown()
+                            },
                         )
                     }
                 }
@@ -195,6 +209,8 @@ fun MainScreen(
     wifiIp: String,
     safStatus: SafStatus?,
     onGrantUsb: () -> Unit,
+    shutdownRequested: Boolean,
+    onShutdown: () -> Unit,
 ) {
     val context = LocalContext.current
     val showConnection = wifiIp.isNotEmpty() && authToken.isNotEmpty()
@@ -249,6 +265,14 @@ fun MainScreen(
             )
         }
 
+        // Shutdown sits at the vertical centre: one weight spacer above it and the
+        // existing one below (before the QR) keep the top content and the QR on the edges.
+        Spacer(modifier = Modifier.weight(1f))
+        Button(
+            onClick = onShutdown,
+            enabled = shutdownButtonEnabled(serviceState, shutdownRequested),
+        ) { Text(shutdownButtonLabel(serviceState, shutdownRequested)) }
+
         // QR code pinned to the bottom of the screen
         Spacer(modifier = Modifier.weight(1f))
         if (showConnection) {
@@ -263,6 +287,24 @@ private val WizardDefaultSaveCategories = listOf("movie", "tv", "anime", "music"
 /** Display label for a `save_categories` name ("tv" reads better as "TV"). */
 private fun categoryLabel(name: String): String =
     if (name == "tv") "TV" else name.replaceFirstChar { it.uppercase() }
+
+/**
+ * Auto-start decision for [MainActivity]'s service effect: relaunch a stopped service
+ * unless the user explicitly asked for a shutdown (which ends in `Stopped` too).
+ */
+internal fun shouldAutoStartService(state: ServiceState, shutdownRequested: Boolean): Boolean =
+    !shutdownRequested && state is ServiceState.Stopped
+
+/**
+ * The Shutdown button is inert once a teardown is in flight (or already requested),
+ * so repeat taps during the up-to-~78 s teardown cannot queue a second shutdown.
+ */
+internal fun shutdownButtonEnabled(state: ServiceState, shutdownRequested: Boolean): Boolean =
+    !shutdownRequested && state !is ServiceState.Stopping && state !is ServiceState.Stopped
+
+/** Label for the Shutdown button; shows the in-flight teardown state. */
+internal fun shutdownButtonLabel(state: ServiceState, shutdownRequested: Boolean): String =
+    if (!shutdownButtonEnabled(state, shutdownRequested)) "Stopping…" else "Shutdown"
 
 @Composable
 fun WizardScreen(
