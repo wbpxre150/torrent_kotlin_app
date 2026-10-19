@@ -374,6 +374,8 @@ class DaemonService : Service() {
         fun lastApplyRolledBack(): Boolean = this@DaemonService.lastApplyRolledBack
         fun setCrawlerEnabled(enabled: Boolean) = this@DaemonService.setCrawlerEnabled(enabled)
         fun setCrawlerAdultMode(mode: String) = this@DaemonService.setCrawlerAdultMode(mode)
+        fun setCrawlerSaveCategories(categories: List<String>) =
+            this@DaemonService.setCrawlerSaveCategories(categories)
     }
 
     override fun onBind(intent: Intent?): IBinder = LocalBinder()
@@ -1464,6 +1466,34 @@ class DaemonService : Service() {
                     crawlerConfig.applySettings(next)
                 } catch (e: Exception) {
                     android.util.Log.e("DaemonService", "crawler adult-mode write failed", e)
+                }
+            }
+        } catch (e: RejectedExecutionException) {
+            // Service shutting down: the store write above still lands and the
+            // next apply renders it into config.ini.
+        }
+    }
+
+    /**
+     * Persists the first-run wizard's "categories to save" step and renders it
+     * into `config.ini` as `save_categories`. Queued on the crawler-control
+     * executor for the same reason as [setCrawlerAdultMode]: the write lands
+     * before a [setCrawlerEnabled] start queued after it on the same serialized
+     * executor, and the crawler reads `save_categories` only at startup (a later
+     * write needs an apply/restart to take effect). An empty list means "save all
+     * categories" — the config writer omits the key in that case.
+     */
+    fun setCrawlerSaveCategories(categories: List<String>) {
+        val next = configStore.load().crawler.copy(saveCategories = categories)
+        configStore.saveCrawler(next)
+        try {
+            crawlerControlExecutor.execute {
+                try {
+                    val crawlerConfig = CrawlerConfig(this)
+                    crawlerConfig.ensureLayout()
+                    crawlerConfig.applySettings(next)
+                } catch (e: Exception) {
+                    android.util.Log.e("DaemonService", "crawler save-categories write failed", e)
                 }
             }
         } catch (e: RejectedExecutionException) {

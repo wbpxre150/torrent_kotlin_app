@@ -179,4 +179,44 @@ class WizardSubmitTest {
         assertFalse(o.ok)
         assertTrue(o.errors.any { it.contains("prefix", true) })
     }
+
+    @Test fun crawlerSaveCategoriesDefaultsToMediaSet() {
+        val o = WizardSubmit.submit(validForm())
+        assertTrue(o.ok)
+        assertEquals(listOf("movie", "tv", "anime", "music"), o.crawlerSaveCategories)
+    }
+
+    @Test fun crawlerSaveCategoriesUnknownNameFailsValidation() {
+        val o = WizardSubmit.submit(validForm().copy(
+            crawlerSaveCategories = listOf("Anime", "movie", "nosuch"),
+        ))
+        assertFalse(o.ok)
+        assertTrue(o.errors.any { it.contains("nosuch") })
+        assertNull(o.transmission)
+    }
+
+    @Test fun crawlerSaveCategoriesNormalisedToCanonicalOrder() {
+        val o = WizardSubmit.submit(validForm().copy(
+            crawlerSaveCategories = listOf(" Music ", "anime"),
+        ))
+        assertTrue(o.ok)
+        assertEquals(listOf("anime", "music"), o.crawlerSaveCategories)
+    }
+
+    @Test fun crawlerSaveCategoriesEmptyMeansSaveAll() {
+        val o = WizardSubmit.submit(validForm().copy(crawlerSaveCategories = emptyList()))
+        assertTrue(o.ok)
+        assertTrue(o.crawlerSaveCategories.isEmpty())
+    }
+
+    @Test fun crawlerSaveCategoriesDoNotDisturbOtherOutcomeFields() {
+        val o = WizardSubmit.submit(validForm())
+        assertTrue(o.ok)
+        assertTrue(o.errors.isEmpty())
+        assertNotNull(o.transmission)
+        assertNotNull(o.ftp)
+        assertNotNull(o.backup)
+        assertFalse(o.crawlerEnabled)
+        assertEquals("tag", o.crawlerAdultMode)
+    }
 }

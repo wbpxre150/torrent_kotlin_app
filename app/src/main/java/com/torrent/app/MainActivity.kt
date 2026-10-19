@@ -21,6 +21,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import com.torrent.app.config.ConfigDefaults
 import com.torrent.app.config.WizardSubmit
+import com.torrent.app.config.CrawlerTaxonomy
 import androidx.compose.foundation.Image
 import androidx.compose.material3.*
 import androidx.compose.material3.Button
@@ -256,6 +257,13 @@ fun MainScreen(
     }
 }
 
+/** Fresh-install pre-check of the wizard's categories step: media only. */
+private val WizardDefaultSaveCategories = listOf("movie", "tv", "anime", "music")
+
+/** Display label for a `save_categories` name ("tv" reads better as "TV"). */
+private fun categoryLabel(name: String): String =
+    if (name == "tv") "TV" else name.replaceFirstChar { it.uppercase() }
+
 @Composable
 fun WizardScreen(
     safStatus: SafStatus?,
@@ -274,6 +282,14 @@ fun WizardScreen(
     var ftpWifiOnly by remember { mutableStateOf(cfg?.ftp?.wifiOnly ?: ConfigDefaults.FTP.wifiOnly) }
     var crawlerEnabled by remember { mutableStateOf(cfg?.crawler?.enabled ?: false) }
     var crawlerAdultDrop by remember { mutableStateOf((cfg?.crawler?.adultMode ?: "tag") == "drop") }
+    // Non-empty store value wins; an empty list means "save all", in which case the
+    // wizard shows (and therefore writes) the media-only fresh-install default.
+    var saveCategories by remember {
+        mutableStateOf(
+            (cfg?.crawler?.saveCategories?.takeIf { it.isNotEmpty() }
+                ?: WizardDefaultSaveCategories).toSet()
+        )
+    }
     var r2Endpoint by remember { mutableStateOf(cfg?.backup?.r2Endpoint ?: "") }
     var r2Bucket by remember { mutableStateOf(cfg?.backup?.r2Bucket ?: "") }
     var r2ObjectKey by remember { mutableStateOf(cfg?.backup?.r2ObjectKey ?: ConfigDefaults.BACKUP_OBJECT_KEY) }
@@ -322,6 +338,27 @@ fun WizardScreen(
             Switch(checked = crawlerAdultDrop, onCheckedChange = { crawlerAdultDrop = it })
             Spacer(Modifier.width(8.dp)); Text("Drop adult content (default: tag only)")
         }
+        Text("Categories to save (none checked = save all)", style = MaterialTheme.typography.bodyMedium)
+        // Chips stay enabled even when the crawler is off: the selection is stored
+        // either way and only takes effect once the crawler starts.
+        CrawlerTaxonomy.CATEGORIES.chunked(3).forEach { chunk ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                chunk.forEach { cat ->
+                    FilterChip(
+                        selected = cat in saveCategories,
+                        onClick = {
+                            saveCategories =
+                                if (cat in saveCategories) saveCategories - cat
+                                else saveCategories + cat
+                        },
+                        label = { Text(categoryLabel(cat)) },
+                    )
+                }
+            }
+        }
 
         Text("5. Backup & Bootstrap (optional)", style = MaterialTheme.typography.titleMedium)
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -364,6 +401,8 @@ fun WizardScreen(
                     ftpWifiOnly = ftpWifiOnly,
                     crawlerEnabled = crawlerEnabled,
                     crawlerAdultMode = if (crawlerAdultDrop) "drop" else "tag",
+                    crawlerSaveCategories =
+                        CrawlerTaxonomy.CATEGORIES.filter { it in saveCategories },
                     r2Endpoint = r2Endpoint,
                     r2Bucket = r2Bucket,
                     r2ObjectKey = r2ObjectKey,
@@ -394,7 +433,11 @@ fun WizardScreen(
                 val ftpR = svc.applyFtpSettings(newCfg.ftp)
                 if (txR.ok && ftpR.ok) {
                     // Written before the start below (same serialized executor), so the
-                    // first crawler launch already sees the chosen adult_mode.
+                    // first crawler launch already sees the chosen adult_mode. The
+                    // categories write is queued ahead of it for the same reason: the
+                    // crawler reads save_categories only at startup. Both are stored
+                    // even when the crawler is started disabled.
+                    svc.setCrawlerSaveCategories(outcome.crawlerSaveCategories)
                     svc.setCrawlerAdultMode(outcome.crawlerAdultMode)
                     if (outcome.crawlerEnabled) svc.setCrawlerEnabled(true)
                     svc.completeWizard(); onFinished()
