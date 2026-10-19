@@ -16,9 +16,9 @@ enum class MaintenanceAction(val route: String, val flag: String, val needsSpace
     RECOVER_DATABASE("recover-database", "--recover-database", true),
     REBUILD_BLOOM_FILTER("rebuild-bloom-filter", "--rebuild-bloom-filter", false),
     CLEAR_FAILURE_FILTER("clear-failure-filter", "--clear-failure-filter", false),
-    // The purge re-scans the database, runs the language-filter pass and then
-    // auto-compacts (VACUUM INTO), so it needs a DB-sized amount of free space.
-    CATEGORY_FILTER_UPDATE("category-filter-update", "--category-filter-update", true),
+    // The purge only deletes rows (plus a WAL checkpoint): it never rewrites
+    // the database file, so it needs no DB-sized free space.
+    CATEGORY_FILTER_UPDATE("category-filter-update", "--category-filter-update", false),
     ;
 
     companion object {

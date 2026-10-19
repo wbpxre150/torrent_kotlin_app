@@ -78,9 +78,9 @@ class CrawlerMaintenanceTest {
         assertTrue(MaintenanceAction.RECOVER_DATABASE.needsSpaceCheck)
         assertFalse(MaintenanceAction.REBUILD_BLOOM_FILTER.needsSpaceCheck)
         assertFalse(MaintenanceAction.CLEAR_FAILURE_FILTER.needsSpaceCheck)
-        // The purge re-scans, runs the language-filter pass and auto-compacts
-        // (VACUUM INTO), so it needs a DB-sized amount of free space.
-        assertTrue(MaintenanceAction.CATEGORY_FILTER_UPDATE.needsSpaceCheck)
+        // The purge only deletes rows (+ WAL checkpoint) and no longer compacts
+        // the database, so it is not space-gated.
+        assertFalse(MaintenanceAction.CATEGORY_FILTER_UPDATE.needsSpaceCheck)
     }
 
     @Test fun compact_refusedWhenNotEnoughFreeSpace() {
@@ -97,12 +97,13 @@ class CrawlerMaintenanceTest {
         assertFalse(st.running)
     }
 
-    @Test fun categoryFilterUpdate_refusedWhenNotEnoughFreeSpace() {
-        // The purge auto-compacts (VACUUM INTO), so it is space-gated like compact.
-        val m = newMaintenance(CapturingExecutor(), dbSize = 10_000L, freeSpace = 5_000L)
+    @Test fun categoryFilterUpdate_skipsSpaceCheckEvenWithNoSpace() {
+        // Purge-only since the auto-compact was dropped, so no DB-sized free space.
+        val ex = CapturingExecutor()
+        val m = newMaintenance(ex, dbSize = 10_000L, freeSpace = 5_000L)
         val st = m.start(MaintenanceAction.CATEGORY_FILTER_UPDATE)
-        assertTrue(st.message, st.message.startsWith("refused: not enough free space"))
-        assertFalse(st.running)
+        assertTrue("category-filter-update must not be space-gated", st.running)
+        assertEquals(1, ex.submitted.get())
     }
 
     @Test fun compact_startsWhenEnoughFreeSpace() {
