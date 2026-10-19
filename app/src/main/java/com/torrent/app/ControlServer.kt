@@ -153,9 +153,11 @@ class ControlServer(
                     // disabled category is neither rendered nor accepted by the
                     // /search/ws feed below.
                     get("search") {
+                        val crawler = loadConfig().crawler
                         call.respondText(
                             buildSearchPage(
-                                enabledCategories(loadConfig().crawler.saveCategories)),
+                                enabledCategories(crawler.saveCategories),
+                                crawler.adultMode),
                             ContentType.Text.Html)
                     }
 
@@ -1626,6 +1628,18 @@ class ControlServer(
         }
 
         /**
+         * The `Adult` selection row (Hide/Show/Only) of the /search page, or `""`
+         * when it must not be offered. The row is only meaningful in
+         * `adult_mode=tag`: in `adult_mode=drop` the crawler discards adult-tagged
+         * rows at ingest, so a per-query adult filter could only ever be a no-op
+         * (see [buildSearchPage], which resolves that from the crawler settings).
+         * The page's JS reads the rendered chips generically through `data-adult`
+         * and gates its wiring on the `ADULT_SELECTION` flag — the same decision.
+         */
+        private fun adultSelectionRow(show: Boolean): String = if (!show) "" else
+            """<div class="seg-row"><span class="seg-label">Adult</span><div id="adult-control" class="seg" role="group" aria-label="Adult results"><button class="chip" type="button" data-adult="hide" aria-pressed="true">Hide</button><button class="chip" type="button" data-adult="show" aria-pressed="false">Show</button><button class="chip" type="button" data-adult="only" aria-pressed="false">Only</button></div></div>"""
+
+        /**
          * The /search page (search-dashboard stage 3a): a static, self-contained
          * blue phone search shell. All markup, CSS and JS are inline — no
          * external assets, no CDN, no fonts. The search/browse/random/
@@ -1638,10 +1652,18 @@ class ControlServer(
          * the crawler settings by [enabledCategories]), so a category the
          * crawler does not ingest is not offered at all; an empty set still
          * renders the full taxonomy ([categoryChips]).
+         *
+         * The adult selection row is rendered from [adultMode] the same way
+         * ([adultSelectionRow]): in `adult_mode=drop` the crawler discards
+         * adult-tagged rows at ingest, so the Hide/Show/Only filter would have
+         * nothing left to filter and is neither rendered nor wired.
          */
         internal fun buildSearchPage(
             enabled: Set<String> = CrawlerTaxonomy.CATEGORIES.toSet(),
-        ): String = """
+            adultMode: String = "tag",
+        ): String {
+            val adultSelection = !adultMode.trim().equals("drop", ignoreCase = true)
+            return """
             <!DOCTYPE html>
             <html lang="en">
             <head>
@@ -1682,7 +1704,7 @@ ${categoryChips(enabled)}
               <button class="chip" type="button" data-tv-kind="complete_series" aria-pressed="false">Complete series</button>
               <button class="chip" type="button" data-tv-kind="daily" aria-pressed="false">Daily</button>
             </div>
-            <div class="seg-row"><span class="seg-label">Adult</span><div id="adult-control" class="seg" role="group" aria-label="Adult results"><button class="chip" type="button" data-adult="hide" aria-pressed="true">Hide</button><button class="chip" type="button" data-adult="show" aria-pressed="false">Show</button><button class="chip" type="button" data-adult="only" aria-pressed="false">Only</button></div></div>
+${adultSelectionRow(adultSelection)}
             <div id="results-status">Pick your filters, then Search or Randomize</div>
             <div id="banner" class="banner" hidden></div>
             <div id="spinner" hidden aria-hidden="true"></div>
@@ -1692,11 +1714,13 @@ ${categoryChips(enabled)}
             <div id="toast" class="toast" hidden></div>
             </div>
             <script>
+            var ADULT_SELECTION = ${if (adultSelection) "true" else "false"};
             $SEARCH_JS
             </script>
             </body>
             </html>
         """.trimIndent()
+        }
 
         /**
          * Shared WebUI theme for every server-rendered page (search-dashboard
@@ -1813,6 +1837,13 @@ ${categoryChips(enabled)}
          * The /search page interaction logic (search-dashboard stage 3b): the
          * authenticated /search/ws client, category/TV/adult controls,
          * result cards, infinite scroll and the add-to-transmission button.
+         *
+         * The adult wiring is gated on the `ADULT_SELECTION` flag that
+         * [buildSearchPage] emits just before this script body: the row is only
+         * rendered in `adult_mode=tag`, so `el('adult-control')` is null in
+         * `drop` mode and the handler must not be installed at all. `sel.adult`
+         * keeps its `'hide'` default either way, so the /search/ws payload is
+         * unchanged.
          */
         private val SEARCH_JS = """
             (function () {
@@ -2265,14 +2296,18 @@ ${categoryChips(enabled)}
                 clearResults();
               };
 
-              el('adult-control').onclick = function (ev) {
-                var t = ev.target;
-                var a = t && t.getAttribute ? t.getAttribute('data-adult') : null;
-                if (a == null) return;
-                selectOnly(el('adult-control'), t);
-                sel.adult = a;
-                clearResults();
-              };
+              // Only wired when the server rendered the row (`adult_mode=tag`); in
+              // `drop` mode there is no filter to drive and el() would be null.
+              if (ADULT_SELECTION) {
+                el('adult-control').onclick = function (ev) {
+                  var t = ev.target;
+                  var a = t && t.getAttribute ? t.getAttribute('data-adult') : null;
+                  if (a == null) return;
+                  selectOnly(el('adult-control'), t);
+                  sel.adult = a;
+                  clearResults();
+                };
+              }
 
               function doSearch() {
                 var v = el('search-input').value;

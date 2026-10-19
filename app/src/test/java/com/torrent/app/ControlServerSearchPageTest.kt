@@ -102,6 +102,61 @@ class ControlServerSearchPageTest {
         assertTrue(page.contains("Adult"))
     }
 
+    // ── the adult control follows the crawler's adult_mode ──────────────────
+
+    /** `adult_mode=drop` discards adult-tagged rows at ingest, so a per-query
+     * adult filter can only be a no-op: the page must not offer it. The chips
+     * are gone from the markup and the JS wiring is gated off (it would
+     * otherwise dereference a missing `#adult-control` and kill the page). */
+    @Test fun page_dropModeHidesTheAdultSelection() {
+        for (mode in listOf("drop", "DROP", " Drop ")) {
+            val drop = ControlServer.buildSearchPage(
+                CrawlerTaxonomy.CATEGORIES.toSet(), adultMode = mode)
+            assertFalse("adult_mode=$mode must not render the adult row",
+                drop.contains("id=\"adult-control\""))
+            // `data-adult` still appears once, inside the (never-executed) gated
+            // handler, so only the rendered attribute form is banned.
+            assertFalse("adult_mode=$mode must not render adult chips",
+                drop.contains("data-adult=\""))
+            assertFalse("adult_mode=$mode must drop the row's a11y label",
+                drop.contains("aria-label=\"Adult results\""))
+            assertFalse("adult_mode=$mode must drop the seg-label row",
+                drop.contains("class=\"seg-label\""))
+            assertTrue("adult_mode=$mode must disable the adult wiring flag",
+                drop.contains("var ADULT_SELECTION = false;"))
+            val guard = drop.indexOf("if (ADULT_SELECTION) {")
+            assertTrue(
+                "adult_mode=$mode must keep the adult wiring inside the guard",
+                guard >= 0 && drop.indexOf("el('adult-control')") > guard,
+            )
+            // The rest of the page is untouched.
+            assertTrue(drop.contains("id=\"tv-kind-row\""))
+            assertTrue(drop.contains("id=\"category-grid\""))
+            assertTrue(drop.contains("/search/ws"))
+        }
+    }
+
+    @Test fun page_tagModeKeepsTheAdultSelection() {
+        val tag = ControlServer.buildSearchPage(
+            CrawlerTaxonomy.CATEGORIES.toSet(), adultMode = "tag")
+        for (html in listOf(page, tag)) {
+            assertTrue("tag mode must keep the adult row",
+                html.contains("id=\"adult-control\""))
+            assertTrue("tag mode must keep all three adult chips",
+                listOf("hide", "show", "only").all {
+                    html.contains("data-adult=\"$it\"")
+                })
+            assertTrue("tag mode must keep the row's a11y label",
+                html.contains("aria-label=\"Adult results\""))
+            assertTrue("tag mode must enable the adult wiring flag",
+                html.contains("var ADULT_SELECTION = true;"))
+            assertTrue("tag mode must keep the guarded wiring",
+                html.indexOf("if (ADULT_SELECTION) {") >= 0 &&
+                    html.indexOf("el('adult-control')") >
+                        html.indexOf("if (ADULT_SELECTION) {"))
+        }
+    }
+
     @Test fun page_hasNoExternalAssets() {
         assertFalse(page.contains("<script src"))
         assertFalse(page.contains("<link "))
