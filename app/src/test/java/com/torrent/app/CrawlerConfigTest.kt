@@ -500,6 +500,55 @@ class CrawlerConfigTest {
             assertFalse(ini.containsKey(CrawlerConfig.SAVE_TV_KINDS_KEY))
         }
 
+        @Test fun renderManaged_purgesTheVestigialAdultDropThresholdLine() {
+            val cfg = configWithRealDefaultAsset()
+            cfg.ensureLayout()
+            // An install upgraded from the build that still managed the key: the stale
+            // line sits in its config.ini and `setKeys` would otherwise preserve it.
+            cfg.configFile.writeText(
+                cfg.configFile.readText() +
+                    "adult_drop_threshold = 0.993899\n" +
+                    "tree_parallel_peers = 6\n"
+            )
+            assertTrue(
+                "the fixture must start with the stale line",
+                cfg.configFile.readText().contains("adult_drop_threshold = 0.993899")
+            )
+
+            cfg.applySettings(CrawlerSettings(adultMode = "DROP", adultHideThreshold = 0.75))
+            val text = cfg.configFile.readText()
+            val ini = CrawlerConfig.parseIni(text)
+
+            assertFalse("the stale key must be purged", ini.containsKey("adult_drop_threshold"))
+            assertFalse(text.contains("adult_drop_threshold"))
+            // The managed adult keys and the unrelated neighbours of the purged line survive.
+            assertEquals("drop", ini["adult_mode"])
+            assertEquals("0.75", ini["adult_hide_threshold"])
+            assertEquals("6", ini["tree_parallel_peers"])
+            assertEquals("data/torrents.db", ini["db_path"])
+            assertTrue(text.contains("# DHT Crawler Configuration File"))
+        }
+
+        @Test fun renderManaged_keepsACategorySelectionWhilePurgingTheVestigialKey() {
+            val cfg = configWithRealDefaultAsset()
+            cfg.ensureLayout()
+            cfg.configFile.writeText(
+                cfg.configFile.readText() + "adult_drop_threshold = 0.993899\n"
+            )
+
+            // A non-empty selection must keep `save_categories` (only the vestigial key
+            // is unconditional), and a repeated apply must stay purged.
+            cfg.applySettings(CrawlerSettings(saveCategories = listOf("tv")))
+            val first = CrawlerConfig.parseIni(cfg.configFile.readText())
+            assertEquals("tv", first[CrawlerConfig.SAVE_CATEGORIES_KEY])
+            assertFalse(first.containsKey("adult_drop_threshold"))
+
+            cfg.applySettings(CrawlerSettings(saveCategories = listOf("tv")))
+            val second = CrawlerConfig.parseIni(cfg.configFile.readText())
+            assertEquals("tv", second[CrawlerConfig.SAVE_CATEGORIES_KEY])
+            assertFalse(second.containsKey("adult_drop_threshold"))
+        }
+
         @Test fun renderManaged_lanDirectBindsAllInterfacesOnProxyPort() {
             val cfg = configWithRealDefaultAsset()
             cfg.ensureLayout()

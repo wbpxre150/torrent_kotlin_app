@@ -161,6 +161,7 @@ class CrawlerConfig(
         text = unsetKeys(
             text,
             buildList {
+                addAll(VESTIGIAL_KEYS)
                 if (taxonomyList(s.saveCategories) == null) add(SAVE_CATEGORIES_KEY)
                 if (taxonomyList(s.saveTvKinds) == null) add(SAVE_TV_KINDS_KEY)
             },
@@ -224,6 +225,16 @@ class CrawlerConfig(
 
         /** `save_tv_kinds` — tv kinds to keep within tv/anime; omitted when none is selected. */
         const val SAVE_TV_KINDS_KEY = "save_tv_kinds"
+
+        /**
+         * Keys the app no longer manages and whose stale assignment is dropped from an
+         * existing `config.ini` on every render. `adult_drop_threshold` went away with
+         * the drop-all-adult-tagged semantics (the crawler only reads
+         * `adult_hide_threshold`), so an install upgraded from the old build must not
+         * keep the line: the crawler ignores it today, but a submodule rollback could
+         * silently reactivate it.
+         */
+        val VESTIGIAL_KEYS = listOf("adult_drop_threshold")
 
         /**
          * Comma-joined, lowercased taxonomy selection for [config.ini], or null when
