@@ -1,9 +1,11 @@
 // transmission SAF storage fork — IPC client (Stage 05).
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <cstdlib>
 #include <cstddef>
 #include <fcntl.h>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -50,6 +52,20 @@ struct SafSock
     }
 };
 thread_local SafSock t_sock;
+
+// ANDROID fork: process-wide TTL cache for capacity probes (stage 6).
+// OP_AVAIL is a property of the SAF root (no path is sent), so one global
+// entry suffices. Thread-safe: OP_AVAIL fires from every disk thread.
+constexpr auto CAP_TTL = std::chrono::seconds(30);
+
+struct SafCapacityCache
+{
+    std::mutex mutex;
+    std::chrono::steady_clock::time_point ts{};
+    int64_t free_bytes = -1;
+    bool valid = false;
+};
+SafCapacityCache t_capacity_cache;
 
 void set_err(tr_error* error, int e)
 {
@@ -481,7 +497,21 @@ bool tr_saf_dir_create(char const* path, int /*flags*/, int /*permissions*/, tr_
 
 std::optional<tr_sys_path_capacity> tr_saf_path_get_capacity(std::string_view path, tr_error* error)
 {
-    // ANDROID fork: stage 0 timing.
+    // ANDROID fork: stage 6 cache. OP_AVAIL carries no path, so the value is a
+    // property of the SAF root and a single process-wide entry serves everyone.
+    // A hit returns without any socket traffic at all.
+    {
+        std::lock_guard<std::mutex> const lock{ t_capacity_cache.mutex };
+        if (t_capacity_cache.valid && std::chrono::steady_clock::now() - t_capacity_cache.ts < CAP_TTL)
+        {
+            tr_sys_path_capacity cap{};
+            cap.free = t_capacity_cache.free_bytes;
+            cap.total = -1; // unknown
+            return cap;
+        }
+    }
+
+    // ANDROID fork: stage 0 timing (real IPC path only, so cache hits emit nothing).
     tr_disk_timer const disk_timer{ "saf-capacity", path };
     if (!send_request(OP_AVAIL, {}))
     {
@@ -502,6 +532,15 @@ std::optional<tr_sys_path_capacity> tr_saf_path_get_capacity(std::string_view pa
     }
     int64_t bytes = 0;
     std::memcpy(&bytes, resp.data(), 8);
+
+    // Cache full successes only; every failure path above leaves the entry untouched.
+    {
+        std::lock_guard<std::mutex> const lock{ t_capacity_cache.mutex };
+        t_capacity_cache.free_bytes = bytes;
+        t_capacity_cache.ts = std::chrono::steady_clock::now();
+        t_capacity_cache.valid = true;
+    }
+
     tr_sys_path_capacity cap{};
     cap.free = bytes;
     cap.total = -1; // unknown
