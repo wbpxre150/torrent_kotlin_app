@@ -149,8 +149,14 @@ class ControlServer(
                     // Search-dashboard stage 3a: the blue phone search UI
                     // shell. Static markup/CSS only; the interaction logic
                     // lands in stage 3b over the /search/ws feed.
+                    // The category chips follow the app's crawler settings: a
+                    // disabled category is neither rendered nor accepted by the
+                    // /search/ws feed below.
                     get("search") {
-                        call.respondText(buildSearchPage(), ContentType.Text.Html)
+                        call.respondText(
+                            buildSearchPage(
+                                enabledCategories(loadConfig().crawler.saveCategories)),
+                            ContentType.Text.Html)
                     }
 
                     // Torrent-page stage 2: the /torrent?hash=<40-hex> detail
@@ -1325,6 +1331,10 @@ class ControlServer(
             type = searchField(obj, "type"),
             q = searchField(obj, "q"),
             category = searchField(obj, "category"),
+            // Only categories the crawler settings actually ingest are
+            // searchable (the page renders those chips only, so a request for a
+            // disabled one is a client bug and answers bad_request: category).
+            allowedCategories = enabledCategories(loadConfig().crawler.saveCategories),
             tvKind = searchField(obj, "tv_kind"),
             adult = searchField(obj, "adult"),
             page = searchField(obj, "page"),
@@ -1414,6 +1424,19 @@ class ControlServer(
         private val SEARCH_TV_KINDS: Set<String> = CrawlerTaxonomy.TV_KINDS.toSet()
         private val SEARCH_ADULT_MODES = setOf("hide", "show", "only")
 
+        /**
+         * Resolves the crawler's `save_categories` setting into the categories
+         * this server renders and accepts (search categories follow the crawler
+         * ingest filter): names outside the taxonomy are dropped, and an empty
+         * selection means "save everything" (the crawler's own convention, see
+         * [CrawlerTaxonomy]), so it resolves to the full taxonomy. Pure: no
+         * Android, no network, no clock, so it is unit-testable.
+         */
+        internal fun enabledCategories(saveCategories: List<String>): Set<String> {
+            val known = saveCategories.filter { it in SEARCH_CATEGORIES }.toSet()
+            return known.ifEmpty { SEARCH_CATEGORIES }
+        }
+
         /** Display labels for the crawler settings page's category toggles. */
         private val CATEGORY_LABELS: Map<String, String> = mapOf(
             "unknown" to "Unknown", "movie" to "Movie", "tv" to "TV", "anime" to "Anime",
@@ -1432,13 +1455,17 @@ class ControlServer(
          * (+query) for it, or reports the single offending field. The path is
          * built only from enumerated/parsed values with a deterministic param
          * order; absent optional params are omitted so the crawler defaults
-         * apply. `q` is percent-encoded (URLEncoder, UTF-8). Pure: no Android,
-         * no network, so it is unit-testable.
+         * apply. `q` is percent-encoded (URLEncoder, UTF-8). `category` must be
+         * a taxonomy name *and* one the app's crawler settings enable
+         * ([allowedCategories], resolved by [enabledCategories]), so a disabled
+         * category never reaches the daemon even if a client asks for it.
+         * Pure: no Android, no network, so it is unit-testable.
          */
         internal fun buildCrawlerQuery(
             type: String?,
             q: String?,
             category: String?,
+            allowedCategories: Set<String>,
             tvKind: String?,
             adult: String?,
             page: String?,
@@ -1447,7 +1474,9 @@ class ControlServer(
                 return CrawlerQueryResult.Bad("type")
             }
             val cat = category?.takeIf { it.isNotEmpty() }
-            if (cat != null && cat !in SEARCH_CATEGORIES) return CrawlerQueryResult.Bad("category")
+            if (cat != null && (cat !in SEARCH_CATEGORIES || cat !in allowedCategories)) {
+                return CrawlerQueryResult.Bad("category")
+            }
             val tv = tvKind?.takeIf { it.isNotEmpty() }
             if (tv != null && tv !in SEARCH_TV_KINDS) return CrawlerQueryResult.Bad("tv_kind")
             val ad = adult?.takeIf { it.isNotEmpty() }
@@ -1573,16 +1602,46 @@ class ControlServer(
         }
 
         /**
+         * The server-rendered `#category-grid` chips for the /search page: the
+         * "All" chip first (the default selection, `data-category=""`), then one
+         * chip per enabled category in [CrawlerTaxonomy.CATEGORIES] order with
+         * its [CATEGORY_LABELS] caption. [enabled] is a resolved set (see
+         * [enabledCategories]); an empty one renders the full taxonomy, so the
+         * page stays total. The page's JS reads these chips generically through
+         * `data-category`, so nothing else has to change.
+         */
+        internal fun categoryChips(enabled: Set<String>): String {
+            val active = enabled.ifEmpty { SEARCH_CATEGORIES }
+            val chips = mutableListOf(
+                """<button class="chip" type="button" data-category="" """ +
+                    """aria-pressed="true">All</button>""")
+            for (name in CrawlerTaxonomy.CATEGORIES) {
+                if (name !in active) continue
+                val label = CATEGORY_LABELS[name] ?: name
+                chips += """<button class="chip" type="button" data-category="$name" """ +
+                    """aria-pressed="false">$label</button>"""
+            }
+            // 14 spaces = the chip column of the (trimIndent()ed) page string.
+            return chips.joinToString("\n").prependIndent("              ")
+        }
+
+        /**
          * The /search page (search-dashboard stage 3a): a static, self-contained
          * blue phone search shell. All markup, CSS and JS are inline — no
          * external assets, no CDN, no fonts. The search/browse/random/
          * infinite-scroll/add-button interaction logic lives in [SEARCH_JS],
          * wired to the authenticated /search/ws feed (token via
-         * `location.search`).
          * `location.search`). Per-torrent detail links point at this server's own
          * /torrent page, so the page needs no crawler origin.
+         *
+         * The category chips are server-rendered from [enabled] (resolved from
+         * the crawler settings by [enabledCategories]), so a category the
+         * crawler does not ingest is not offered at all; an empty set still
+         * renders the full taxonomy ([categoryChips]).
          */
-        internal fun buildSearchPage(): String = """
+        internal fun buildSearchPage(
+            enabled: Set<String> = CrawlerTaxonomy.CATEGORIES.toSet(),
+        ): String = """
             <!DOCTYPE html>
             <html lang="en">
             <head>
@@ -1612,18 +1671,7 @@ class ControlServer(
               </div>
             </div>
             <div id="category-grid">
-              <button class="chip" type="button" data-category="" aria-pressed="true">All</button>
-              <button class="chip" type="button" data-category="movie" aria-pressed="false">Movie</button>
-              <button class="chip" type="button" data-category="tv" aria-pressed="false">TV</button>
-              <button class="chip" type="button" data-category="anime" aria-pressed="false">Anime</button>
-              <button class="chip" type="button" data-category="music" aria-pressed="false">Music</button>
-              <button class="chip" type="button" data-category="audiobook" aria-pressed="false">Audiobook</button>
-              <button class="chip" type="button" data-category="ebook" aria-pressed="false">Ebook</button>
-              <button class="chip" type="button" data-category="comic" aria-pressed="false">Comic</button>
-              <button class="chip" type="button" data-category="software" aria-pressed="false">Software</button>
-              <button class="chip" type="button" data-category="game" aria-pressed="false">Game</button>
-              <button class="chip" type="button" data-category="image" aria-pressed="false">Image</button>
-              <button class="chip" type="button" data-category="other" aria-pressed="false">Other</button>
+${categoryChips(enabled)}
             </div>
             <div id="tv-kind-row" hidden>
               <button class="chip" type="button" data-tv-kind="none" aria-pressed="true">None</button>

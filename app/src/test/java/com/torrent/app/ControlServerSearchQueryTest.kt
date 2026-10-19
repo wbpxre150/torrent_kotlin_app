@@ -4,11 +4,15 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 import com.torrent.app.ControlServer.Companion.CrawlerQueryResult
+import com.torrent.app.config.CrawlerTaxonomy
 
 /**
  * Pure tests for the /search/ws query builder + validator (search-dashboard
  * stage 2). No server, no network: [ControlServer.buildCrawlerQuery] owns all
- * the validation rules and the deterministic path/param order.
+ * the validation rules and the deterministic path/param order. A `category`
+ * must be a taxonomy name *and* one the crawler settings enable
+ * ([ControlServer.enabledCategories]), so a category the crawler does not
+ * ingest is rejected server-side.
  */
 class ControlServerSearchQueryTest {
 
@@ -19,7 +23,11 @@ class ControlServerSearchQueryTest {
         tvKind: String? = null,
         adult: String? = null,
         page: String? = null,
-    ) = ControlServer.buildCrawlerQuery(type, q, category, tvKind, adult, page)
+        allowedCategories: Set<String> = CrawlerTaxonomy.CATEGORIES.toSet(),
+    ) = ControlServer.buildCrawlerQuery(
+        type = type, q = q, category = category,
+        allowedCategories = allowedCategories,
+        tvKind = tvKind, adult = adult, page = page)
 
     private fun okPath(
         type: String?,
@@ -28,8 +36,9 @@ class ControlServerSearchQueryTest {
         tvKind: String? = null,
         adult: String? = null,
         page: String? = null,
+        allowedCategories: Set<String> = CrawlerTaxonomy.CATEGORIES.toSet(),
     ): String {
-        val r = build(type, q, category, tvKind, adult, page)
+        val r = build(type, q, category, tvKind, adult, page, allowedCategories)
         return (r as CrawlerQueryResult.Ok).path
     }
 
@@ -40,8 +49,9 @@ class ControlServerSearchQueryTest {
         tvKind: String? = null,
         adult: String? = null,
         page: String? = null,
+        allowedCategories: Set<String> = CrawlerTaxonomy.CATEGORIES.toSet(),
     ): String {
-        val r = build(type, q, category, tvKind, adult, page)
+        val r = build(type, q, category, tvKind, adult, page, allowedCategories)
         return (r as CrawlerQueryResult.Bad).field
     }
 
@@ -144,5 +154,50 @@ class ControlServerSearchQueryTest {
         )) {
             assertEquals("/browse?category=$c", okPath(type = "browse", category = c))
         }
+    }
+
+    // ── the category must also be enabled in the crawler settings ───────────
+
+    @Test fun disabledCategoryIsRejected() {
+        // A category the crawler's `save_categories` filter drops is not
+        // searchable: the server answers bad_request instead of forwarding it.
+        assertEquals("category", badField(
+            type = "browse", category = "comic",
+            allowedCategories = setOf("movie", "tv")))
+    }
+
+    @Test fun enabledCategoryIsAccepted() {
+        assertEquals("/browse?category=movie", okPath(
+            type = "browse", category = "movie",
+            allowedCategories = setOf("movie", "tv")))
+    }
+
+    @Test fun emptyAllowedSetRejectsEveryCategory() {
+        // An empty allowed set can only mean "nothing enabled" here; the route
+        // resolves the stored empty list to the full taxonomy first (see
+        // enabledCategories_*), so no category reaches the crawler unchecked.
+        for (c in CrawlerTaxonomy.CATEGORIES) {
+            assertEquals("category", badField(
+                type = "browse", category = c, allowedCategories = emptySet()))
+        }
+    }
+
+    @Test fun absentCategoryIgnoresTheAllowList() {
+        assertEquals("/browse", okPath(type = "browse", allowedCategories = emptySet()))
+    }
+
+    // ── enabledCategories: stored selection -> allowed set ──────
+
+    @Test fun enabledCategories_emptySelectionMeansAll() {
+        // `save_categories` is empty on a fresh install = "save everything".
+        assertEquals(
+            CrawlerTaxonomy.CATEGORIES.toSet(),
+            ControlServer.enabledCategories(emptyList()))
+    }
+
+    @Test fun enabledCategories_dropsNamesOutsideTheTaxonomy() {
+        assertEquals(
+            setOf("movie", "tv"),
+            ControlServer.enabledCategories(listOf("movie", "porn", "tv", "")))
     }
 }

@@ -1,12 +1,17 @@
 package com.torrent.app
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+import com.torrent.app.config.CrawlerTaxonomy
+
 /**
  * Pure string tests for the /search page shell (search-dashboard stage 3a).
  * The page is a single inline raw string, so these pin its static contract:
+ * the frozen category taxonomy (the chips follow the enabled crawler
+ * categories), the /search/ws feed reference, the spinner
  * the frozen category taxonomy, the /search/ws feed reference, the spinner
  * and randomize controls, the TV/adult control rows, and the
  * no-external-assets rule. Stage 3b's interaction logic (infinite scroll,
@@ -15,7 +20,9 @@ import org.junit.Test
  */
 class ControlServerSearchPageTest {
 
-    private val page = ControlServer.buildSearchPage()
+    /** The page as the /search route renders it with no category filter saved
+     * (an empty `save_categories` means "save everything"). */
+    private val page = ControlServer.buildSearchPage(CrawlerTaxonomy.CATEGORIES.toSet())
 
     @Test fun page_hasAllCategoryChips() {
         for (name in listOf(
@@ -25,6 +32,53 @@ class ControlServerSearchPageTest {
             assertTrue("missing category chip $name", page.contains(name))
         }
         assertTrue(page.contains("id=\"category-grid\""))
+    }
+
+    // ── category chips follow the enabled crawler categories ────────────────
+
+    private val chipRegex = Regex(
+        "<button class=\"chip\" type=\"button\" data-category=\"([^\"]*)\" " +
+            "aria-pressed=\"(true|false)\">([^<]+)</button>")
+
+    /** [html]'s category chips as (data-category, aria-pressed, label). */
+    private fun chipsIn(html: String): List<Triple<String, String, String>> =
+        chipRegex.findAll(html).map { m ->
+            Triple(m.groupValues[1], m.groupValues[2], m.groupValues[3])
+        }.toList()
+
+    @Test fun page_emptyEnabledSetRendersTheWholeTaxonomy() {
+        // An empty stored `save_categories` means "save everything" (the
+        // CrawlerSettings convention), so the page keeps all 12 categories.
+        val chips = chipsIn(ControlServer.buildSearchPage(emptySet()))
+        assertEquals(listOf("") + CrawlerTaxonomy.CATEGORIES, chips.map { it.first })
+        assertTrue("the unknown chip keeps its label",
+            chips.any { it.first == "unknown" && it.third == "Unknown" })
+    }
+
+    @Test fun page_rendersOnlyEnabledCategoryChips() {
+        val html = ControlServer.buildSearchPage(setOf("movie", "tv", "anime", "music"))
+        val chips = chipsIn(html)
+        assertEquals(listOf("", "movie", "tv", "anime", "music"), chips.map { it.first })
+        assertEquals(listOf("All", "Movie", "TV", "Anime", "Music"), chips.map { it.third })
+        for (disabled in listOf(
+            "unknown", "audiobook", "ebook", "comic", "software", "game", "image", "other",
+        )) {
+            assertFalse("disabled category $disabled must not be rendered",
+                html.contains("data-category=\"$disabled\""))
+        }
+    }
+
+    @Test fun page_keepsCanonicalCategoryOrder() {
+        // A scrambled stored selection still renders in taxonomy order.
+        val chips = chipsIn(ControlServer.buildSearchPage(setOf("game", "music", "unknown")))
+        assertEquals(listOf("", "unknown", "music", "game"), chips.map { it.first })
+    }
+
+    @Test fun page_allChipComesFirstAndIsSelected() {
+        val chips = chipsIn(ControlServer.buildSearchPage(setOf("tv")))
+        assertEquals(Triple("", "true", "All"), chips.first())
+        assertEquals(2, chips.size)
+        assertEquals(Triple("tv", "false", "TV"), chips[1])
     }
 
     @Test fun page_pointsAtTheSearchWebSocket() {
