@@ -81,6 +81,8 @@ class ControlServerWebSocketTest {
         val upgraded: Boolean,
         val status: Int,
         val statusLine: String,
+        /** The full handshake response header block (rejections included). */
+        val headers: String,
     ) {
         companion object {
             fun connect(port: Int, path: String): RawWebSocket {
@@ -109,7 +111,7 @@ class ControlServerWebSocketTest {
                 }
                 val statusLine = header.lineSequence().firstOrNull() ?: ""
                 val status = statusLine.substringAfter(" ", "").substringBefore(" ").toIntOrNull() ?: 0
-                return RawWebSocket(socket, input, status == 101, status, statusLine)
+                return RawWebSocket(socket, input, status == 101, status, statusLine, header.toString())
             }
         }
 
@@ -303,11 +305,15 @@ class ControlServerWebSocketTest {
         crawlerPort: Int,
         pushPeriodMs: Long,
         searchReadTimeoutMs: Int = ControlServer.SEARCH_READ_TIMEOUT_MS,
+        // Default: the one crawler daemon whose state follows [crawlerRunning].
+        // Tests that need pid/uptime/restart/log fixtures pass their own list.
+        daemons: List<ProcessStatus> = listOf(
+            ProcessStatus(
+                label = DaemonService.CRAWLER_LABEL,
+                state = if (crawlerRunning) ProcessState.RUNNING else ProcessState.STOPPED,
+            ),
+        ),
     ): LiveServer {
-        val daemon = ProcessStatus(
-            label = DaemonService.CRAWLER_LABEL,
-            state = if (crawlerRunning) ProcessState.RUNNING else ProcessState.STOPPED,
-        )
         val config = AppConfig(
             wizardCompleted = true,
             transmission = TransmissionSettings("u", "p", 51413, 0, 0, 0, 0),
@@ -322,7 +328,7 @@ class ControlServerWebSocketTest {
             ControlServer(
                 tokenManager = tokenManagerWith(token),
                 serviceState = MutableStateFlow(ServiceState.Running),
-                daemonStatuses = { listOf(daemon) },
+                daemonStatuses = { daemons },
                 safStatus = { SafStatus(false, false, null, null) },
                 wifiIp = { null },
                 ftpStatus = { FtpStatus(false, "STOPPED", null, 0, null, 2121, "kodi", null, false) },
@@ -472,18 +478,160 @@ class ControlServerWebSocketTest {
         }
     }
 
+    /**
+     * Webui stage 6: the unauthenticated `/dashboard/ws` upgrade must never
+     * become a live socket. The route interceptor answers 401 before any
+     * handshake, so there is no 101, no `Sec-WebSocket-Accept` and therefore
+     * no way for a frame to reach the client; `requireWsAuth()`
+     * (VIOLATED_POLICY close) is the in-session second line of defence for a
+     * session that ever got past the interceptor. A missing token and a wrong
+     * token must fail identically.
+     */
     @Test fun dashboardWebSocket_withoutToken_rejected() {
         val live = startTestServer(TOKEN, crawlerRunning = false, crawlerPort = 1, pushPeriodMs = 150)
         live.start()
         try {
-            val ws = connectWithRetry(live.port, "/dashboard/ws")
+            for (path in listOf("/dashboard/ws", "/dashboard/ws?token=wrong-token")) {
+                val ws = connectWithRetry(live.port, path)
+                try {
+                    assertFalse("$path must not upgrade: ${ws.statusLine}", ws.upgraded)
+                    assertFalse(
+                        "$path must never answer 101: ${ws.statusLine}",
+                        ws.statusLine.contains(" 101"),
+                    )
+                    assertEquals("$path must be rejected: ${ws.statusLine}", 401, ws.status)
+                    // No handshake acceptance header ⇒ no websocket session ⇒ no frame.
+                    assertFalse(
+                        "$path must not accept the handshake: ${ws.headers}",
+                        ws.headers.contains("Sec-WebSocket-Accept", ignoreCase = true),
+                    )
+                } finally {
+                    ws.close()
+                }
+            }
+        } finally {
+            live.stop()
+        }
+    }
+
+    /**
+     * Webui stage 6: daemon-controlled text survives the pushed frame intact.
+     * A log line carrying `"`, `<`, `&` and a backslash parses back
+     * byte-for-byte, which only `jsonStr` (backslash + quote escaping) can
+     * produce: raw concatenation would end the string at the first quote and
+     * [JSONObject] would throw on the truncated frame.
+     */
+    @Test fun dashboardWebSocket_escapesDaemonTextInFrame() {
+        val nasty = """tx <script>alert(1)</script> & "quoted" \ back"""
+        val daemon = ProcessStatus(
+            label = DaemonService.CRAWLER_LABEL,
+            state = ProcessState.RUNNING,
+            pid = 4242,
+            startTimeMs = System.currentTimeMillis() - 65_000,
+            restartCount = 3,
+            lastLogLines = listOf(nasty),
+        )
+        val live = startTestServer(
+            TOKEN, crawlerRunning = true, crawlerPort = 1, pushPeriodMs = 150,
+            daemons = listOf(daemon),
+        )
+        live.start()
+        try {
+            val ws = connectWithRetry(live.port, "/dashboard/ws?token=$TOKEN")
             try {
-                // No token → the upgrade is rejected (401) before a frame.
+                assertTrue("expected a 101 upgrade, got: ${ws.statusLine}", ws.upgraded)
+                val frame = ws.nextText(10_000)
+                assertTrue("frame did not arrive", frame != null)
+                val entry = JSONObject(frame!!).getJSONArray("daemons").getJSONObject(0)
+                val logs = entry.getJSONArray("logs")
+                assertEquals(1, logs.length())
+                assertEquals("the log line must round-trip unchanged", nasty, logs.getString(0))
+                assertEquals(4242, entry.getInt("pid"))
+                assertEquals(3, entry.getInt("restarts"))
+                // The same two escapes jsonStr applies: backslash first, then quote.
+                val escaped = nasty.replace("\\", "\\\\").replace("\"", "\\\"")
                 assertTrue(
-                    "expected the unauthenticated upgrade to be rejected, got: ${ws.statusLine}",
-                    !ws.upgraded,
+                    "expected the escaped log line in the frame: $frame",
+                    frame.contains(escaped),
                 )
-                assertEquals(401, ws.status)
+            } finally {
+                ws.close()
+            }
+        } finally {
+            live.stop()
+        }
+    }
+
+    /**
+     * Webui stage 6: the exact frame shape the dashboard client patches
+     * against — `service`, `usb`, `wifiUp`, `ftp`, one `daemons[]` entry per
+     * daemon with `label/state/pid/uptime/restarts/logs`, the crawler extras,
+     * and `transmission` left JSON null while no RPC snapshot has landed
+     * (`cachedRpcSummary == null`), so the client keeps the server-rendered
+     * downloads block untouched.
+     */
+    @Test fun dashboardWebSocket_frameCarriesTheDashboardShape() {
+        val daemon = ProcessStatus(
+            label = DaemonService.CRAWLER_LABEL,
+            state = ProcessState.RUNNING,
+            pid = 77,
+            startTimeMs = System.currentTimeMillis() - 65_000,
+            restartCount = 4,
+            lastLogLines = listOf("line one", "line two"),
+        )
+        val live = startTestServer(
+            TOKEN, crawlerRunning = true, crawlerPort = 1, pushPeriodMs = 150,
+            daemons = listOf(daemon),
+        )
+        live.start()
+        try {
+            val ws = connectWithRetry(live.port, "/dashboard/ws?token=$TOKEN")
+            try {
+                assertTrue("expected a 101 upgrade, got: ${ws.statusLine}", ws.upgraded)
+                val frame = ws.nextText(10_000)
+                assertTrue("frame did not arrive", frame != null)
+                val obj = JSONObject(frame!!)
+                // service
+                val service = obj.getJSONObject("service")
+                assertEquals("Running", service.getString("state"))
+                assertFalse(service.getBoolean("rolledBack"))
+                // usb / wifi / ftp
+                val usb = obj.getJSONObject("usb")
+                assertFalse(usb.getBoolean("granted"))
+                assertTrue("no free-space snapshot yet", usb.isNull("freeBytes"))
+                assertFalse(obj.getBoolean("wifiUp"))
+                val ftp = obj.getJSONObject("ftp")
+                for (key in listOf(
+                    "running", "state", "pid", "restarts", "port", "url", "wifiOnly",
+                )) {
+                    assertTrue("ftp is missing $key: $ftp", ftp.has(key))
+                }
+                // daemons[] — every field the client patches
+                val daemons = obj.getJSONArray("daemons")
+                assertEquals(1, daemons.length())
+                val d = daemons.getJSONObject(0)
+                for (key in listOf("label", "state", "pid", "uptime", "restarts", "logs")) {
+                    assertTrue("daemon entry is missing $key: $d", d.has(key))
+                }
+                assertEquals(DaemonService.CRAWLER_LABEL, d.getString("label"))
+                assertEquals("RUNNING", d.getString("state"))
+                assertEquals(77, d.getInt("pid"))
+                assertEquals(4, d.getInt("restarts"))
+                assertTrue(
+                    "uptime must be a server-formatted string, got: ${d.get("uptime")}",
+                    Regex("\\d+m \\d{2}s").containsMatchIn(d.getString("uptime")),
+                )
+                assertEquals(2, d.getJSONArray("logs").length())
+                for (key in listOf(
+                    "dbSize", "internalFree", "internalFreeBytes", "pausedNoWifi", "statsLine",
+                )) {
+                    assertTrue("crawler entry is missing $key: $d", d.has(key))
+                }
+                // No RPC tick has landed, so the snapshot is explicitly null.
+                assertTrue(
+                    "transmission must be null until the RPC ticker lands, got: $frame",
+                    obj.isNull("transmission"),
+                )
             } finally {
                 ws.close()
             }
