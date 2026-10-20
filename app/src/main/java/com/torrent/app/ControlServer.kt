@@ -1988,7 +1988,19 @@ ${adultSelectionRow(adultSelection)}
                   box.appendChild(more);
                 }
               }
-              function imdbQuery(name) { var s = (name == null ? '' : String(name)).replace(/[._]/g, ' '); var parts = s.split(/\s+/); var out = []; for (var i = 0; i < parts.length; i++) { var w = parts[i].replace(/[()\[\]{}]/g, ''); if (w) out.push(w); } return out.join(' '); }
+              var IMDB_CATEGORIES = ['movie', 'tv'];
+              function imdbQuery(r) {
+                // filtered_name is the crawler's extracted media title; never rebuild a
+                // query from the raw release name. A missing/blank value means no usable
+                // title was extractable.
+                if (r == null || r.filtered_name == null) return null;
+                var s = String(r.filtered_name).replace(/\s+/g, ' ').trim();
+                return s.length > 0 ? s : null;
+              }
+              function imdbCategory(r) {
+                return r != null && r.category != null &&
+                  IMDB_CATEGORIES.indexOf(String(r.category)) !== -1;
+              }
 
               function buildCard(r) {
                 var card = document.createElement('div');
@@ -2041,20 +2053,28 @@ ${adultSelectionRow(adultSelection)}
                 var actions = document.createElement('div');
                 actions.className = 'actions';
 
-                var imdbBtn = document.createElement('button');
-                imdbBtn.type = 'button';
-                imdbBtn.className = 'btn imdb-btn';
-                imdbBtn.textContent = 'Search IMDb';
-                imdbBtn.onclick = function () {
-                  var a = document.createElement('a');
-                  a.href = 'https://www.imdb.com/find/?q=' + encodeURIComponent(imdbQuery(r.name));
-                  a.target = '_blank';
-                  a.rel = 'noopener noreferrer';
-                  document.body.appendChild(a);
-                  a.click();
-                  document.body.removeChild(a);
-                };
-                actions.appendChild(imdbBtn);
+                if (imdbCategory(r)) {
+                  var imdbBtn = document.createElement('button');
+                  imdbBtn.type = 'button';
+                  imdbBtn.className = 'btn imdb-btn';
+                  imdbBtn.textContent = 'Search IMDb';
+                  if (imdbQuery(r) == null) {
+                    imdbBtn.disabled = true;
+                    imdbBtn.title = 'No IMDb-searchable title';
+                    imdbBtn.setAttribute('aria-label', 'Search IMDb (unavailable: no searchable title)');
+                  } else {
+                    imdbBtn.onclick = function () {
+                      var a = document.createElement('a');
+                      a.href = 'https://www.imdb.com/find/?q=' + encodeURIComponent(imdbQuery(r));
+                      a.target = '_blank';
+                      a.rel = 'noopener noreferrer';
+                      document.body.appendChild(a);
+                      a.click();
+                      document.body.removeChild(a);
+                    };
+                  }
+                  actions.appendChild(imdbBtn);
+                }
                 var add = document.createElement('button');
                 add.type = 'button';
                 add.className = 'btn add-btn';

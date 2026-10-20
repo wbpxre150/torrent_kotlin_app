@@ -364,24 +364,36 @@ class ControlServerSearchPageTest {
     // ── per-card IMDb search on the search results ──────────────────────────
 
     @Test fun page_hasImdbButton() {
-        // Every result card leads with an IMDb name search: the crawler's search
-        // rows carry no imdb id/year/filtered_name, so the card can only open
-        // IMDb's name search for the tokenized torrent name. The link is opened
-        // through a synthetic anchor (target=_blank, noopener/noreferrer) — no
-        // window.open and no external asset, which page_hasNoExternalAssets pins.
+        // Every movie/tv result card offers an IMDb name search built from the
+        // crawler's extracted media title (filtered_name), never from the raw
+        // release name (1080p/x265/group tags make such a query useless). The
+        // button is gated to the movie and tv categories — anime is excluded by
+        // operator decision, along with every other category — and is disabled
+        // (no raw-name fallback) when no usable title was extracted. The link is
+        // opened through a synthetic anchor (target=_blank, noopener/noreferrer)
+        // — no window.open and no external asset, which page_hasNoExternalAssets
+        // pins.
+        assertTrue(page.contains("var IMDB_CATEGORIES = ['movie', 'tv'];"))
         assertTrue(page.contains("function imdbQuery("))
-        assertTrue("the tokenizer must split dots/underscores into words",
-            page.contains(".replace(/[._]/g, ' ')"))
+        assertTrue("must query the crawler's filtered_name, never the raw name",
+            page.contains("r.filtered_name"))
+        assertTrue(page.contains("function imdbCategory("))
+        assertTrue(page.contains("IMDB_CATEGORIES.indexOf(String(r.category)) !== -1"))
         assertTrue(page.contains("imdbBtn.className = 'btn imdb-btn'"))
         assertTrue(page.contains("imdbBtn.textContent = 'Search IMDb'"))
-        assertTrue(
-            "the button must search IMDb for its own card's name",
-            page.contains(
-                "a.href = 'https://www.imdb.com/find/?q=' + encodeURIComponent(imdbQuery(r.name));"),
-        )
+        assertTrue(page.contains(
+            "a.href = 'https://www.imdb.com/find/?q=' + encodeURIComponent(imdbQuery(r));"))
+        assertTrue("a blank extracted title must disable the button, not fall back",
+            page.contains("imdbBtn.disabled = true"))
+        assertTrue(page.contains("'No IMDb-searchable title'"))
+        assertTrue("the button is only appended for IMDb-searchable categories",
+            page.contains("if (imdbCategory(r)) {"))
+        assertTrue(page.contains("actions.appendChild(imdbBtn)"))
         assertTrue(page.contains("a.target = '_blank'"))
         assertTrue(page.contains("a.rel = 'noopener noreferrer'"))
         assertTrue("missing the .imdb-btn style", page.contains(".imdb-btn{"))
+        assertFalse("the search card must not tokenize the raw release name anymore",
+            page.contains("imdbQuery(r.name)"))
     }
 
     @Test fun js_refreshCallsSameOriginRoute() {
