@@ -96,6 +96,19 @@ class ControlServerTorrentPageTest {
         assertTrue(page.contains("'Failed to load files'"))
     }
 
+    @Test fun js_refreshKeepsTheAbortArmedThroughTheBodyRead() {
+        // Stage 2: the 25 s abort timer must survive the response body read, so a
+        // stalled r.json() still aborts and the button is re-enabled. It is disarmed
+        // only by the terminal handlers (success and catch), never by the header .then.
+        assertFalse(
+            "the header .then must not disarm the abort before the body is read",
+            page.contains("clearTimeout(timer); return r.json();"),
+        )
+        val clears = page.split("clearTimeout(timer)").size - 1
+        assertTrue("expected the timer cleared in the success and catch terminals, found $clears",
+            clears >= 2)
+    }
+
     @Test fun buildTorrentPage_isPureAndDeterministic() {
         // No parameters (hash/token come from location.search), no clock, no
         // config, no network: two calls produce the identical shell.

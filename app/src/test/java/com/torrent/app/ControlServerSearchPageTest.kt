@@ -342,9 +342,9 @@ class ControlServerSearchPageTest {
         val reenables = body.split("btn.disabled = false;").size - 1
         assertTrue("expected the button re-enabled on success and catch, found $reenables",
             reenables >= 2)
-        assertTrue("the catch path must re-enable the button first",
+        assertTrue("the catch path must re-enable the button right after disarming the abort",
             body.contains(
-                ".catch(function () { btn.disabled = false; " +
+                ".catch(function () { clearTimeout(timer); btn.disabled = false; " +
                     "peers.textContent = 'Refresh failed'; toast('Refresh failed', true); });"))
     }
 
@@ -367,6 +367,20 @@ class ControlServerSearchPageTest {
             body.contains("peers.textContent = 'Refreshing\\u2026';"))
         assertTrue("missing the inline failure feedback",
             body.contains("peers.textContent = 'Refresh failed';"))
+    }
+
+    @Test fun js_refreshKeepsTheAbortArmedThroughTheBodyRead() {
+        // Stage 2: the 25 s timer is disarmed only by the terminal handlers. Clearing
+        // it when the headers arrive would leave a stalled r.json() (the body read)
+        // with nothing to abort, so the card button would stay disabled forever.
+        val body = refreshBody()
+        assertFalse(
+            "the header .then must not disarm the abort before the body is read",
+            body.contains("clearTimeout(timer); return r.json();"),
+        )
+        val clears = body.split("clearTimeout(timer)").size - 1
+        assertTrue("expected the timer cleared in the success and catch terminals, found $clears",
+            clears >= 2)
     }
 
     /** The body of the inline handler starting at [marker], up to its closing `};`. */

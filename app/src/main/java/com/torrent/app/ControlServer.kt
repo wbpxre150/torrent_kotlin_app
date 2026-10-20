@@ -2251,8 +2251,9 @@ ${adultSelectionRow(adultSelection)}
                 var ctrl = new AbortController();
                 var timer = setTimeout(function () { ctrl.abort(); }, 25000);
                 fetch('/api/crawler/refresh?hash=' + encodeURIComponent(hash), { signal: ctrl.signal })
-                  .then(function (r) { clearTimeout(timer); return r.json(); })
+                  .then(function (r) { return r.json(); })
                   .then(function (j) {
+                    clearTimeout(timer);
                     btn.disabled = false;
                     if (!j || !j.ok || !j.payload || typeof j.payload.total_peers !== 'number') {
                       peers.textContent = 'Refresh failed';
@@ -2263,7 +2264,7 @@ ${adultSelectionRow(adultSelection)}
                     peers.textContent = n + ' peers';
                     peers.className = 'peers ' + (n > 100 ? 'hi' : (n > 10 ? 'mid' : 'lo'));
                   })
-                  .catch(function () { btn.disabled = false; peers.textContent = 'Refresh failed'; toast('Refresh failed', true); });
+                  .catch(function () { clearTimeout(timer); btn.disabled = false; peers.textContent = 'Refresh failed'; toast('Refresh failed', true); });
               }
 
               function selectOnly(row, chip) {
@@ -2743,8 +2744,9 @@ ${adultSelectionRow(adultSelection)}
                 var ctrl = new AbortController();
                 var timer = setTimeout(function () { ctrl.abort(); }, 25000);
                 fetch('/api/crawler/refresh?hash=' + encodeURIComponent(hash), { signal: ctrl.signal })
-                  .then(function (r) { clearTimeout(timer); return r.json(); })
+                  .then(function (r) { return r.json(); })
                   .then(function (j) {
+                    clearTimeout(timer);
                     var payload = j && j.ok ? j.payload : null;
                     if (payload && typeof payload.total_peers === 'number') {
                       var n = payload.total_peers;
@@ -2755,6 +2757,7 @@ ${adultSelectionRow(adultSelection)}
                     btn.disabled = false;
                   })
                   .catch(function () {
+                    clearTimeout(timer);
                     peersBox.textContent = 'Refresh failed';
                     btn.disabled = false;
                   });
