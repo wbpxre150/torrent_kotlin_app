@@ -17,6 +17,7 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketException
 import java.util.Base64
+import org.json.JSONObject
 import kotlin.random.Random
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.Assert.assertEquals
@@ -423,6 +424,66 @@ class ControlServerWebSocketTest {
                 val first = ws.nextText(10_000)
                 assertTrue("expected the not-running fallback, got: $first", first?.contains("\"running\":false") == true)
                 assertTrue("expected state STOPPED, got: $first", first?.contains("\"state\":\"STOPPED\"") == true)
+            } finally {
+                ws.close()
+            }
+        } finally {
+            live.stop()
+        }
+    }
+
+    @Test fun dashboardWebSocket_withToken_framesApproximatelyEachPeriod() {
+        // Webui stage 1: /dashboard/ws pushes the shared ticker frames the
+        // dashboard patches. Crawler down + no RPC snapshot is the honest
+        // empty state: `transmission` is null until the RPC loop lands, and
+        // the crawler entry still carries its label and a logs array.
+        val live = startTestServer(TOKEN, crawlerRunning = false, crawlerPort = 1, pushPeriodMs = 150)
+        live.start()
+        try {
+            val ws = connectWithRetry(live.port, "/dashboard/ws?token=$TOKEN")
+            try {
+                assertTrue("expected a 101 upgrade, got: ${ws.statusLine}", ws.upgraded)
+                // (a) first frame arrives promptly and carries the daemon list.
+                val first = ws.nextText(10_000)
+                assertTrue("first frame did not arrive", first != null)
+                val obj = JSONObject(first!!)
+                val daemons = obj.getJSONArray("daemons")
+                assertEquals(
+                    DaemonService.CRAWLER_LABEL,
+                    daemons.getJSONObject(0).getString("label"),
+                )
+                assertTrue(
+                    "expected a logs array, got: ${daemons.getJSONObject(0)}",
+                    daemons.getJSONObject(0).getJSONArray("logs") != null,
+                )
+                assertTrue(
+                    "expected transmission to be null until the RPC ticker lands, got: $first",
+                    obj.isNull("transmission"),
+                )
+                // (b) a second frame arrives after ~one short period.
+                val second = ws.nextText(10_000)
+                assertTrue("second frame did not arrive within 10s", second != null)
+                assertTrue("expected a daemons array, got: $second", second!!.contains("\"daemons\""))
+            } finally {
+                ws.close()
+            }
+        } finally {
+            live.stop()
+        }
+    }
+
+    @Test fun dashboardWebSocket_withoutToken_rejected() {
+        val live = startTestServer(TOKEN, crawlerRunning = false, crawlerPort = 1, pushPeriodMs = 150)
+        live.start()
+        try {
+            val ws = connectWithRetry(live.port, "/dashboard/ws")
+            try {
+                // No token → the upgrade is rejected (401) before a frame.
+                assertTrue(
+                    "expected the unauthenticated upgrade to be rejected, got: ${ws.statusLine}",
+                    !ws.upgraded,
+                )
+                assertEquals(401, ws.status)
             } finally {
                 ws.close()
             }

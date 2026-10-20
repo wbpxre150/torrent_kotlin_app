@@ -9,10 +9,17 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import io.ktor.server.websocket.*
 import io.ktor.websocket.*
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.net.URLDecoder
 import java.net.URLEncoder
 import java.util.Base64
@@ -88,6 +95,25 @@ class ControlServer(
     private val addHandler: CrawlerAddHandler? = null,
 ) {
     @Volatile private var server: EmbeddedServer<*, *>? = null
+
+    // ── shared push ticker (webui stage 1) ────────────────────────────────
+    // One scope drives every periodic push loop. start() creates a fresh
+    // scope (so a stop()/start() cycle never reuses a cancelled one) and
+    // stop() cancels it, so no ticker outlives the server.
+    @Volatile private var wsPushScope: CoroutineScope? = null
+    // Slow values cached by the ticker and read by the render-cheap dashboard
+    // frame: transmission RPC (two sequential calls, 3 s timeout each) and the
+    // crawler's loopback /stats must never run on a frame build.
+    @Volatile private var cachedRpcSummary: com.torrent.app.transmission.TransmissionSummary? = null
+    @Volatile private var cachedCrawlerStatsJson: String? = null
+    @Volatile private var cachedCrawlerStatsLine: String? = null
+    // One frame flow per feed: replay keeps the newest frame for a client that
+    // connects between ticks, DROP_OLDEST keeps a slow socket from stalling
+    // the ticker.
+    private val statsFrames = MutableSharedFlow<String>(
+        replay = 1, extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    private val dashboardFrames = MutableSharedFlow<String>(
+        replay = 1, extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
 
     fun start() {
         if (server != null) return
@@ -379,32 +405,35 @@ class ControlServer(
                     }
 
                     // Live stats feed (webui stage 1): the crawler's CivetWeb has no
-                    // websocket support, so the WS terminates here and we poll the
-                    // loopback /stats ourselves. The interceptor above already
-                    // rejected unauthenticated upgrades with 401; the handler
-                    // re-checks the token (same precedence, constant-time via
-                    // TokenManager) and never pushes stats on a bad socket.
+                    // websocket support, so the WS terminates here and the shared
+                    // ticker polls the loopback /stats once per period. The
+                    // interceptor above already rejected unauthenticated upgrades
+                    // with 401; requireWsAuth() re-checks the token (same
+                    // precedence, constant-time via TokenManager) and never pushes
+                    // stats on a bad socket.
                     webSocket("stats/ws") {
-                        // `this` is the DefaultWebSocketServerSession.
-                        val (token, _) = resolveAuthToken(
-                            call.request.headers["Cookie"],
-                            call.request.queryParameters["token"],
-                            call.request.headers["Authorization"],
-                            tokenManager::validate,
-                        )
-                        if (token == null) {
-                            close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, "unauthorized"))
-                            return@webSocket
+                        if (!requireWsAuth()) return@webSocket
+                        try {
+                            statsFrames.collect { frame -> send(Frame.Text(frame)) }
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e // coroutine cancelled (client gone); exit cleanly
+                        } catch (e: Exception) {
+                            // the socket went away; stop pushing
                         }
-                        while (true) {
-                            try {
-                                send(Frame.Text(crawlerStatsPayload()))
-                            } catch (e: kotlinx.coroutines.CancellationException) {
-                                throw e // coroutine cancelled (client gone); exit cleanly
-                            } catch (e: Exception) {
-                                break // the socket went away; stop pushing
-                            }
-                            delay(wsPushPeriodMs)
+                    }
+
+                    // Live dashboard feed (webui stage 1): the same ticker
+                    // mechanism, fed by cheap suppliers plus the cached slow
+                    // snapshots, so a frame never blocks on transmission RPC or
+                    // on the crawler's loopback API.
+                    webSocket("dashboard/ws") {
+                        if (!requireWsAuth()) return@webSocket
+                        try {
+                            dashboardFrames.collect { frame -> send(Frame.Text(frame)) }
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e // coroutine cancelled (client gone); exit cleanly
+                        } catch (e: Exception) {
+                            // the socket went away; stop pushing
                         }
                     }
 
@@ -415,16 +444,7 @@ class ControlServer(
                     // spliced verbatim under key "payload". It never throws on a
                     // malformed frame or a half-open socket.
                     webSocket("search/ws") {
-                        val (token, _) = resolveAuthToken(
-                            call.request.headers["Cookie"],
-                            call.request.queryParameters["token"],
-                            call.request.headers["Authorization"],
-                            tokenManager::validate,
-                        )
-                        if (token == null) {
-                            close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, "unauthorized"))
-                            return@webSocket
-                        }
+                        if (!requireWsAuth()) return@webSocket
                         for (frame in incoming) {
                             if (frame !is Frame.Text) continue
                             // Snapshot the frame text here in the read loop: the
@@ -543,9 +563,102 @@ class ControlServer(
             }
         }
         server?.start(wait = false)
+        startPushTicker()
     }
 
-    fun stop() { server?.stop(1000, 2000); server = null }
+    fun stop() {
+        // Cancel the ticker first: a loop that is mid-fetch must not push into
+        // a server that is going away, and nothing may outlive this call.
+        wsPushScope?.cancel()
+        wsPushScope = null
+        server?.stop(1000, 2000)
+        server = null
+    }
+
+    /**
+     * Webui stage 1: the token check every websocket route shares. The auth
+     * interceptor above already answered 401 for an unauthenticated upgrade;
+     * this is the belt-and-braces re-check on the session itself (same
+     * precedence, constant-time via [TokenManager]). An unauthenticated
+     * session is closed with VIOLATED_POLICY and receives no frame.
+     */
+    private suspend fun DefaultWebSocketServerSession.requireWsAuth(): Boolean {
+        val (token, _) = resolveAuthToken(
+            call.request.headers["Cookie"],
+            call.request.queryParameters["token"],
+            call.request.headers["Authorization"],
+            tokenManager::validate,
+        )
+        if (token == null) {
+            close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, "unauthorized"))
+            return false
+        }
+        return true
+    }
+
+    // ── push ticker (webui stage 1) ──────────────────────────────────────────
+
+    /**
+     * Starts the three periodic push loops in a fresh scope. Each loop runs
+     * through [tickerLoop], so a throwing frame build (a supplier failing, a
+     * malformed crawler body) never kills the ticker.
+     */
+    private fun startPushTicker() {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        wsPushScope = scope
+        // Loop A — dashboard. Cheap suppliers plus the cached slow snapshots
+        // only: transmission RPC and the crawler fetch stay off this path.
+        tickerLoop(scope) { dashboardFrames.emit(dashboardPayload()) }
+        // Loop B — crawler stats. One loopback /stats per period (blocking
+        // HTTP, so off the ticker thread); the raw body and the derived
+        // one-line summary are cached for the dashboard frame.
+        tickerLoop(scope) { refreshCrawlerStats() }
+        // Loop C — transmission RPC snapshot. Two sequential calls with a 3 s
+        // timeout each, so it is cached off-thread and never on a render path.
+        tickerLoop(scope) {
+            cachedRpcSummary = withContext(Dispatchers.IO) {
+                runCatching { rpcSummary() }.getOrNull()
+            }
+        }
+    }
+
+    /**
+     * Runs [body] once per [wsPushPeriodMs] until the scope is cancelled.
+     * A [kotlinx.coroutines.CancellationException] propagates (scope cancel /
+     * shutdown); every other exception is swallowed so the loop keeps its
+     * cadence instead of dying on one bad frame.
+     */
+    private fun tickerLoop(scope: CoroutineScope, body: suspend () -> Unit) {
+        scope.launch {
+            while (true) {
+                try {
+                    body()
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // One bad frame must not stop the feed.
+                }
+                delay(wsPushPeriodMs)
+            }
+        }
+    }
+
+    /**
+     * One crawler-stats tick: fetch the crawler's loopback /stats while the
+     * daemon is RUNNING, cache it, and emit the stats frame (the same body
+     * /api/crawler/stats serves, including the clean not-running fallback).
+     */
+    private suspend fun refreshCrawlerStats() {
+        val crawler = daemonStatuses().firstOrNull { it.label == DaemonService.CRAWLER_LABEL }
+        val raw = if (crawler?.state == ProcessState.RUNNING) {
+            withContext(Dispatchers.IO) { runCatching { fetchCrawlerStats() }.getOrNull() }
+        } else {
+            null
+        }
+        cachedCrawlerStatsJson = raw
+        cachedCrawlerStatsLine = raw?.let { crawlerStatsLine(it) }
+        statsFrames.emit(crawlerStatsJson(cachedCrawlerStatsJson, crawler?.state))
+    }
 
     // ── pages ───────────────────────────────────────────────────────────────
 
@@ -701,6 +814,87 @@ class ControlServer(
         }
     }
 
+    /**
+     * The /dashboard/ws frame body (webui stage 1): everything the dashboard
+     * patches, from cheap suppliers plus the ticker's cached slow snapshots.
+     * Every string goes through [jsonStr] — labels, states and log lines are
+     * daemon-controlled text, so raw concatenation would let one break the
+     * frame. `transmission` is null until the RPC ticker has its first
+     * snapshot and `statsLine` is null until the crawler's /stats answers;
+     * a client leaves the server-rendered value alone on null.
+     */
+    private fun dashboardPayload(): String {
+        val state = serviceState.value
+        val usb = usbFreeSpace()
+        val f = ftpStatus()
+        val daemons = daemonStatuses()
+        val rpc = cachedRpcSummary
+        val ftpUrl = if (f.running && f.ip != null && f.password != null)
+            "ftp://${f.username}:${f.password}@${f.ip}:${f.port}/" else "—"
+        return buildString {
+            append("{\"service\":{\"state\":").append(jsonStr(state.toString()))
+            append(",\"rolledBack\":").append(lastApplyRolledBack()).append("}")
+            append(",\"usb\":{\"granted\":").append(safStatus().granted)
+            append(",\"freeBytes\":").append(usb ?: "null").append("}")
+            append(",\"wifiUp\":").append(f.wifiUp)
+            append(",\"ftp\":{\"running\":").append(f.running)
+            append(",\"state\":").append(jsonStr(f.state))
+            append(",\"pid\":").append(f.pid ?: "null")
+            append(",\"restarts\":").append(f.restartCount)
+            append(",\"port\":").append(f.port)
+            append(",\"url\":").append(jsonStr(ftpUrl))
+            append(",\"wifiOnly\":").append(loadConfig().ftp.wifiOnly).append("}")
+            append(",\"transmission\":")
+            append(if (rpc == null) "null" else transmissionSummaryJson(rpc))
+            append(",\"daemons\":[")
+            append(daemons.joinToString(",") { d ->
+                buildString {
+                    append("{\"label\":").append(jsonStr(d.label))
+                    append(",\"state\":").append(jsonStr(d.state.name))
+                    append(",\"pid\":").append(d.pid ?: "null")
+                    append(",\"uptime\":").append(jsonStr(
+                        d.startTimeMs?.let { formatUptime(System.currentTimeMillis() - it) } ?: "—"))
+                    append(",\"restarts\":").append(d.restartCount)
+                    append(",\"logs\":[")
+                    append(d.lastLogLines.takeLast(30).joinToString(",") { jsonStr(it) })
+                    append("]")
+                    if (d.label == DaemonService.CRAWLER_LABEL) {
+                        val free = internalFreeSpace()
+                        val dbSize = crawlerDbSize()
+                        append(",\"dbSize\":").append(jsonStr(dbSize?.let { formatBytes(it) } ?: "—"))
+                        append(",\"internalFree\":").append(jsonStr(formatBytes(free)))
+                        append(",\"internalFreeBytes\":").append(free)
+                        append(",\"pausedNoWifi\":").append(crawlerPausedNoWifi())
+                        append(",\"statsLine\":").append(jsonStr(cachedCrawlerStatsLine))
+                    }
+                    append("}")
+                }
+            })
+            append("]}")
+        }
+    }
+
+    /**
+     * The one-line crawler summary the dashboard card shows, derived from the
+     * raw loopback /stats body: the same figures the legacy 5 s dashboard poll
+     * rendered (torrents indexed, active trees, summed metadata rate). Null
+     * when the body does not parse, so the card keeps its previous line.
+     */
+    private fun crawlerStatsLine(raw: String): String? = try {
+        val o = JSONObject(raw)
+        val trees = o.optJSONObject("supervisor")?.optInt("active_trees", 0) ?: 0
+        var rate = 0.0
+        o.optJSONArray("trees")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                rate += arr.optJSONObject(i)?.optDouble("metadata_rate", 0.0) ?: 0.0
+            }
+        }
+        "%d torrents, %d active trees, %.1f metadata/s".format(
+            o.optLong("torrents_indexed", 0L), trees, rate)
+    } catch (e: Exception) {
+        null
+    }
+
     private fun ftpStatusSection(): String {
         val f = ftpStatus()
         val url = if (f.running && f.ip != null && f.password != null)
@@ -715,7 +909,16 @@ class ControlServer(
 
     private fun buildDownloadsJson(): String {
         val rpc = rpcSummary() ?: return "{\"reachable\":false}"
-        return buildString {
+        return transmissionSummaryJson(rpc)
+    }
+
+    /**
+     * One [com.torrent.app.transmission.TransmissionSummary] as JSON: the field
+     * shape /downloads has always served, shared with the /dashboard/ws
+     * `transmission` object so the two serializers cannot drift.
+     */
+    private fun transmissionSummaryJson(rpc: com.torrent.app.transmission.TransmissionSummary): String =
+        buildString {
             append("{\"reachable\":true,\"downloadDir\":").append(jsonStr(rpc.downloadDir))
             append(",\"speedLimitDown\":").append(rpc.speedLimitDown)
             append(",\"speedLimitUp\":").append(rpc.speedLimitUp)
@@ -727,7 +930,6 @@ class ControlServer(
             })
             append("]}")
         }
-    }
 
     // ── settings panel builders ───────────────────────────────────────────
 
