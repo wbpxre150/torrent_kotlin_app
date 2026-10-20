@@ -98,6 +98,11 @@ generated on first use by `TokenManager.kt`). Read it from a connected phone:
 `adb shell run-as com.torrent.app cat /data/data/com.torrent.app/shared_prefs/control_auth.xml`
 (then open `http://<phone-ip>:8090/?token=<value>`).
 
+**Transmission RPC credentials (this install):** username `torrent`, password `testtest`
+(wizard-configured; also in SharedPreferences `app_config` keys `tx_username`/`tx_password`).
+Query via `adb forward tcp:9091 tcp:9091` then `curl -u torrent:testtest http://127.0.0.1:9091/transmission/rpc`
+(handle the 409 `X-Transmission-Session-Id` handshake).
+
 ## Native daemons & build wiring
 
 All three native components are cross-compiled for `arm64-v8a` / `android-24` by Gradle tasks in
