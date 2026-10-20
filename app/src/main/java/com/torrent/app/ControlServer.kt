@@ -96,6 +96,13 @@ class ControlServer(
             routing {
                 get("/health") { call.respondText("ok", ContentType.Text.Plain) }
 
+                // Favicon: browsers request /favicon.ico on every page (the
+                // unauthenticated /login included), so it sits outside the auth
+                // block like /health. Without this route every page logs a 404
+                // in the browser console; a tiny embedded PNG keeps the
+                // dashboard's zero-external-assets rule.
+                get("/favicon.ico") { call.respondBytes(FAVICON_PNG, ContentType.Image.PNG) }
+
                 // Login (no auth)
                 get("/login") { call.respondText(buildLoginPage(error = false), ContentType.Text.Html) }
                 post("/login") {
@@ -1412,6 +1419,12 @@ class ControlServer(
         internal fun esc(s: String): String =
             s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 .replace("\"", "&quot;")
+
+        /** 32×32 PNG favicon (blue rounded square, white down-arrow) served
+         * at /favicon.ico. Embedded as Base64 so the dashboard keeps its
+         * zero-external-assets rule (no file assets, no external hosts). */
+        internal val FAVICON_PNG: ByteArray = Base64.getDecoder().decode(
+            "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAABpElEQVRYw+2XTUsCQRjHfzt06RMkdgzq1MfoK4h4iM52CfIbSLf2KqIIIggeg+jUTercIRASPaoVxK4ZW760dtgptLednbb14u+yMPPM8//vzDPLPgafiB/ebgK7QBLYIBzaQA2odM1Yc3bCmBFeBXLAXkiiP1EG0l0z9vxhQIpfh/jGKjuy3TVjz0IO5CIUR2rlAAx55jcRis+yJfAKblHsCrxqXxTJFTTOvnO89uPceuYuSKoNEST6P1gaWBpYGjDih7dTv6Df7r0fft8FpR3YMR+0xFXWKRlo9CZkTweBxLOnAxq9STgGAAp1h9a9f0KA1v2EQt1RilU24E4hVbSVYlNFG9e3sgIaAOhYr+xX+7/G7Ff7dKxX5ZyBr+HJ1QvnjeG3c+eNISdXL4HyaX0HDmqPgcZDN2A7Lom8NTeWyFvYjhuNAYDL1ojShVfppQuHy9ZIK4/A+0XW4ujsae6pQVvgdSxaDMdT1jN3DMeKd+4rNQFUdFeHQEXIXq28APFy14w134swzR9qQYO21PRugWwUtyPaiTKyL4SZ7vidqNvzN4l8kfwbMAKSAAAAAElFTkSuQmCC")
 
         /** One /search/ws query-builder outcome (search-dashboard stage 2). */
         internal sealed interface CrawlerQueryResult {
