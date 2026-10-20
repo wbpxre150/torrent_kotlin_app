@@ -1845,9 +1845,9 @@ ${adultSelectionRow(adultSelection)}
             .peers.hi{color:#188038}
             .peers.mid{color:#b06000}
             .peers.lo{color:#9aa0a6}
-            .actions{display:flex;align-items:center;gap:14px;margin-top:10px}
+            .actions{display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;margin-top:10px}
             .add-btn{min-height:40px;padding:0 16px}
-            .refresh-btn{min-height:40px;padding:0 16px}
+            .refresh-btn{min-height:40px;min-width:40px;padding:0}
             .detail{color:var(--blue);text-decoration:none;font-size:1.1rem;font-weight:700;padding:8px}
         """.trimIndent()
 
@@ -2048,7 +2048,9 @@ ${adultSelectionRow(adultSelection)}
                 var refreshBtn = document.createElement('button');
                 refreshBtn.type = 'button';
                 refreshBtn.className = 'btn refresh-btn';
-                refreshBtn.textContent = '\u21bb Refresh peers';
+                refreshBtn.setAttribute('title', 'Refresh peers');
+                refreshBtn.setAttribute('aria-label', 'Refresh peers');
+                refreshBtn.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg>';
                 refreshBtn.onclick = function () { refreshPeers(r.info_hash, refreshBtn, peers); };
                 actions.appendChild(refreshBtn);
 
@@ -2589,7 +2591,7 @@ ${adultSelectionRow(adultSelection)}
               <div class="btnrow">
                 <button id="imdb-btn" class="btn" type="button">Search IMDb</button>
                 <button id="dht-btn" class="btn secondary" type="button">Search DHT</button>
-                <button id="refresh-btn" class="btn secondary" type="button">&#8635; Refresh peers</button>
+                <button id="refresh-btn" class="btn secondary refresh-btn" type="button" title="Refresh peers" aria-label="Refresh peers"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg></button>
                 <button id="add-btn" class="btn secondary" type="button">&#10133; Add to Transmission</button>
                 <span id="peer-info" class="hint"></span>
               </div>

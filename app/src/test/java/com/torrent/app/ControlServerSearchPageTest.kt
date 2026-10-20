@@ -341,15 +341,24 @@ class ControlServerSearchPageTest {
     @Test fun page_hasRefreshPeersButton() {
         // Every result card carries a peer-refresh button in its actions row,
         // built exactly like the Add button (no inline markup) and wired to the
-        // card's own hash and peers span.
+        // card's own hash and peers span. Its visible text is gone: the button is
+        // an inline SVG glyph whose accessible name lives on title/aria-label.
         assertTrue(page.contains("refreshBtn.type = 'button'"))
         assertTrue(page.contains("refreshBtn.className = 'btn refresh-btn'"))
-        assertTrue(page.contains("refreshBtn.textContent = '\\u21bb Refresh peers'"))
+        assertTrue(page.contains("refreshBtn.setAttribute('title', 'Refresh peers')"))
+        assertTrue(page.contains("refreshBtn.setAttribute('aria-label', 'Refresh peers')"))
+        assertTrue(page.contains("refreshBtn.innerHTML = '<svg viewBox=\"0 0 24 24\""))
+        assertTrue(page.contains("stroke-linejoin=\"round\" aria-hidden=\"true\">"))
+        assertFalse(page.contains("refreshBtn.textContent = '\\u21bb Refresh peers'"))
         assertTrue(
             "the button must refresh its own card",
             page.contains("refreshBtn.onclick = function () { refreshPeers(r.info_hash, refreshBtn, peers); }"),
         )
         assertTrue("missing the .refresh-btn style", page.contains(".refresh-btn{"))
+        assertTrue(
+            "the action row must wrap so the icon buttons keep their size",
+            page.contains(".actions{display:flex;flex-wrap:wrap;"),
+        )
     }
 
     @Test fun js_refreshCallsSameOriginRoute() {

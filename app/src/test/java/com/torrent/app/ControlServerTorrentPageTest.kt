@@ -41,6 +41,13 @@ class ControlServerTorrentPageTest {
         for (id in listOf("imdb-btn", "dht-btn", "refresh-btn", "add-btn")) {
             assertTrue("missing button id $id", page.contains(id))
         }
+        // The refresh button shows an inline SVG glyph only: its accessible name
+        // comes from title/aria-label, and it shares the compact .refresh-btn size.
+        assertTrue(page.contains("class=\"btn secondary refresh-btn\""))
+        assertTrue(page.contains("title=\"Refresh peers\""))
+        assertTrue(page.contains("aria-label=\"Refresh peers\""))
+        assertTrue(page.contains("<svg"))
+        assertFalse(page.contains("&#8635; Refresh peers"))
     }
 
     @Test fun page_hasFileListSentinelAndFilter() {
