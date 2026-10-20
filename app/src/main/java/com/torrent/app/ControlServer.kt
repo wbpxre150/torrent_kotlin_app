@@ -1883,6 +1883,14 @@ ${adultSelectionRow(adultSelection)}
               // ?q= keyword prefill handed over by the /torrent page (torrent-page
               // stage 2); it is applied on the first socket open, not before.
               var prefill = null;
+              // Back-navigation restore (Search -> torrent detail -> Back): the
+              // detail link is a full page navigation, so /search is re-fetched
+              // from scratch on Back. The last result set is mirrored into
+              // sessionStorage (per-tab: survives Back/Forward, dies with the
+              // tab) and repainted on load instead of coming back empty.
+              var SAVE_KEY = 'torrent.search.v1';
+              var resultsAccum = [];
+              var lastQuery = null;
 
               function el(id) { return document.getElementById(id); }
 
@@ -2066,7 +2074,11 @@ ${adultSelectionRow(adultSelection)}
                 var box = el('results');
                 var results = payload.results || [];
                 if (!wasAppend) box.textContent = '';
-                for (var i = 0; i < results.length; i++) box.appendChild(buildCard(results[i]));
+                if (!wasAppend) resultsAccum = [];
+                for (var i = 0; i < results.length; i++) {
+                  resultsAccum.push(results[i]);
+                  box.appendChild(buildCard(results[i]));
+                }
                 // Appended cards can leave the sentinel still intersecting, so no
                 // new IntersectionObserver callback fires and infinite scroll stalls.
                 // Re-observe to force a fresh intersection evaluation.
@@ -2075,6 +2087,10 @@ ${adultSelectionRow(adultSelection)}
                 if (req.type === 'random') {
                   current = null;
                   statusText('Random pick');
+                  lastQuery = {
+                    mode: 'random', q: null, page: 1, has_more: false, statusText: 'Random pick'
+                  };
+                  save();
                   return;
                 }
                 var page = typeof payload.page === 'number' ? payload.page : (req.page || 1);
@@ -2086,6 +2102,12 @@ ${adultSelectionRow(adultSelection)}
                 var txt = n + (n === 1 ? ' result' : ' results');
                 if (req.type === 'search') txt += ' \u00b7 best matches first';
                 statusText(txt);
+                lastQuery = {
+                  mode: req.type === 'search' ? 'search' : 'browse',
+                  q: req.q == null ? null : String(req.q),
+                  page: page, has_more: !!payload.has_more, statusText: txt
+                };
+                save();
               }
 
               // A NEW query bumps activeId; a load-more append reuses it so the
@@ -2120,6 +2142,9 @@ ${adultSelectionRow(adultSelection)}
 
               function loadMore() {
                 if (!current || !current.has_more || loading) return;
+                // A restored list can leave the sentinel visible before the feed
+                // is open; sending then would only flash a "not connected" banner.
+                if (!ws || ws.readyState !== 1) return;
                 var c = current;
                 send({
                   type: c.type, q: c.q, category: c.category, tv_kind: c.tv_kind,
@@ -2183,7 +2208,9 @@ ${adultSelectionRow(adultSelection)}
                     doSearch();
                     return;
                   }
-                  if (!current) statusText('Live \u2014 pick your filters, then Search or Randomize');
+                  // Never overwrite a restored list: a random restore has no
+                  // `current` but must keep its 'Random pick' status line.
+                  if (!current && !restored) statusText('Live \u2014 pick your filters, then Search or Randomize');
                 };
                 ws.onmessage = onMessage;
                 ws.onclose = function () {
@@ -2277,6 +2304,104 @@ ${adultSelectionRow(adultSelection)}
               function clearResults() {
                 el('results').textContent = '';
                 current = null;
+                resultsAccum = [];
+                lastQuery = null;
+                try { sessionStorage.removeItem(SAVE_KEY); } catch (e) {}
+              }
+
+              // ── back-navigation restore ──────────────────────────────────
+              // save()/restore() only repaint: neither one touches the feed, so
+              // returning from /torrent never re-runs the query.
+
+              function save() {
+                try {
+                  sessionStorage.setItem(SAVE_KEY, JSON.stringify({
+                    sel: { category: sel.category, tv_kind: sel.tv_kind, adult: sel.adult },
+                    mode: lastQuery ? lastQuery.mode : null,
+                    q: lastQuery ? lastQuery.q : null,
+                    page: lastQuery ? lastQuery.page : 1,
+                    has_more: lastQuery ? !!lastQuery.has_more : false,
+                    statusText: lastQuery ? lastQuery.statusText : '',
+                    results: resultsAccum
+                  }));
+                } catch (e) {}
+              }
+
+              function restore() {
+                var saved = null;
+                try {
+                  var raw = sessionStorage.getItem(SAVE_KEY);
+                  if (!raw) return false;
+                  saved = JSON.parse(raw);
+                } catch (e) { return false; }
+                if (!saved || typeof saved !== 'object') return false;
+                var list = saved.results || [];
+                if (!list.length) return false;
+                try {
+                  if (saved.sel && typeof saved.sel === 'object') {
+                    sel.category = saved.sel.category == null ? null : String(saved.sel.category);
+                    sel.tv_kind = saved.sel.tv_kind == null ? null : String(saved.sel.tv_kind);
+                    if (saved.sel.adult != null) sel.adult = String(saved.sel.adult);
+                  }
+                  applySel();
+                  var box = el('results');
+                  box.textContent = '';
+                  for (var i = 0; i < list.length; i++) box.appendChild(buildCard(list[i]));
+                  resultsAccum = list;
+                  if (saved.q != null) el('search-input').value = String(saved.q);
+                  lastQuery = {
+                    mode: saved.mode == null ? null : String(saved.mode),
+                    q: saved.q == null ? null : String(saved.q),
+                    page: typeof saved.page === 'number' ? saved.page : 1,
+                    has_more: !!saved.has_more,
+                    statusText: saved.statusText == null ? '' : String(saved.statusText)
+                  };
+                  if (lastQuery.mode === 'search' || lastQuery.mode === 'browse') {
+                    current = {
+                      type: lastQuery.mode, q: lastQuery.q, category: sel.category,
+                      tv_kind: sel.tv_kind, adult: sel.adult, page: lastQuery.page,
+                      has_more: lastQuery.has_more
+                    };
+                  } else {
+                    current = null;
+                  }
+                  if (lastQuery.statusText) statusText(lastQuery.statusText);
+                  return true;
+                } catch (e) { return false; }
+              }
+
+              // Repaint the restored selection onto the visible controls: the
+              // category chip, the TV-kind row (shown for tv/anime only) and,
+              // only when the server rendered it, the adult control.
+              function applySel() {
+                var grid = el('category-grid');
+                if (grid) {
+                  var catChip = grid.querySelector('.chip[data-category="' + (sel.category || '') + '"]');
+                  var allChip = grid.querySelector('.chip[data-category=""]');
+                  if (catChip || allChip) selectOnly(grid, catChip || allChip);
+                }
+                var tvRow = el('tv-kind-row');
+                if (tvRow) {
+                  var showTv = sel.category === 'tv' || sel.category === 'anime';
+                  if (showTv) tvRow.removeAttribute('hidden');
+                  else tvRow.setAttribute('hidden', '');
+                  var kind = showTv && sel.tv_kind ? sel.tv_kind : 'none';
+                  var kindChip = tvRow.querySelector('.chip[data-tv-kind="' + kind + '"]');
+                  if (kindChip) selectOnly(tvRow, kindChip);
+                  revealRow(tvRow);
+                }
+                if (ADULT_SELECTION) {
+                  var adultRow = el('adult-control');
+                  if (adultRow) {
+                    var chips = adultRow.querySelectorAll('.chip');
+                    for (var i = 0; i < chips.length; i++) {
+                      if (chips[i].getAttribute('data-adult') === sel.adult) {
+                        selectOnly(adultRow, chips[i]);
+                        break;
+                      }
+                    }
+                  }
+                }
               }
 
               // Focus mode: pressing a chip selects it and hides its siblings; pressing
@@ -2389,9 +2514,14 @@ ${adultSelectionRow(adultSelection)}
               // search itself waits for the first socket open (send() would bail
               // on a not-yet-open feed).
               var prefillQ = new URLSearchParams(location.search).get('q');
+              // An explicit ?q= hand-off wins over a restored list: it is a new
+              // query from /torrent, not a back-navigation.
+              var restored = false;
               if (prefillQ && prefillQ.trim() !== '') {
                 prefill = prefillQ.trim();
                 el('search-input').value = prefill;
+              } else {
+                restored = restore();
               }
 
               setupObserver();

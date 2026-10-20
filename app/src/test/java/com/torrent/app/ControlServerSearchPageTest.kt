@@ -209,6 +209,36 @@ class ControlServerSearchPageTest {
         assertTrue(page.contains("el('search-input').value = prefill"))
     }
 
+    // ── back-navigation restore ──────────────────────────────────────────────
+
+    @Test fun js_restoresTheLastResultsFromSessionStorage() {
+        // Search → torrent detail → Back is a full page load, so the last result
+        // set is mirrored into sessionStorage (per-tab: survives Back/Forward,
+        // never persisted across tabs or restarts) and repainted on load instead
+        // of the page coming back empty.
+        assertTrue(page.contains("sessionStorage"))
+        assertTrue(page.contains("torrent.search.v1"))
+        assertTrue(page.contains("function restore()"))
+        assertTrue(page.contains("resultsAccum"))
+    }
+
+    @Test fun js_restoreOnlyRepaintsAndNeverRefiresTheQuery() {
+        // restore() re-renders the saved cards through buildCard(); it must not
+        // touch the feed, so doSearch() keeps the page's only sendBrowse();.
+        val start = page.indexOf("function restore()")
+        assertTrue("missing restore()", start >= 0)
+        val end = page.indexOf("function applySel()", start)
+        assertTrue("unterminated restore()", end > start)
+        val body = page.substring(start, end)
+        assertFalse("restore must not send a query", body.contains("send("))
+        assertFalse("restore must not call sendBrowse", body.contains("sendBrowse"))
+        assertTrue("restore must repaint through buildCard", body.contains("buildCard("))
+        assertEquals(
+            "the page keeps exactly one sendBrowse(); call",
+            1, page.split("sendBrowse();").size - 1,
+        )
+    }
+
     @Test fun js_chipControlsDoNotAutoLoad() {
         // webui-ux stage 3: the chip controls only update in-page selection
         // state; results load only on Search (button/Enter) or Randomize.
