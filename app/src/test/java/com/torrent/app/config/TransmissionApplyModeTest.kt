@@ -16,14 +16,24 @@ class TransmissionApplyModeTest {
         dataSubpath = "Dl",
     )
 
-    @Test fun speedOnlyChange_doesNotNeedRestart() {
+    @Test fun speedChange_needsRestart() {
         val a = app()
-        assertFalse(TransmissionApplyMode.needsRestart(a, a.copy(transmission = a.transmission.copy(speedLimitDown = 200))))
+        assertTrue(TransmissionApplyMode.needsRestart(a, a.copy(transmission = a.transmission.copy(speedLimitDown = 200))))
     }
 
-    @Test fun altSpeedChange_doesNotNeedRestart() {
+    @Test fun speedUpChange_needsRestart() {
         val a = app()
-        assertFalse(TransmissionApplyMode.needsRestart(a, a.copy(transmission = a.transmission.copy(altSpeedUp = 99))))
+        assertTrue(TransmissionApplyMode.needsRestart(a, a.copy(transmission = a.transmission.copy(speedLimitUp = 60))))
+    }
+
+    @Test fun altSpeedChange_needsRestart() {
+        val a = app()
+        assertTrue(TransmissionApplyMode.needsRestart(a, a.copy(transmission = a.transmission.copy(altSpeedUp = 99))))
+    }
+
+    @Test fun altSpeedDownChange_needsRestart() {
+        val a = app()
+        assertTrue(TransmissionApplyMode.needsRestart(a, a.copy(transmission = a.transmission.copy(altSpeedDown = 20))))
     }
 
     @Test fun usernameChange_needsRestart() {
