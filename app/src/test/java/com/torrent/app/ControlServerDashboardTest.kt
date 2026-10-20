@@ -258,6 +258,22 @@ class ControlServerDashboardTest {
         assertTrue(script.contains("credentials:'same-origin'"))
     }
 
+    /**
+     * Stage 5: all three live pages ride the one inline shared websocket
+     * client (no per-page proto/backoff copies, no external script).
+     */
+    @Test fun allLivePages_inlineTheSharedWebsocketClient() {
+        val pages = mapOf(
+            "/" to html,
+            "/stats" to ControlServer.buildStatsPage(),
+            "/search" to ControlServer.buildSearchPage(),
+        )
+        for ((route, page) in pages) {
+            assertTrue("$route must inline the shared client", page.contains("connectSocket"))
+            assertTrue("$route must not load an external script", !page.contains("<script src"))
+        }
+    }
+
     @Test fun dashboardScript_neverNavigatesOrRebuildsMarkup() {
         val script = inlineScript(html)
         // Scroll position and card open/closed state survive a push because the

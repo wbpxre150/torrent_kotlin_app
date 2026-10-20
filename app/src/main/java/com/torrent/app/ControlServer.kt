@@ -1967,6 +1967,7 @@ ${adultSelectionRow(adultSelection)}
             </div>
             <script>
             var ADULT_SELECTION = ${if (adultSelection) "true" else "false"};
+            $WEBSOCKET_CLIENT_JS
             $SEARCH_JS
             </script>
             </body>
@@ -2050,11 +2051,11 @@ ${adultSelectionRow(adultSelection)}
          * `location.search` (so a `?token=` in the URL rides along — the
          * `control_token` cookie is sent automatically on the upgrade),
          * `setLive` drives the `#live` chip, `esc` escapes text for reuse, and
-         * `connectSocket(path, handlers)` is the stats page's backoff/reconnect
+         * `connectSocket(path, handlers)` is the shared backoff/reconnect
          * loop: 1 s doubling to 30 s, `onerror` closes so `onclose` always runs.
          *
-         * The dashboard is the only consumer today; stage 5 rewires /stats and
-         * /search onto this module.
+         * All three live pages share it: the dashboard (`/dashboard/ws`), the
+         * crawler stats page (`/stats/ws`) and the search feed (`/search/ws`).
          */
         internal val WEBSOCKET_CLIENT_JS = """
             // ── shared websocket client ────────────────────────────────────
@@ -2082,17 +2083,20 @@ ${adultSelectionRow(adultSelection)}
                   .replace(/'/g, '&#39;');
               }
 
-              // handlers: {onopen, onmessage, onclose(backoff)} — all optional.
+              // handlers: {onopen(ws), onmessage(ev), onclose(backoff)} — all
+              // optional. `onopen` receives the freshly opened socket so a page
+              // that sends requests (the search feed) can hold the live handle
+              // across reconnects.
               function connectSocket(path, handlers) {
                 handlers = handlers || {};
                 var backoff = 1000;
                 var ws = null;
 
-                function open() {
+                function connect() {
                   ws = new WebSocket(wsUrl(path));
                   ws.onopen = function () {
                     backoff = 1000;
-                    if (handlers.onopen) handlers.onopen();
+                    if (handlers.onopen) handlers.onopen(ws);
                   };
                   ws.onmessage = function (ev) {
                     if (handlers.onmessage) handlers.onmessage(ev);
@@ -2101,13 +2105,13 @@ ${adultSelectionRow(adultSelection)}
                     if (handlers.onclose) handlers.onclose(backoff);
                     var wait = backoff;
                     backoff = Math.min(backoff * 2, MAX_BACKOFF);
-                    setTimeout(open, wait);
+                    setTimeout(connect, wait);
                   };
                   ws.onerror = function () { try { ws.close(); } catch (e) {} };
                   return ws;
                 }
 
-                return open();
+                return connect();
               }
 
               return {wsUrl: wsUrl, setLive: setLive, esc: esc, connectSocket: connectSocket};
@@ -2346,9 +2350,9 @@ ${adultSelectionRow(adultSelection)}
         private val SEARCH_JS = """
             (function () {
               'use strict';
+              // The live socket handle, refreshed by the shared client on every
+              // (re)connect; send()/loadMore() write through it.
               var ws = null;
-              var backoff = 1000;
-              var MAX_BACKOFF = 30000;
 
               var sel = { category: null, tv_kind: null, adult: 'hide' };
               var current = null;
@@ -2705,40 +2709,38 @@ ${adultSelectionRow(adultSelection)}
                 }
               }
 
+              // The socket (URL, capped backoff, reconnect) is the shared client.
+              // This page keeps its own setLive: its #live is a coloured dot
+              // (`#live.on` / `#live.wait`) with a title, not the stats page's
+              // text chip the shared helper writes.
               function connect() {
-                var proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
-                // Same-origin upgrade: the control_token cookie rides along and
-                // a ?token= in the page URL does too. Never inline the token.
-                ws = new WebSocket(proto + location.host + '/search/ws' + location.search);
-                ws.onopen = function () {
-                  backoff = 1000;
-                  setLive('ok', 'live');
-                  hideBanner();
-                  setLoading(false);
-                  // ?q= prefill (torrent-page stage 2): /torrent links here with
-                  // the selected keywords. Run the same search the Search button
-                  // runs, but only now that the feed can accept it.
-                  if (prefill) {
-                    var q = prefill;
-                    prefill = null;
-                    el('search-input').value = q;
-                    doSearch();
-                    return;
+                WS.connectSocket('/search/ws', {
+                  onopen: function (sock) {
+                    ws = sock;
+                    setLive('ok', 'live');
+                    hideBanner();
+                    setLoading(false);
+                    // ?q= prefill (torrent-page stage 2): /torrent links here with
+                    // the selected keywords. Run the same search the Search button
+                    // runs, but only now that the feed can accept it.
+                    if (prefill) {
+                      var q = prefill;
+                      prefill = null;
+                      el('search-input').value = q;
+                      doSearch();
+                      return;
+                    }
+                    // Never overwrite a restored list: a random restore has no
+                    // `current` but must keep its 'Random pick' status line.
+                    if (!current && !restored) statusText('Live \u2014 pick your filters, then Search or Randomize');
+                  },
+                  onmessage: onMessage,
+                  onclose: function () {
+                    setLive('wait', 'reconnecting');
+                    setLoading(false);
+                    showBanner('amber', 'Connecting\u2026 (search feed unavailable)');
                   }
-                  // Never overwrite a restored list: a random restore has no
-                  // `current` but must keep its 'Random pick' status line.
-                  if (!current && !restored) statusText('Live \u2014 pick your filters, then Search or Randomize');
-                };
-                ws.onmessage = onMessage;
-                ws.onclose = function () {
-                  setLive('wait', 'reconnecting');
-                  setLoading(false);
-                  showBanner('amber', 'Connecting\u2026 (search feed unavailable)');
-                  var wait = backoff;
-                  backoff = Math.min(backoff * 2, MAX_BACKOFF);
-                  setTimeout(connect, wait);
-                };
-                ws.onerror = function () { try { ws.close(); } catch (e) {} };
+                });
               }
 
               function setupObserver() {
@@ -3530,10 +3532,8 @@ ${adultSelectionRow(adultSelection)}
             <div id="banner" class="banner stop">Waiting for the first stats push…</div>
             <div id="tree"></div>
             <script>
+            $WEBSOCKET_CLIENT_JS
             (function () {
-              var ws = null;
-              var backoff = 1000;
-              var MAX_BACKOFF = 30000;
               var lastData = null;
               var lastFrameAt = null;
               // Explicit expand/collapse choices keyed by a stable section
@@ -3543,41 +3543,26 @@ ${adultSelectionRow(adultSelection)}
 
               function el(id) { return document.getElementById(id); }
 
-              function setLive(ok, label) {
-                var s = el('live');
-                s.textContent = label;
-                s.className = 'live ' + (ok ? 'ok' : 'bad');
-              }
-
+              // The socket (URL, capped backoff, reconnect, live chip) is the
+              // shared client; this page owns only its frame handling and its
+              // render() below. openOverrides survives every re-render.
               function connect() {
-                var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-                // Same-origin upgrade: the control_token cookie is sent
-                // automatically; a ?token= in the page URL rides along too.
-                ws = new WebSocket(proto + '//' + location.host + '/stats/ws' + location.search);
-                ws.onopen = function () {
-                  backoff = 1000;
-                  setLive(true, 'live');
-                };
-                ws.onmessage = function (ev) {
-                  var data = null;
-                  try { data = JSON.parse(ev.data); } catch (e) { return; }
-                  lastData = data;
-                  lastFrameAt = new Date();
-                  render();
-                };
-                ws.onclose = function () {
-                  setLive(false, 'reconnecting in ' + Math.round(backoff / 1000) + 's…');
-                  var wait = backoff;
-                  backoff = Math.min(backoff * 2, MAX_BACKOFF);
-                  setTimeout(connect, wait);
-                };
-                ws.onerror = function () { try { ws.close(); } catch (e) {} };
-              }
-
-              function esc(s) {
-                var d = document.createElement('div');
-                d.textContent = s;
-                return d.innerHTML;
+                WS.connectSocket('/stats/ws', {
+                  onopen: function () {
+                    WS.setLive('ok', 'live');
+                  },
+                  onmessage: function (ev) {
+                    var data = null;
+                    try { data = JSON.parse(ev.data); } catch (e) { return; }
+                    lastData = data;
+                    lastFrameAt = new Date();
+                    render();
+                  },
+                  onclose: function (backoff) {
+                    WS.setLive('bad',
+                        'reconnecting in ' + Math.round(backoff / 1000) + 's…');
+                  }
+                });
               }
 
               function fmtScalar(v) {
@@ -3600,8 +3585,8 @@ ${adultSelectionRow(adultSelection)}
               }
 
               function rowHtml(key, value) {
-                return '<div class="row"><span class="k">' + esc(String(key)) + '</span>' +
-                    '<span class="v">' + esc(fmtScalar(value)) + '</span></div>';
+                return '<div class="row"><span class="k">' + WS.esc(String(key)) + '</span>' +
+                    '<span class="v">' + WS.esc(fmtScalar(value)) + '</span></div>';
               }
 
               function itemTitle(parentKey, item, index) {
@@ -3617,8 +3602,8 @@ ${adultSelectionRow(adultSelection)}
 
               function sectionNode(title, value, path, depth) {
                 var open = isOpen(path, depth);
-                var html = '<section><div class="head" data-path="' + esc(path) + '">' +
-                    '<span class="tri">' + (open ? '\u25be' : '\u25b8') + '</span>' + esc(title) + '</div>';
+                var html = '<section><div class="head" data-path="' + WS.esc(path) + '">' +
+                    '<span class="tri">' + (open ? '\u25be' : '\u25b8') + '</span>' + WS.esc(title) + '</div>';
                 if (open) {
                   html += '<div class="body">' + childrenHtml(
                       value, path, depth, Array.isArray(value) ? title : null) + '</div>';
