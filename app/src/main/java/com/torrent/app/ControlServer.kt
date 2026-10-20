@@ -2652,6 +2652,7 @@ ${adultSelectionRow(adultSelection)}
               var fileQuery = '';
               var filterTimer = null;
               var toastTimer = null;
+              var fileGen = 0;
 
               function el(id) { return document.getElementById(id); }
 
@@ -2806,12 +2807,14 @@ ${adultSelectionRow(adultSelection)}
               function loadFiles() {
                 if (fileLoading || !fileHasMore) return;
                 fileLoading = true;
+                var gen = fileGen;
                 var url = '/api/crawler/torrent/files?hash=' + encodeURIComponent(hash) +
                   '&offset=' + fileOffset + '&limit=' + FILE_BATCH;
                 if (fileQuery) url += '&q=' + encodeURIComponent(fileQuery);
                 fetch(url)
                   .then(function (r) { return r.json(); })
                   .then(function (j) {
+                    if (gen !== fileGen) return;  // a reset replaced this request; drop the stale response
                     fileLoading = false;
                     if (!j || !j.ok) { fileHasMore = false; setSentinel('Failed to load files'); return; }
                     var payload = j.payload || {};
@@ -2835,6 +2838,7 @@ ${adultSelectionRow(adultSelection)}
                     setSentinel(fileHasMore ? 'Scroll for more\u2026' : 'No more files (' + total + ' total)');
                   })
                   .catch(function () {
+                    if (gen !== fileGen) return;
                     fileLoading = false;
                     fileHasMore = false;
                     setSentinel('Failed to load files');
@@ -2842,6 +2846,8 @@ ${adultSelectionRow(adultSelection)}
               }
 
               function resetFiles() {
+                fileGen++;
+                fileLoading = false;
                 fileOffset = 0;
                 fileHasMore = true;
                 el('file-list').textContent = '';
