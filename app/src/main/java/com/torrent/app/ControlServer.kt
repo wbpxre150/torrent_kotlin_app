@@ -244,11 +244,15 @@ class ControlServer(
                             transmission = s,
                             dataSubpath = form["dataSubpath"] ?: currentCfg.dataSubpath,
                         )
-                        val liveOnly = !TransmissionApplyMode.needsRestart(currentCfg, newCfg)
-                        val r = applyTransmission(newCfg, liveOnly)
                         val token = parseCookieToken(call.request.headers["Cookie"]) ?: call.request.queryParameters["token"] ?: ""
-                        val mode = if (liveOnly) "no change" else "restart"
-                        call.respondRedirect("/settings/transmission?msg=${urlEnc(r.message + " ($mode)")}&ok=${r.ok}&token=$token")
+                        val unchanged = !TransmissionApplyMode.needsRestart(currentCfg, newCfg)
+                        if (unchanged) {
+                            // Config is identical: nothing to persist and nothing to restart.
+                            call.respondRedirect("/settings/transmission?msg=${urlEnc("no changes")}&ok=true&token=$token")
+                        } else {
+                            val r = applyTransmission(newCfg, false)
+                            call.respondRedirect("/settings/transmission?msg=${urlEnc(r.message + " (restart)")}&ok=${r.ok}&token=$token")
+                        }
                     }
 
                     get("settings/ftp") {
