@@ -696,8 +696,9 @@ class ControlServer(
      * Every value the dashboard websocket client patches carries a stable hook —
      * `data-daemon` on the card, `data-field` on the value cell, `data-log-for`
      * on the log pane, `data-toggle` on the head — and is rendered here with a
-     * server-side initial value, so a pushed frame that has no fresh snapshot
-     * yet (`transmission`, `statsLine`) can leave it untouched.
+     * server-side initial value. Every slow value on this page comes from the
+     * ticker's cached snapshot ([cachedRpcSummary]), never from a blocking
+     * loopback RPC, so a wedged transmission daemon cannot stall the render.
      *
      * `internal` so the unit tests can pin the markup without a live server.
      */
@@ -706,7 +707,7 @@ class ControlServer(
         val daemons = daemonStatuses()
         val cfg = loadConfig()
         val usb = usbFreeSpace()
-        val rpc = rpcSummary()
+        val rpc = cachedRpcSummary
         val ftp = ftpStatus()
         val now = System.currentTimeMillis()
 
@@ -909,9 +910,9 @@ class ControlServer(
      * patches, from cheap suppliers plus the ticker's cached slow snapshots.
      * Every string goes through [jsonStr] — labels, states and log lines are
      * daemon-controlled text, so raw concatenation would let one break the
-     * frame. `transmission` is null until the RPC ticker has its first
-     * snapshot and `statsLine` is null until the crawler's /stats answers;
-     * a client leaves the server-rendered value alone on null.
+     * frame. `transmission` is always a slim object (reachability plus the
+     * scalars the client patches), and `statsLine` is null until the crawler's
+     * /stats answers; a client leaves the server-rendered value alone on null.
      */
     private fun dashboardPayload(): String {
         val state = serviceState.value
@@ -934,8 +935,7 @@ class ControlServer(
             append(",\"port\":").append(f.port)
             append(",\"url\":").append(jsonStr(ftpUrl))
             append(",\"wifiOnly\":").append(loadConfig().ftp.wifiOnly).append("}")
-            append(",\"transmission\":")
-            append(if (rpc == null) "null" else transmissionSummaryJson(rpc))
+            append(",\"transmission\":").append(transmissionScalarsJson(rpc))
             append(",\"daemons\":[")
             append(daemons.joinToString(",") { d ->
                 buildString {
@@ -1008,6 +1008,23 @@ class ControlServer(
             })
             append("]}")
         }
+
+    /**
+     * The slim `transmission` object every /dashboard/ws frame carries: only the
+     * scalars the client patches (`reachable`, download dir, speed limits). The
+     * torrent array stays server-rendered, so a push never ships it (and a
+     * wedged RPC cannot make a frame expensive); `reachable:false` is what lets
+     * the client re-show its `rpcUnreachable` banner after a later outage.
+     */
+    private fun transmissionScalarsJson(
+        rpc: com.torrent.app.transmission.TransmissionSummary?,
+    ): String = buildString {
+        append("{\"reachable\":").append(rpc != null)
+        append(",\"downloadDir\":").append(jsonStr(rpc?.downloadDir))
+        append(",\"speedLimitUp\":").append(rpc?.speedLimitUp?.toString() ?: "null")
+        append(",\"speedLimitDown\":").append(rpc?.speedLimitDown?.toString() ?: "null")
+        append("}")
+    }
 
     // ── settings panel builders ───────────────────────────────────────────
 
@@ -2233,16 +2250,23 @@ ${adultSelectionRow(adultSelection)}
                 }
 
                 // Transmission scalars come from the ticker's cached RPC
-                // snapshot; null = not fetched yet, so the rendered values and
-                // the unreachable banner stay as they are.
+                // snapshot and are always present: `reachable` false means the
+                // last RPC refresh failed, so the banner comes back on and the
+                // values blank out (a later recovery clears them again).
                 var tx = f.transmission;
                 if (tx) {
                   var red = field('rpcUnreachable');
-                  if (red && red.hidden !== true) red.hidden = true;
-                  patchText(field('downloadDir'), tx.downloadDir);
-                  patchText(field('limits'),
-                    '↓' + tx.speedLimitDown + ' ↑' + tx.speedLimitUp +
-                    ' KB/s (0 = unlimited)');
+                  if (tx.reachable) {
+                    if (red) red.hidden = true;
+                    patchText(field('downloadDir'), tx.downloadDir);
+                    patchText(field('limits'),
+                      '↓' + tx.speedLimitDown + ' ↑' + tx.speedLimitUp +
+                      ' KB/s (0 = unlimited)');
+                  } else {
+                    if (red) red.hidden = false;
+                    patchText(field('downloadDir'), '—');
+                    patchText(field('limits'), '—');
+                  }
                 }
 
                 if (f.ftp) {

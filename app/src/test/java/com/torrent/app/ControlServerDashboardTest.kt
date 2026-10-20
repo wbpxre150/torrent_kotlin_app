@@ -10,6 +10,7 @@ import com.torrent.app.config.FtpSettings
 import com.torrent.app.config.TransmissionSettings
 import com.torrent.app.ftp.FtpStatus
 import com.torrent.app.storage.SafStatus
+import com.torrent.app.transmission.TransmissionSummary
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -53,6 +54,7 @@ class ControlServerDashboardTest {
     private fun newServer(
         daemons: List<ProcessStatus> = defaultDaemons(),
         rolledBack: Boolean = false,
+        rpcSummary: () -> TransmissionSummary? = { null },
     ): ControlServer {
         val config = AppConfig(
             wizardCompleted = true,
@@ -74,7 +76,7 @@ class ControlServerDashboardTest {
             },
             loadConfig = { config },
             wizardCompleted = { true },
-            rpcSummary = { null },
+            rpcSummary = rpcSummary,
             usbFreeSpace = { null },
             lastApplyRolledBack = { rolledBack },
             restartDaemon = { false },
@@ -212,6 +214,37 @@ class ControlServerDashboardTest {
         val rolledBack = newServer(rolledBack = true).buildDashboard()
         assertFalse(rolledBack.contains("id=\"rollback-banner\" class=\"warn\" hidden"))
         assertTrue(rolledBack.contains("id=\"rollback-banner\" class=\"warn\""))
+    }
+
+    /**
+     * Webui stage 7 (fixes the false exit-criterion-8 mechanism): the `GET /`
+     * render path must never call the transmission RPC — the extras come from
+     * the ticker's cached snapshot, so a wedged (not crashed) daemon cannot
+     * stall the page behind two 3 s loopback calls. With no snapshot yet the
+     * card shows the unreachable banner and `—` values, which is exactly what
+     * the first pushed frame then confirms (no flicker).
+     */
+    @Test fun dashboardRenderDoesNotCallRpcSummary() {
+        val page = newServer(
+            rpcSummary = { throw AssertionError("GET / must not hit RPC") },
+        ).buildDashboard()
+        val tx = card(page, DaemonService.TRANSMISSION_LABEL)
+        assertTrue(
+            "the unreachable banner must be visible without a snapshot",
+            tx.contains("data-field=\"rpcUnreachable\">Transmission RPC not reachable."),
+        )
+        assertFalse(
+            "the banner must not be hidden when the cache is empty",
+            tx.contains("data-field=\"rpcUnreachable\" hidden"),
+        )
+        assertTrue(
+            "limits must render as an em dash without a snapshot",
+            tx.contains("data-field=\"limits\">—</span>"),
+        )
+        assertTrue(
+            "the download dir must render as an em dash without a snapshot",
+            tx.contains("data-field=\"downloadDir\">—</code>"),
+        )
     }
 
     @Test fun dashboardCss_hasTheCardAndLogRules() {

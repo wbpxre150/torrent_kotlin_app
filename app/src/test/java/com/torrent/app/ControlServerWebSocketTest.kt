@@ -441,8 +441,9 @@ class ControlServerWebSocketTest {
     @Test fun dashboardWebSocket_withToken_framesApproximatelyEachPeriod() {
         // Webui stage 1: /dashboard/ws pushes the shared ticker frames the
         // dashboard patches. Crawler down + no RPC snapshot is the honest
-        // empty state: `transmission` is null until the RPC loop lands, and
-        // the crawler entry still carries its label and a logs array.
+        // empty state: `transmission` is always an object, unreachable until
+        // the RPC loop lands, and the crawler entry still carries its label and
+        // a logs array.
         val live = startTestServer(TOKEN, crawlerRunning = false, crawlerPort = 1, pushPeriodMs = 150)
         live.start()
         try {
@@ -462,9 +463,10 @@ class ControlServerWebSocketTest {
                     "expected a logs array, got: ${daemons.getJSONObject(0)}",
                     daemons.getJSONObject(0).getJSONArray("logs") != null,
                 )
-                assertTrue(
-                    "expected transmission to be null until the RPC ticker lands, got: $first",
-                    obj.isNull("transmission"),
+                val tx = obj.getJSONObject("transmission")
+                assertFalse(
+                    "expected reachable:false until the RPC ticker lands, got: $tx",
+                    tx.getBoolean("reachable"),
                 )
                 // (b) a second frame arrives after ~one short period.
                 val second = ws.nextText(10_000)
@@ -566,9 +568,9 @@ class ControlServerWebSocketTest {
      * Webui stage 6: the exact frame shape the dashboard client patches
      * against — `service`, `usb`, `wifiUp`, `ftp`, one `daemons[]` entry per
      * daemon with `label/state/pid/uptime/restarts/logs`, the crawler extras,
-     * and `transmission` left JSON null while no RPC snapshot has landed
-     * (`cachedRpcSummary == null`), so the client keeps the server-rendered
-     * downloads block untouched.
+     * and the slim `transmission` object with `reachable:false` plus null
+     * scalars while no RPC snapshot has landed (`cachedRpcSummary == null`), so
+     * the client keeps the server-rendered downloads block untouched.
      */
     @Test fun dashboardWebSocket_frameCarriesTheDashboardShape() {
         val daemon = ProcessStatus(
@@ -627,11 +629,19 @@ class ControlServerWebSocketTest {
                 )) {
                     assertTrue("crawler entry is missing $key: $d", d.has(key))
                 }
-                // No RPC tick has landed, so the snapshot is explicitly null.
-                assertTrue(
-                    "transmission must be null until the RPC ticker lands, got: $frame",
-                    obj.isNull("transmission"),
+                // No RPC tick has landed: the slim transmission object is
+                // always present but reports unreachable with null scalars.
+                val tx = obj.getJSONObject("transmission")
+                assertFalse(
+                    "transmission must report unreachable until the RPC ticker lands, got: $frame",
+                    tx.getBoolean("reachable"),
                 )
+                for (key in listOf("downloadDir", "speedLimitUp", "speedLimitDown")) {
+                    assertTrue(
+                        "$key must be null without an RPC snapshot: $tx",
+                        tx.isNull(key),
+                    )
+                }
             } finally {
                 ws.close()
             }
