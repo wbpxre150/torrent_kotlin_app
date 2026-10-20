@@ -224,4 +224,49 @@ class ControlServerDashboardTest {
         // Card buttons use the shared 44px .btn: the 36px table override is gone.
         assertFalse(html.contains(".actions .btn{"))
     }
+
+    /** The one inline `<script>` of the dashboard (there is no external one). */
+    private fun inlineScript(page: String): String {
+        assertFalse("the dashboard must not load external scripts", page.contains("<script src"))
+        val start = page.lastIndexOf("<script>")
+        assertTrue("the dashboard must inline its live client", start >= 0)
+        val end = page.indexOf("</script>", start)
+        assertTrue("the inline script is not closed", end > start)
+        return page.substring(start, end)
+    }
+
+    @Test fun dashboardScript_connectsTheDashboardSocketOverTheSharedClient() {
+        val script = inlineScript(html)
+        // One socket URL, and it carries the page's query string so the
+        // ?token= (and the control_token cookie) reach the upgrade.
+        assertEquals("exactly one /dashboard/ws URL", 1, count(html, "/dashboard/ws"))
+        assertTrue("the ws URL must ride location.search", script.contains("location.search"))
+        assertTrue("the shared client marker is missing", script.contains("connectSocket"))
+        assertTrue(script.contains("wsUrl("))
+        assertTrue(script.contains("setLive("))
+        assertTrue("the log writer hook is missing", script.contains("patchLogs("))
+        // Surgical patching only: the value/class/attribute writers are there.
+        assertTrue(script.contains("patchText("))
+        assertTrue(script.contains("patchState("))
+        assertTrue(script.contains(".textContent"))
+        // Collapse and action-form delegation.
+        assertTrue("the collapse handler is missing", script.contains(".daemon-head[data-toggle]"))
+        assertTrue(script.contains("preventDefault()"))
+        assertTrue(script.contains("redirect:'manual'"))
+        assertTrue(script.contains("credentials:'same-origin'"))
+    }
+
+    @Test fun dashboardScript_neverNavigatesOrRebuildsMarkup() {
+        val script = inlineScript(html)
+        // Scroll position and card open/closed state survive a push because the
+        // script neither navigates nor replaces any section.
+        for (forbidden in listOf("location.reload", "location.href")) {
+            assertFalse("$forbidden must not appear in the dashboard script",
+                script.contains(forbidden))
+        }
+        assertTrue(
+            "innerHTML assignment must not appear in the dashboard script",
+            Regex("innerHTML\\s*=").find(script) == null
+        )
+    }
 }

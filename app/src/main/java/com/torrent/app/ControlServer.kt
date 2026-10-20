@@ -764,6 +764,10 @@ class ControlServer(
             <h2>USB Storage</h2>
             $usbSection
             </div>
+            <script>
+            $WEBSOCKET_CLIENT_JS
+            $DASHBOARD_JS
+            </script>
             </body></html>
         """.trimIndent()
     }
@@ -2038,6 +2042,239 @@ ${adultSelectionRow(adultSelection)}
             .state.STOPPING{background:#f8d7da;color:#721c24}
             .state.STOPPED{background:#e2e3e5;color:#383d41}
             .banner.ok{background:#e6f4ea;color:#137333}
+        """.trimIndent()
+
+        /**
+         * The shared WebUI websocket client (webui stage 3): `wsUrl` builds a
+         * same-origin ws/wss URL from `location.host` plus the page's
+         * `location.search` (so a `?token=` in the URL rides along — the
+         * `control_token` cookie is sent automatically on the upgrade),
+         * `setLive` drives the `#live` chip, `esc` escapes text for reuse, and
+         * `connectSocket(path, handlers)` is the stats page's backoff/reconnect
+         * loop: 1 s doubling to 30 s, `onerror` closes so `onclose` always runs.
+         *
+         * The dashboard is the only consumer today; stage 5 rewires /stats and
+         * /search onto this module.
+         */
+        internal val WEBSOCKET_CLIENT_JS = """
+            // ── shared websocket client ────────────────────────────────────
+            var WS = (function () {
+              var MAX_BACKOFF = 30000;
+
+              function wsUrl(path) {
+                var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+                return proto + '//' + location.host + path + location.search;
+              }
+
+              function setLive(state, label) {
+                var s = document.getElementById('live');
+                if (!s) return;
+                s.textContent = label;
+                s.className = 'live ' + state;
+              }
+
+              function esc(s) {
+                return String(s === null || s === undefined ? '' : s)
+                  .replace(/&/g, '&amp;')
+                  .replace(/</g, '&lt;')
+                  .replace(/>/g, '&gt;')
+                  .replace(/"/g, '&quot;')
+                  .replace(/'/g, '&#39;');
+              }
+
+              // handlers: {onopen, onmessage, onclose(backoff)} — all optional.
+              function connectSocket(path, handlers) {
+                handlers = handlers || {};
+                var backoff = 1000;
+                var ws = null;
+
+                function open() {
+                  ws = new WebSocket(wsUrl(path));
+                  ws.onopen = function () {
+                    backoff = 1000;
+                    if (handlers.onopen) handlers.onopen();
+                  };
+                  ws.onmessage = function (ev) {
+                    if (handlers.onmessage) handlers.onmessage(ev);
+                  };
+                  ws.onclose = function () {
+                    if (handlers.onclose) handlers.onclose(backoff);
+                    var wait = backoff;
+                    backoff = Math.min(backoff * 2, MAX_BACKOFF);
+                    setTimeout(open, wait);
+                  };
+                  ws.onerror = function () { try { ws.close(); } catch (e) {} };
+                  return ws;
+                }
+
+                return open();
+              }
+
+              return {wsUrl: wsUrl, setLive: setLive, esc: esc, connectSocket: connectSocket};
+            })();
+        """.trimIndent()
+
+        /**
+         * The dashboard live client (webui stage 3). It patches the
+         * server-rendered markup in place — `.textContent`, classes and
+         * attributes only — so scroll position and each card's open/closed
+         * state survive every push by construction: the card shell is never
+         * rebuilt and the page never navigates.
+         *
+         * A `null` value in a frame means "no fresh snapshot yet", so the
+         * server-rendered value is left untouched (transmission, statsLine on
+         * the first frames). Logs go through [patchLogs], the single writer
+         * stage 4 refines into the tail-follow variant.
+         */
+        internal val DASHBOARD_JS = """
+            (function () {
+              function el(id) { return document.getElementById(id); }
+
+              // Write only when the value actually changed, and never treat
+              // null/undefined as a value: the first frames carry null for the
+              // slow snapshots and must not blank the rendered cell.
+              function patchText(node, v) {
+                if (!node || v === null || v === undefined) return;
+                var s = String(v);
+                if (node.textContent !== s) node.textContent = s;
+              }
+
+              // State chips are styled by class, labelled by text.
+              function patchState(node, state) {
+                if (!node || !state) return;
+                var cls = 'state ' + state;
+                if (node.className !== cls) node.className = cls;
+              }
+
+              // The non-per-daemon `data-field` hooks are unique on the page
+              // (downloadDir, limits, ftpUrl, statsLine, …).
+              function field(name) {
+                return document.querySelector('[data-field="' + name + '"]');
+              }
+
+              // The per-daemon ones (state/pid/uptime/restarts/extras) are
+              // scoped to their card through data-daemon.
+              function card(label) {
+                var all = document.querySelectorAll('[data-daemon]');
+                for (var i = 0; i < all.length; i++) {
+                  if (all[i].getAttribute('data-daemon') === label) return all[i];
+                }
+                return null;
+              }
+
+              function fieldIn(scope, name) {
+                if (!scope) return null;
+                return scope.querySelector('[data-field="' + name + '"]');
+              }
+
+              // The only log writer. Stage 4 replaces this body with the
+              // tail-follow writer (a data-logsig signature plus a
+              // scroll-position hold); a plain textContent write is already
+              // correct and never uses innerHTML.
+              function patchLogs(pre, lines) {
+                if (!pre || !lines) return;
+                var text = lines.join('\n');
+                if (pre.textContent !== text) pre.textContent = text;
+              }
+
+              function applyFrame(ev) {
+                var f = null;
+                try { f = JSON.parse(ev.data); } catch (e) { return; }
+                if (!f) return;
+
+                if (f.service) {
+                  patchState(el('service-state'), f.service.state);
+                  patchText(el('service-state'), f.service.state);
+                  var banner = el('rollback-banner');
+                  if (banner) {
+                    var hide = !f.service.rolledBack;
+                    if (banner.hidden !== hide) banner.hidden = hide;
+                  }
+                }
+
+                var daemons = f.daemons || [];
+                for (var i = 0; i < daemons.length; i++) {
+                  var d = daemons[i];
+                  var section = card(d.label);
+                  if (!section) continue;
+                  patchState(fieldIn(section, 'state'), d.state);
+                  patchText(fieldIn(section, 'state'), d.state);
+                  patchText(fieldIn(section, 'pid'),
+                    d.pid === null || d.pid === undefined ? '—' : d.pid);
+                  patchText(fieldIn(section, 'uptime'), d.uptime);
+                  patchText(fieldIn(section, 'restarts'), d.restarts);
+                  // Crawler-only extras: absent for the other daemons, and
+                  // statsLine is null until the crawler's /stats answers.
+                  patchText(fieldIn(section, 'dbSize'), d.dbSize);
+                  patchText(fieldIn(section, 'internalFree'), d.internalFree);
+                  patchText(fieldIn(section, 'statsLine'), d.statsLine);
+                  // The paused badge only exists while paused: show/hide it
+                  // instead of building any markup.
+                  var paused = fieldIn(section, 'pausedNoWifi');
+                  if (paused && typeof d.pausedNoWifi === 'boolean') {
+                    paused.style.display = d.pausedNoWifi ? '' : 'none';
+                  }
+                  patchLogs(section.querySelector('[data-log-for]'), d.logs);
+                }
+
+                // Transmission scalars come from the ticker's cached RPC
+                // snapshot; null = not fetched yet, so the rendered values and
+                // the unreachable banner stay as they are.
+                var tx = f.transmission;
+                if (tx) {
+                  var red = field('rpcUnreachable');
+                  if (red && red.hidden !== true) red.hidden = true;
+                  patchText(field('downloadDir'), tx.downloadDir);
+                  patchText(field('limits'),
+                    '↓' + tx.speedLimitDown + ' ↑' + tx.speedLimitUp +
+                    ' KB/s (0 = unlimited)');
+                }
+
+                if (f.ftp) {
+                  patchText(field('ftpUrl'), f.ftp.url);
+                  patchText(field('ftpPort'), f.ftp.port);
+                }
+                if (typeof f.wifiUp === 'boolean') {
+                  patchText(field('wifiUp'), f.wifiUp ? 'up' : 'down');
+                }
+              }
+
+              // One delegated click on the head toggles the sibling body. The
+              // shell is never rebuilt, so a card's open/closed state survives
+              // every push by construction.
+              document.addEventListener('click', function (ev) {
+                var head = ev.target && ev.target.closest
+                  ? ev.target.closest('.daemon-head[data-toggle]') : null;
+                if (!head) return;
+                var body = head.parentNode
+                  ? head.parentNode.querySelector('.daemon-body') : null;
+                if (!body) return;
+                body.hidden = !body.hidden;
+                var tri = head.querySelector('.tri');
+                if (tri) tri.textContent = body.hidden ? '▸' : '▾';
+              });
+
+              // The control forms stay real POSTs (they work with JS disabled).
+              // With JS we POST via fetch so the page does not navigate; the
+              // next push reflects the new state.
+              document.addEventListener('submit', function (ev) {
+                var form = ev.target;
+                if (!form || !form.classList ||
+                    !form.classList.contains('daemon-actions')) return;
+                ev.preventDefault();
+                fetch(form.action, {method:'POST',credentials:'same-origin',redirect:'manual'})
+                  .catch(function () {});
+              });
+
+              WS.connectSocket('/dashboard/ws', {
+                onopen: function () { WS.setLive('on', 'live'); },
+                onmessage: applyFrame,
+                onclose: function (backoff) {
+                  WS.setLive('wait',
+                    'reconnecting in ' + Math.round(backoff / 1000) + 's…');
+                }
+              });
+            })();
         """.trimIndent()
 
         /**
