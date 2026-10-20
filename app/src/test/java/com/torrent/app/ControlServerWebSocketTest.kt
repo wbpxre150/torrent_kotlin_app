@@ -8,6 +8,7 @@ import com.torrent.app.config.CrawlerSettings
 import com.torrent.app.config.FtpSettings
 import com.torrent.app.config.TransmissionSettings
 import com.torrent.app.ftp.FtpStatus
+import com.torrent.app.transmission.TransmissionSummary
 import com.torrent.app.storage.SafStatus
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
@@ -313,6 +314,9 @@ class ControlServerWebSocketTest {
                 state = if (crawlerRunning) ProcessState.RUNNING else ProcessState.STOPPED,
             ),
         ),
+        // Default: no RPC snapshot, so `transmission.reachable` stays false.
+        // Tests that exercise the reachable branch pass a fake summary.
+        rpc: TransmissionSummary? = null,
     ): LiveServer {
         val config = AppConfig(
             wizardCompleted = true,
@@ -334,7 +338,7 @@ class ControlServerWebSocketTest {
                 ftpStatus = { FtpStatus(false, "STOPPED", null, 0, null, 2121, "kodi", null, false) },
                 loadConfig = { config },
                 wizardCompleted = { true },
-                rpcSummary = { null },
+                rpcSummary = { rpc },
                 usbFreeSpace = { null },
                 lastApplyRolledBack = { false },
                 restartDaemon = { false },
@@ -453,6 +457,7 @@ class ControlServerWebSocketTest {
                 // (a) first frame arrives promptly and carries the daemon list.
                 val first = ws.nextText(10_000)
                 assertTrue("first frame did not arrive", first != null)
+                val t1 = System.currentTimeMillis()
                 val obj = JSONObject(first!!)
                 val daemons = obj.getJSONArray("daemons")
                 assertEquals(
@@ -470,8 +475,71 @@ class ControlServerWebSocketTest {
                 )
                 // (b) a second frame arrives after ~one short period.
                 val second = ws.nextText(10_000)
-                assertTrue("second frame did not arrive within 10s", second != null)
+                val t2 = System.currentTimeMillis()
                 assertTrue("expected a daemons array, got: $second", second!!.contains("\"daemons\""))
+                // (c) the interval really is the push period: with
+                // wsPushPeriodMs = 150 a regression to seconds (e.g. 5s) would
+                // still satisfy "a second frame within 10s". 1000ms is a
+                // generous, CI-safe bound on a loaded machine.
+                assertTrue(
+                    "second frame came ${t2 - t1}ms after the first, expected ~150ms (<=1000ms)",
+                    t2 - t1 <= 1_000,
+                )
+            } finally {
+                ws.close()
+            }
+        } finally {
+            live.stop()
+        }
+    }
+
+    /**
+     * Corrective stage 10: the reachable-RPC branch of the slim `transmission`
+     * object. With a non-null RPC snapshot the frame must report
+     * `reachable:true` and carry the download dir plus both speed limits the
+     * client patches into the transmission card. The other tests only ever
+     * exercise the `cachedRpcSummary == null` (unreachable) branch.
+     */
+    @Test fun dashboardWebSocket_reachableTransmissionFrame() {
+        val summary = TransmissionSummary(
+            downloadDir = "/saf/usb/data/torrents",
+            speedLimitDown = 500,
+            speedLimitUp = 125,
+            torrents = emptyList(),
+        )
+        val live = startTestServer(
+            TOKEN, crawlerRunning = false, crawlerPort = 1, pushPeriodMs = 150,
+            rpc = summary,
+        )
+        live.start()
+        try {
+            val ws = connectWithRetry(live.port, "/dashboard/ws?token=$TOKEN")
+            try {
+                assertTrue("expected a 101 upgrade, got: ${ws.statusLine}", ws.upgraded)
+                // The snapshot lands on its own ticker loop, so the first frame
+                // may still be the honest empty state; wait for the frame that
+                // carries it, bounded by the same 10s budget the other
+                // websocket tests use.
+                val deadline = System.currentTimeMillis() + 10_000
+                var reached: JSONObject? = null
+                while (reached == null && System.currentTimeMillis() < deadline) {
+                    val frame = ws.nextText(10_000)
+                    assertTrue("frame did not arrive", frame != null)
+                    val candidate = JSONObject(frame!!).getJSONObject("transmission")
+                    if (candidate.getBoolean("reachable")) reached = candidate
+                }
+                val tx = reached ?: throw AssertionError(
+                    "no dashboard frame reported a reachable transmission within 10s",
+                )
+                assertFalse(
+                    "downloadDir must be present once RPC is reachable: $tx",
+                    tx.isNull("downloadDir"),
+                )
+                assertEquals("/saf/usb/data/torrents", tx.getString("downloadDir"))
+                assertFalse("speedLimitUp must be present: $tx", tx.isNull("speedLimitUp"))
+                assertFalse("speedLimitDown must be present: $tx", tx.isNull("speedLimitDown"))
+                assertEquals(125, tx.getInt("speedLimitUp"))
+                assertEquals(500, tx.getInt("speedLimitDown"))
             } finally {
                 ws.close()
             }
