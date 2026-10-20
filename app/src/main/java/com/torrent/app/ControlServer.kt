@@ -2167,14 +2167,25 @@ ${adultSelectionRow(adultSelection)}
                 return scope.querySelector('[data-field="' + name + '"]');
               }
 
-              // The only log writer. Stage 4 replaces this body with the
-              // tail-follow writer (a data-logsig signature plus a
-              // scroll-position hold); a plain textContent write is already
-              // correct and never uses innerHTML.
+              // The only log writer: tail-follow with a position hold.
+              // A cheap signature of the tail (line count, length, last 80
+              // chars) gates every write, so a push repeating an unchanged
+              // tail costs one getAttribute and no DOM write, no reflow and
+              // no scroll touch. When the tail did change, the pane follows
+              // it only if the user was already at the bottom; otherwise the
+              // position is held. Only pre.scrollTop is ever written, never
+              // the page scroll.
               function patchLogs(pre, lines) {
                 if (!pre || !lines) return;
                 var text = lines.join('\n');
-                if (pre.textContent !== text) pre.textContent = text;
+                var sig = lines.length + ':' + text.length + ':' + text.slice(-80);
+                if (pre.getAttribute('data-logsig') === sig) return;
+                var wasAtBottom =
+                  pre.scrollHeight - pre.scrollTop - pre.clientHeight < 8;
+                // textContent, never innerHTML: log lines are plain text.
+                pre.textContent = text;
+                pre.setAttribute('data-logsig', sig);
+                if (wasAtBottom) pre.scrollTop = pre.scrollHeight;
               }
 
               function applyFrame(ev) {

@@ -221,6 +221,8 @@ class ControlServerDashboardTest {
         assertTrue(html.contains(".row .k{"))
         assertTrue(html.contains(".row .v{"))
         assertTrue(html.contains(".daemon-log{overflow:auto}"))
+        // The shared `pre` cap keeps a 30-line tail from growing the page.
+        assertTrue(html.contains("max-height:200px"))
         // Card buttons use the shared 44px .btn: the 36px table override is gone.
         assertFalse(html.contains(".actions .btn{"))
     }
@@ -268,5 +270,31 @@ class ControlServerDashboardTest {
             "innerHTML assignment must not appear in the dashboard script",
             Regex("innerHTML\\s*=").find(script) == null
         )
+    }
+
+    @Test fun dashboardScript_tailFollowsLogsAndHoldsTheScrollPosition() {
+        val script = inlineScript(html)
+        // The writer measures the pane's scroll box to decide whether the user
+        // is already at the bottom before it writes anything.
+        for (metric in listOf("scrollHeight", "scrollTop", "clientHeight")) {
+            assertTrue("the log writer must read $metric", script.contains(metric))
+        }
+        // A cheap signature of the tail gates the write: an unchanged tail
+        // (the common case, a 10 s push repeating the same lines) costs no DOM
+        // write and no scroll touch, and the gate runs before the write.
+        assertTrue("the log signature hook is missing", script.contains("data-logsig"))
+        assertTrue(
+            "the signature check must precede the log write",
+            script.indexOf("data-logsig") < script.indexOf("pre.textContent"),
+        )
+        // Logs are plain text: one textContent writer, no markup rebuild.
+        assertTrue("logs must be written via textContent", script.contains("pre.textContent"))
+        // Only the pane's own scrollTop may be written; the page must never be
+        // scrolled and the pane must never be scrolled into view.
+        val pageScroll = listOf("scrollIntoView", "window.scrollY", "document.scrollingElement")
+        for (forbidden in pageScroll) {
+            assertFalse("$forbidden must not appear in the dashboard script",
+                script.contains(forbidden))
+        }
     }
 }
