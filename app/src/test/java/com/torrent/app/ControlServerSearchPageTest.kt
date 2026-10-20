@@ -227,7 +227,7 @@ class ControlServerSearchPageTest {
         // touch the feed, so doSearch() keeps the page's only sendBrowse();.
         val start = page.indexOf("function restore()")
         assertTrue("missing restore()", start >= 0)
-        val end = page.indexOf("function applySel()", start)
+        val end = page.indexOf("function applySel(", start)
         assertTrue("unterminated restore()", end > start)
         val body = page.substring(start, end)
         assertFalse("restore must not send a query", body.contains("send("))
@@ -237,6 +237,22 @@ class ControlServerSearchPageTest {
             "the page keeps exactly one sendBrowse(); call",
             1, page.split("sendBrowse();").size - 1,
         )
+    }
+
+    @Test fun js_restoreReappliesFocusModeHiding() {
+        // Focus mode (pressed chip hides its siblings) must survive Back: save()
+        // mirrors each row's focus state into the payload and applySel() re-hides
+        // the siblings of the pressed chip instead of revealing the whole row.
+        assertTrue("save must mirror the focus state", page.contains("focus: { category:"))
+        assertTrue("restore must hand the saved focus to applySel", page.contains("applySel(saved.focus"))
+        val start = page.indexOf("function applySel(focus) {")
+        assertTrue("missing applySel(focus)", start >= 0)
+        val end = page.indexOf("if (ADULT_SELECTION) {", start)
+        assertTrue("unterminated applySel()", end > start)
+        val body = page.substring(start, end)
+        assertTrue("applySel must re-hide focused category chips", body.contains("focusRow(grid)"))
+        assertTrue("applySel must reveal unfocused rows", body.contains("revealRow(grid)"))
+        assertTrue("applySel must re-hide focused tv-kind chips", body.contains("focusRow(tvRow)"))
     }
 
     @Test fun js_chipControlsDoNotAutoLoad() {

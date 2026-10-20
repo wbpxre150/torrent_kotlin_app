@@ -2312,11 +2312,32 @@ ${adultSelectionRow(adultSelection)}
               // ── back-navigation restore ──────────────────────────────────
               // save()/restore() only repaint: neither one touches the feed, so
               // returning from /torrent never re-runs the query.
+              // True when a row is in focus mode: a chip was pressed and its
+              // siblings are hidden (see chipFocus below). Mirrored into the
+              // saved payload so Back restores the same control layout.
+              function rowFocused(row) {
+                if (!row) return false;
+                var chips = row.querySelectorAll('.chip');
+                for (var i = 0; i < chips.length; i++) {
+                  if (chips[i].classList.contains('hidden')) return true;
+                }
+                return false;
+              }
+
+              // Hide every chip in a row except the pressed one (focus mode).
+              function focusRow(row) {
+                var chips = row.querySelectorAll('.chip');
+                for (var i = 0; i < chips.length; i++) {
+                  if (chips[i].getAttribute('aria-pressed') === 'true') chips[i].classList.remove('hidden');
+                  else chips[i].classList.add('hidden');
+                }
+              }
 
               function save() {
                 try {
                   sessionStorage.setItem(SAVE_KEY, JSON.stringify({
                     sel: { category: sel.category, tv_kind: sel.tv_kind, adult: sel.adult },
+                    focus: { category: rowFocused(el('category-grid')), tv_kind: rowFocused(el('tv-kind-row')) },
                     mode: lastQuery ? lastQuery.mode : null,
                     q: lastQuery ? lastQuery.q : null,
                     page: lastQuery ? lastQuery.page : 1,
@@ -2343,7 +2364,7 @@ ${adultSelectionRow(adultSelection)}
                     sel.tv_kind = saved.sel.tv_kind == null ? null : String(saved.sel.tv_kind);
                     if (saved.sel.adult != null) sel.adult = String(saved.sel.adult);
                   }
-                  applySel();
+                  applySel(saved.focus && typeof saved.focus === 'object' ? saved.focus : null);
                   var box = el('results');
                   box.textContent = '';
                   for (var i = 0; i < list.length; i++) box.appendChild(buildCard(list[i]));
@@ -2373,12 +2394,15 @@ ${adultSelectionRow(adultSelection)}
               // Repaint the restored selection onto the visible controls: the
               // category chip, the TV-kind row (shown for tv/anime only) and,
               // only when the server rendered it, the adult control.
-              function applySel() {
+              function applySel(focus) {
                 var grid = el('category-grid');
                 if (grid) {
                   var catChip = grid.querySelector('.chip[data-category="' + (sel.category || '') + '"]');
                   var allChip = grid.querySelector('.chip[data-category=""]');
                   if (catChip || allChip) selectOnly(grid, catChip || allChip);
+                  // Re-apply focus mode (pressed chip visible, siblings hidden)
+                  // so Back returns to the exact control layout it left behind.
+                  if (focus && focus.category) focusRow(grid); else revealRow(grid);
                 }
                 var tvRow = el('tv-kind-row');
                 if (tvRow) {
@@ -2388,7 +2412,7 @@ ${adultSelectionRow(adultSelection)}
                   var kind = showTv && sel.tv_kind ? sel.tv_kind : 'none';
                   var kindChip = tvRow.querySelector('.chip[data-tv-kind="' + kind + '"]');
                   if (kindChip) selectOnly(tvRow, kindChip);
-                  revealRow(tvRow);
+                  if (showTv && focus && focus.tv_kind) focusRow(tvRow); else revealRow(tvRow);
                 }
                 if (ADULT_SELECTION) {
                   var adultRow = el('adult-control');
