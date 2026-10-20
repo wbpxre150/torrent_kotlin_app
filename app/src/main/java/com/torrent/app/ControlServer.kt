@@ -688,67 +688,40 @@ class ControlServer(
         <p class="meta">The token is shown in the Android app's main screen.</p></div></body></html>
     """.trimIndent()
 
-    private fun buildDashboard(): String {
+    /**
+     * The dashboard page (webui stage 2): one collapsible card per daemon in
+     * [daemonStatuses] order, replacing the old six-column daemons table and the
+     * standalone DHT-crawler / FTP sections (the crawler used to render twice).
+     *
+     * Every value the dashboard websocket client patches carries a stable hook —
+     * `data-daemon` on the card, `data-field` on the value cell, `data-log-for`
+     * on the log pane, `data-toggle` on the head — and is rendered here with a
+     * server-side initial value, so a pushed frame that has no fresh snapshot
+     * yet (`transmission`, `statsLine`) can leave it untouched.
+     *
+     * `internal` so the unit tests can pin the markup without a live server.
+     */
+    internal fun buildDashboard(): String {
         val state = serviceState.value
         val daemons = daemonStatuses()
         val cfg = loadConfig()
         val usb = usbFreeSpace()
         val rpc = rpcSummary()
+        val ftp = ftpStatus()
+        val now = System.currentTimeMillis()
 
-        val daemonRows = if (daemons.isEmpty()) {
-            "<tr><td colspan=\"6\"><em>No daemons configured.</em></td></tr>"
-        } else daemons.joinToString("\n") { d ->
-            val now = System.currentTimeMillis()
-            val uptime = if (d.startTimeMs != null) formatUptime(now - d.startTimeMs) else "—"
-            val logs = d.lastLogLines.takeLast(30).joinToString("<br>") {
-                it.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            }
-            val escapedLabel = d.label.replace("\"", "&quot;")
-            """
-            <tr>
-              <td><strong>${d.label}</strong></td>
-              <td><span class="state ${d.state}">${d.state}</span></td>
-              <td>${d.pid ?: "—"}</td><td>$uptime</td><td>${d.restartCount}</td>
-              <td class="actions">
-                <form method="post" action="/daemon/$escapedLabel/start"><button class="btn">Start</button></form>
-                <form method="post" action="/daemon/$escapedLabel/stop"><button class="btn">Stop</button></form>
-                <form method="post" action="/daemon/$escapedLabel/restart"><button class="btn">Restart</button></form>
-              </td>
-            </tr>
-            <tr><td colspan="6"><pre class="loglines">$logs</pre></td></tr>
-            """.trimIndent()
+        val daemonCards = if (daemons.isEmpty()) {
+            """<p class="meta"><em>No daemons configured.</em></p>"""
+        } else {
+            daemons.joinToString("\n") { daemonCard(it, now, rpc, cfg, ftp) }
         }
 
-        val rollbackBanner = if (lastApplyRolledBack())
-            """<div class="warn">Transmission config was rolled back after a crash-loop. Review settings.</div>"""
-        else ""
+        val rollbackHidden = if (lastApplyRolledBack()) "" else " hidden"
 
         val usbSection = buildString {
             append("<p class=\"meta\">Granted: <strong>").append(safStatus().granted).append("</strong>")
             append(" &nbsp; Free: <strong>").append(usb?.let { formatBytes(it) } ?: "unknown").append("</strong></p>")
         }
-
-        val downloadsSection = if (rpc == null) {
-            "<p class=\"meta\">Transmission RPC not reachable.</p>"
-        } else {
-            buildString {
-                append("<table class=\"tx\"><tr><th>Name</th><th>Done</th><th>Down</th><th>Up</th><th>Size</th></tr>")
-                if (rpc.torrents.isEmpty()) append("<tr><td colspan=\"5\"><em>No torrents.</em></td></tr>")
-                for (t in rpc.torrents) {
-                    append("<tr><td>").append(esc(t.name)).append("</td>")
-                    append("<td>").append("%.0f%%".format(t.percentDone * 100)).append("</td>")
-                    append("<td>").append(formatRate(t.rateDownload)).append("</td>")
-                    append("<td>").append(formatRate(t.rateUpload)).append("</td>")
-                    append("<td>").append(formatBytes(t.sizeWhenDone)).append("</td></tr>")
-                }
-                append("</table>")
-                append("<p class=\"meta\">Download dir: <code>").append(esc(rpc.downloadDir)).append("</code>")
-                append(" &nbsp; Limits: ↓").append(rpc.speedLimitDown).append(" ↑").append(rpc.speedLimitUp)
-                append(" KB/s (0 = unlimited)</p>")
-            }
-        }
-
-        val txLink = "http://${wifiIp() ?: "127.0.0.1"}:9091/"
 
         return """
             <!DOCTYPE html><html><head><title>Torrent App — Control</title>
@@ -756,15 +729,28 @@ class ControlServer(
             <style>$WEBUI_CSS
               h2{margin:1.5em 0 .4em}
               .tx td+td{overflow-wrap:normal}
-              .actions{white-space:nowrap}
-              .actions form{display:inline;margin:0}
-              .actions .btn{min-height:36px;min-width:0;padding:0 10px;font-size:.8rem;margin:0 2px;border-radius:18px}
+              #live{width:auto;height:auto;padding:2px 8px;border-radius:10px;font-size:.85em;font-weight:600}
+              #live.on{background:#e6f4ea;color:#137333}
+              #live.wait{background:#fef7e0;color:#7a5900}
               a.cfg{display:inline-block;margin:.5em .5em .5em 0;padding:.4em .8em;background:var(--card);border-radius:8px;text-decoration:none;border:1px solid #dadce0;color:var(--blue);font-weight:600}
               .warn{background:#f8d7da;color:#721c24;padding:.6em;border-radius:8px;margin:1em 0}
+              .daemon-card{margin:0 0 .75em}
+              .daemon-head{display:flex;align-items:center;gap:.5em;cursor:pointer;user-select:none;font-weight:600}
+              .daemon-head .tri{display:inline-block;width:1.2em;color:var(--blue)}
+              .daemon-head .dname{flex:1 1 auto}
+              .daemon-body{padding:.25em 0 0}
+              .daemon-body[hidden]{display:none}
+              .row{display:flex;gap:.5em;padding:.15em 0;font-size:.95em}
+              .row .k{color:var(--muted);min-width:11em;flex-shrink:0}
+              .row .v{overflow-wrap:anywhere;color:var(--text)}
+              .daemon-actions{display:inline;margin:0}
+              .daemon-actions .btn{margin:0 .35em .35em 0}
+              .daemon-log{overflow:auto}
             </style></head><body>
             <div class="wrap wide">
             <header><h1>Torrent App Control</h1><nav><a href="/">Dashboard</a><a href="/stats">Crawler stats</a><a href="/search">Search</a></nav></header>
-            <p class="meta">Service: <span class="state $state">$state</span>$rollbackBanner</p>
+            <p class="meta">Service: <span id="service-state" class="state $state">$state</span> <span id="live" class="live wait">connecting…</span></p>
+            <div id="rollback-banner" class="warn"$rollbackHidden>Transmission config was rolled back after a crash-loop. Review settings.</div>
             <p>
               <a class="cfg" href="/settings/transmission">Transmission settings</a>
               <a class="cfg" href="/settings/ftp">FTP settings</a>
@@ -774,20 +760,120 @@ class ControlServer(
               <a class="cfg" href="/search">Search</a>
             </p>
             <h2>Daemons</h2>
-            <table><tr><th>Name</th><th>State</th><th>PID</th><th>Uptime</th><th>Restarts</th><th>Control</th></tr>
-            $daemonRows</table>
-            <h2>Transmission</h2>
-            <p class="meta">RPC: <a href="$txLink">$txLink</a> (user: ${esc(cfg.transmission.username)})</p>
-            $downloadsSection
+            $daemonCards
             <h2>USB Storage</h2>
             $usbSection
-            <h2>FTP Server (wifi only)</h2>
-            ${ftpStatusSection()}
-            <h2>DHT Crawler</h2>
-            ${crawlerSection()}
             </div>
             </body></html>
         """.trimIndent()
+    }
+
+    /**
+     * One daemon card. The shell is never rebuilt by a push, so a card's
+     * open/closed state survives the 10 s frames by construction; the folded
+     * extras are label/value rows (`data-field`) so the client patches a single
+     * cell instead of a section.
+     */
+    private fun daemonCard(
+        d: ProcessStatus,
+        now: Long,
+        rpc: com.torrent.app.transmission.TransmissionSummary?,
+        cfg: com.torrent.app.config.AppConfig,
+        ftp: com.torrent.app.ftp.FtpStatus,
+    ): String {
+        // Label goes into an attribute (data-daemon / form action) and the
+        // title text, so it is escaped once and used verbatim.
+        val label = esc(d.label)
+        val uptime = d.startTimeMs?.let { formatUptime(now - it) } ?: "—"
+        val logs = d.lastLogLines.takeLast(30).joinToString("<br>") { esc(it) }
+        val pausedBadge = if (d.label == DaemonService.CRAWLER_LABEL && crawlerPausedNoWifi())
+            "<span class=\"state STOPPED\" data-field=\"pausedNoWifi\">paused: no wifi</span>" else ""
+        val extras = when (d.label) {
+            DaemonService.TRANSMISSION_LABEL -> transmissionExtras(rpc, cfg)
+            DaemonService.CRAWLER_LABEL -> crawlerExtras()
+            DaemonService.FTP_LABEL -> ftpExtras(ftp)
+            else -> emptyList()
+        }
+        return """
+            <section class="card daemon-card" data-daemon="$label">
+              <div class="daemon-head" data-toggle><span class="tri">▾</span><span class="dname">$label</span><span class="state ${d.state}" data-field="state">${d.state}</span>$pausedBadge</div>
+              <div class="daemon-body">
+                <div class="row"><span class="k">PID</span><span class="v" data-field="pid">${d.pid ?: "—"}</span></div>
+                <div class="row"><span class="k">Uptime</span><span class="v" data-field="uptime">$uptime</span></div>
+                <div class="row"><span class="k">Restarts</span><span class="v" data-field="restarts">${d.restartCount}</span></div>
+                ${extras.joinToString("\n                ")}
+                <form class="daemon-actions" method="post" action="/daemon/$label/start"><button class="btn">Start</button></form>
+                <form class="daemon-actions" method="post" action="/daemon/$label/stop"><button class="btn">Stop</button></form>
+                <form class="daemon-actions" method="post" action="/daemon/$label/restart"><button class="btn">Restart</button></form>
+                <pre class="loglines daemon-log" data-log-for="$label">$logs</pre>
+              </div>
+            </section>
+        """.trimIndent()
+    }
+
+    /** Transmission extras folded into its card: RPC link, unreachable banner,
+     * download dir, limits, and the still server-rendered torrent table. */
+    private fun transmissionExtras(
+        rpc: com.torrent.app.transmission.TransmissionSummary?,
+        cfg: com.torrent.app.config.AppConfig,
+    ): List<String> {
+        val txLink = esc("http://${wifiIp() ?: "127.0.0.1"}:9091/")
+        val limits = if (rpc == null) "—"
+            else "↓${rpc.speedLimitDown} ↑${rpc.speedLimitUp} KB/s (0 = unlimited)"
+        return listOf(
+            """<div class="row"><span class="k">RPC</span><span class="v"><a href="$txLink">$txLink</a> &nbsp; user: ${esc(cfg.transmission.username)}</span></div>""",
+            """<div class="banner red" data-field="rpcUnreachable"${if (rpc == null) "" else " hidden"}>Transmission RPC not reachable.</div>""",
+            """<div class="row"><span class="k">Download dir</span><span class="v"><code data-field="downloadDir">${esc(rpc?.downloadDir ?: "—")}</code></span></div>""",
+            """<div class="row"><span class="k">Limits</span><span class="v" data-field="limits">$limits</span></div>""",
+            downloadsTable(rpc),
+        )
+    }
+
+    /** Crawler extras folded into its card (the old standalone section's data). */
+    private fun crawlerExtras(): List<String> {
+        val dbSize = crawlerDbSize()?.let { formatBytes(it) } ?: "—"
+        val free = internalFreeSpace()
+        val spaceWarn = if (free < CRAWLER_LOW_FREE_SPACE_BYTES)
+            " <span class=\"warn\">low free space</span>" else ""
+        return listOf(
+            """<div class="row"><span class="k">DB size</span><span class="v" data-field="dbSize">$dbSize</span></div>""",
+            """<div class="row"><span class="k">Internal free</span><span class="v"><span data-field="internalFree">${formatBytes(free)}</span>$spaceWarn</span></div>""",
+            """<div class="row"><span class="k">Search dashboard</span><span class="v"><a href="/search">/search</a></span></div>""",
+            """<div class="row"><span class="k">Stats</span><span class="v" data-field="statsLine">${esc(cachedCrawlerStatsLine ?: "—")}</span></div>""",
+        )
+    }
+
+    /** FTP extras folded into its card: wifi-up badge, connection URL, port. */
+    private fun ftpExtras(ftp: com.torrent.app.ftp.FtpStatus): List<String> {
+        val url = if (ftp.running && ftp.ip != null && ftp.password != null)
+            "ftp://${ftp.username}:${ftp.password}@${ftp.ip}:${ftp.port}/" else "—"
+        return listOf(
+            """<div class="row"><span class="k">Wifi</span><span class="v"><span class="badge" data-field="wifiUp">${if (ftp.wifiUp) "up" else "down"}</span></span></div>""",
+            """<div class="row"><span class="k">URL</span><span class="v"><code data-field="ftpUrl">${esc(url)}</code></span></div>""",
+            """<div class="row"><span class="k">Port</span><span class="v" data-field="ftpPort">${ftp.port}</span></div>""",
+        )
+    }
+
+    /**
+     * The transmission torrent table, still server-rendered inside the
+     * transmission card (it refreshes on reload, exactly as before).
+     */
+    private fun downloadsTable(
+        rpc: com.torrent.app.transmission.TransmissionSummary?,
+    ): String {
+        if (rpc == null) return ""
+        return buildString {
+            append("<table class=\"tx\"><tr><th>Torrent</th><th>Done</th><th>Down</th><th>Up</th><th>Size</th></tr>")
+            if (rpc.torrents.isEmpty()) append("<tr><td colspan=\"5\"><em>No torrents.</em></td></tr>")
+            for (t in rpc.torrents) {
+                append("<tr><td>").append(esc(t.name)).append("</td>")
+                append("<td>").append("%.0f%%".format(t.percentDone * 100)).append("</td>")
+                append("<td>").append(formatRate(t.rateDownload)).append("</td>")
+                append("<td>").append(formatRate(t.rateUpload)).append("</td>")
+                append("<td>").append(formatBytes(t.sizeWhenDone)).append("</td></tr>")
+            }
+            append("</table>")
+        }
     }
 
     private fun buildStatusJson(): String {
@@ -893,18 +979,6 @@ class ControlServer(
             o.optLong("torrents_indexed", 0L), trees, rate)
     } catch (e: Exception) {
         null
-    }
-
-    private fun ftpStatusSection(): String {
-        val f = ftpStatus()
-        val url = if (f.running && f.ip != null && f.password != null)
-            "ftp://${f.username}:${f.password}@${f.ip}:${f.port}/" else "—"
-        return """
-            <p class="meta">State: <span class="state ${f.state}">${f.state}</span>
-               &nbsp; wifi: <strong>${if (f.wifiUp) "up" else "down"}</strong>
-               &nbsp; restarts: <strong>${f.restartCount}</strong></p>
-            <p>URL: <code>$url</code></p>
-        """.trimIndent()
     }
 
     private fun buildDownloadsJson(): String {
@@ -1365,51 +1439,6 @@ class ControlServer(
               <button type="submit" class="btn">Restore now</button></form>
               <div id="db-restore-status" class="meta">DB restore: ${rst.state.name}</div>
             </fieldset>
-        """.trimIndent()
-    }
-
-    private fun crawlerSection(): String {
-        // Search dashboard is same-origin on :8090 (/search); the proxied C UI was retired in stage 4.
-        val d = daemonStatuses().firstOrNull { it.label == DaemonService.CRAWLER_LABEL }
-        val state = d?.state ?: ProcessState.STOPPED
-        val uptime = d?.startTimeMs?.let { formatUptime(System.currentTimeMillis() - it) } ?: "—"
-        val logs = d?.lastLogLines?.takeLast(30)?.joinToString("<br>") { esc(it) } ?: "—"
-        val dbSize = crawlerDbSize()
-        val free = internalFreeSpace()
-        val spaceWarn = if (free < CRAWLER_LOW_FREE_SPACE_BYTES) " <span class=\"warn\">low free space</span>" else ""
-        val paused = if (crawlerPausedNoWifi()) " <span class=\"state STOPPED\">paused: no wifi</span>" else ""
-        val searchUrl = "/search"
-        return """
-            <p class="meta">State: <span class="state $state">$state</span>$paused
-               &nbsp; PID: <strong>${d?.pid ?: "—"}</strong>
-               &nbsp; Uptime: <strong>$uptime</strong>
-               &nbsp; Restarts: <strong>${d?.restartCount ?: 0}</strong></p>
-            <p class="meta">DB: <strong>${dbSize?.let { formatBytes(it) } ?: "—"}</strong>
-               &nbsp; Internal free: <strong>${formatBytes(free)}</strong>$spaceWarn</p>
-            <p class="meta">Search dashboard: <a href="$searchUrl">$searchUrl</a></p>
-            <p class="meta" id="crawler-stats">Stats: loading…</p>
-            <pre class="loglines">$logs</pre>
-            <script>
-            (function () {
-              function poll() {
-                fetch('/api/crawler/stats').then(function (r) { return r.json(); }).then(function (s) {
-                  var el = document.getElementById('crawler-stats');
-                  if (!s || s.running === false) {
-                    el.textContent = (s && (s.state === 'RUNNING' || s.state === 'STARTING'))
-                      ? 'Stats: crawler starting (HTTP API not ready yet)'
-                      : 'Stats: crawler not running';
-                    return;
-                  }
-                  var rate = 0;
-                  (s.trees || []).forEach(function (t) { rate += (t.metadata_rate || 0); });
-                  el.textContent = 'Stats: ' + (s.torrents_indexed || 0) + ' torrents, ' +
-                      ((s.supervisor && s.supervisor.active_trees) || 0) + ' active trees, ' +
-                      rate.toFixed(1) + ' metadata/s';
-                }).catch(function () {});
-              }
-              setInterval(poll, 5000); poll();
-            })();
-            </script>
         """.trimIndent()
     }
 
