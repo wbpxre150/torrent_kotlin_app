@@ -361,6 +361,29 @@ class ControlServerSearchPageTest {
         )
     }
 
+    // ── per-card IMDb search on the search results ──────────────────────────
+
+    @Test fun page_hasImdbButton() {
+        // Every result card leads with an IMDb name search: the crawler's search
+        // rows carry no imdb id/year/filtered_name, so the card can only open
+        // IMDb's name search for the tokenized torrent name. The link is opened
+        // through a synthetic anchor (target=_blank, noopener/noreferrer) — no
+        // window.open and no external asset, which page_hasNoExternalAssets pins.
+        assertTrue(page.contains("function imdbQuery("))
+        assertTrue("the tokenizer must split dots/underscores into words",
+            page.contains(".replace(/[._]/g, ' ')"))
+        assertTrue(page.contains("imdbBtn.className = 'btn imdb-btn'"))
+        assertTrue(page.contains("imdbBtn.textContent = 'Search IMDb'"))
+        assertTrue(
+            "the button must search IMDb for its own card's name",
+            page.contains(
+                "a.href = 'https://www.imdb.com/find/?q=' + encodeURIComponent(imdbQuery(r.name));"),
+        )
+        assertTrue(page.contains("a.target = '_blank'"))
+        assertTrue(page.contains("a.rel = 'noopener noreferrer'"))
+        assertTrue("missing the .imdb-btn style", page.contains(".imdb-btn{"))
+    }
+
     @Test fun js_refreshCallsSameOriginRoute() {
         // The card refresh reuses the torrent page's route through this server, so
         // the search page still needs no crawler proxy origin.

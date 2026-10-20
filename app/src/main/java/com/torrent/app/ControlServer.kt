@@ -1848,6 +1848,7 @@ ${adultSelectionRow(adultSelection)}
             .actions{display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;margin-top:10px}
             .add-btn{min-height:40px;padding:0 16px}
             .refresh-btn{min-height:40px;min-width:40px;padding:0}
+            .imdb-btn{min-height:40px;padding:0 12px}
             .detail{color:var(--blue);text-decoration:none;font-size:1.1rem;font-weight:700;padding:8px}
         """.trimIndent()
 
@@ -1987,6 +1988,7 @@ ${adultSelectionRow(adultSelection)}
                   box.appendChild(more);
                 }
               }
+              function imdbQuery(name) { var s = (name == null ? '' : String(name)).replace(/[._]/g, ' '); var parts = s.split(/\s+/); var out = []; for (var i = 0; i < parts.length; i++) { var w = parts[i].replace(/[()\[\]{}]/g, ''); if (w) out.push(w); } return out.join(' '); }
 
               function buildCard(r) {
                 var card = document.createElement('div');
@@ -2039,6 +2041,20 @@ ${adultSelectionRow(adultSelection)}
                 var actions = document.createElement('div');
                 actions.className = 'actions';
 
+                var imdbBtn = document.createElement('button');
+                imdbBtn.type = 'button';
+                imdbBtn.className = 'btn imdb-btn';
+                imdbBtn.textContent = 'Search IMDb';
+                imdbBtn.onclick = function () {
+                  var a = document.createElement('a');
+                  a.href = 'https://www.imdb.com/find/?q=' + encodeURIComponent(imdbQuery(r.name));
+                  a.target = '_blank';
+                  a.rel = 'noopener noreferrer';
+                  document.body.appendChild(a);
+                  a.click();
+                  document.body.removeChild(a);
+                };
+                actions.appendChild(imdbBtn);
                 var add = document.createElement('button');
                 add.type = 'button';
                 add.className = 'btn add-btn';
