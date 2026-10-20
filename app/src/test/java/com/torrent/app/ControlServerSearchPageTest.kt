@@ -342,8 +342,10 @@ class ControlServerSearchPageTest {
         val reenables = body.split("btn.disabled = false;").size - 1
         assertTrue("expected the button re-enabled on success and catch, found $reenables",
             reenables >= 2)
-        assertTrue("the catch path must re-enable the button",
-            body.contains(".catch(function () { btn.disabled = false; toast('Refresh failed', true); });"))
+        assertTrue("the catch path must re-enable the button first",
+            body.contains(
+                ".catch(function () { btn.disabled = false; " +
+                    "peers.textContent = 'Refresh failed'; toast('Refresh failed', true); });"))
     }
 
     @Test fun js_refreshFailureIsAToast() {
@@ -353,6 +355,18 @@ class ControlServerSearchPageTest {
         assertTrue(body.contains("toast('Refresh failed', true)"))
         assertTrue(body.contains("if (!hash) { toast('Bad info hash', true); return; }"))
         assertFalse(page.contains("alert("))
+    }
+
+    @Test fun js_refreshGuardsReentryAndShowsFeedback() {
+        // webui parity with /torrent: a repeat press is dropped by the re-entry
+        // guard, and the in-flight state is visible in the card itself (a
+        // disabled button alone renders no visual change for this style).
+        val body = refreshBody()
+        assertTrue("missing the re-entry guard", body.contains("if (btn.disabled) return;"))
+        assertTrue("missing the in-flight peers feedback",
+            body.contains("peers.textContent = 'Refreshing\\u2026';"))
+        assertTrue("missing the inline failure feedback",
+            body.contains("peers.textContent = 'Refresh failed';"))
     }
 
     /** The body of the inline handler starting at [marker], up to its closing `};`. */

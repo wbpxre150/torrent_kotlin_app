@@ -2244,7 +2244,9 @@ ${adultSelectionRow(adultSelection)}
               // instead of replacing a peer-info line.
               function refreshPeers(hash, btn, peers) {
                 if (!hash) { toast('Bad info hash', true); return; }
+                if (btn.disabled) return;
                 btn.disabled = true;
+                peers.textContent = 'Refreshing\u2026';
                 // The route holds the connection up to 30 s; give up before it.
                 var ctrl = new AbortController();
                 var timer = setTimeout(function () { ctrl.abort(); }, 25000);
@@ -2253,6 +2255,7 @@ ${adultSelectionRow(adultSelection)}
                   .then(function (j) {
                     btn.disabled = false;
                     if (!j || !j.ok || !j.payload || typeof j.payload.total_peers !== 'number') {
+                      peers.textContent = 'Refresh failed';
                       toast('Refresh failed', true);
                       return;
                     }
@@ -2260,7 +2263,7 @@ ${adultSelectionRow(adultSelection)}
                     peers.textContent = n + ' peers';
                     peers.className = 'peers ' + (n > 100 ? 'hi' : (n > 10 ? 'mid' : 'lo'));
                   })
-                  .catch(function () { btn.disabled = false; toast('Refresh failed', true); });
+                  .catch(function () { btn.disabled = false; peers.textContent = 'Refresh failed'; toast('Refresh failed', true); });
               }
 
               function selectOnly(row, chip) {
