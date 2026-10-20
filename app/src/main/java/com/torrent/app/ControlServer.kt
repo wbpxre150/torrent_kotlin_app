@@ -742,6 +742,11 @@ class ControlServer(
               .daemon-head .dname{flex:1 1 auto}
               .daemon-body{padding:.25em 0 0}
               .daemon-body[hidden]{display:none}
+              /* The paused badge exists on every render (so a pause that starts
+                 after load can appear on the next push) and is hidden by the
+                 attribute: `.state` sets display, which would otherwise beat
+                 the UA `[hidden]` rule. */
+              .daemon-head .state[hidden]{display:none}
               .row{display:flex;gap:.5em;padding:.15em 0;font-size:.95em}
               .row .k{color:var(--muted);min-width:11em;flex-shrink:0}
               .row .v{overflow-wrap:anywhere;color:var(--text)}
@@ -792,8 +797,15 @@ class ControlServer(
         val label = esc(d.label)
         val uptime = d.startTimeMs?.let { formatUptime(now - it) } ?: "—"
         val logs = d.lastLogLines.takeLast(30).joinToString("<br>") { esc(it) }
-        val pausedBadge = if (d.label == DaemonService.CRAWLER_LABEL && crawlerPausedNoWifi())
-            "<span class=\"state STOPPED\" data-field=\"pausedNoWifi\">paused: no wifi</span>" else ""
+        // The crawler badge always exists so a pause that starts *after* the
+        // page loaded can appear on the next push; when not paused it renders
+        // hidden and the client only flips the attribute. No other card
+        // carries the field (the frame only sends `pausedNoWifi` for the
+        // crawler).
+        val pausedHidden =
+            if (d.label == DaemonService.CRAWLER_LABEL && !crawlerPausedNoWifi()) " hidden" else ""
+        val pausedBadge = if (d.label == DaemonService.CRAWLER_LABEL)
+            "<span class=\"state STOPPED\" data-field=\"pausedNoWifi\"$pausedHidden>paused: no wifi</span>" else ""
         val extras = when (d.label) {
             DaemonService.TRANSMISSION_LABEL -> transmissionExtras(rpc, cfg)
             DaemonService.CRAWLER_LABEL -> crawlerExtras()
@@ -2190,17 +2202,25 @@ ${adultSelectionRow(adultSelection)}
               }
 
               // The only log writer: tail-follow with a position hold.
-              // A cheap signature of the tail (line count, length, last 80
-              // chars) gates every write, so a push repeating an unchanged
+              // A 32-bit FNV-1a hash of the joined tail (plus its line count
+              // and length) gates every write, so a push repeating an unchanged
               // tail costs one getAttribute and no DOM write, no reflow and
-              // no scroll touch. When the tail did change, the pane follows
+              // no scroll touch. The hash covers the whole tail: a signature
+              // that only looked at the last 80 characters missed an update
+              // that happened earlier in the tail while keeping line count and
+              // total length. When the tail did change, the pane follows
               // it only if the user was already at the bottom; otherwise the
               // position is held. Only pre.scrollTop is ever written, never
               // the page scroll.
               function patchLogs(pre, lines) {
                 if (!pre || !lines) return;
                 var text = lines.join('\n');
-                var sig = lines.length + ':' + text.length + ':' + text.slice(-80);
+                var h = 2166136261;
+                for (var j = 0; j < text.length; j++) {
+                  h ^= text.charCodeAt(j);
+                  h = Math.imul(h, 16777619);
+                }
+                var sig = lines.length + ':' + text.length + ':' + (h >>> 0);
                 if (pre.getAttribute('data-logsig') === sig) return;
                 var wasAtBottom =
                   pre.scrollHeight - pre.scrollTop - pre.clientHeight < 8;
@@ -2255,11 +2275,17 @@ ${adultSelectionRow(adultSelection)}
                   patchText(fieldIn(section, 'dbSize'), d.dbSize);
                   patchText(fieldIn(section, 'internalFree'), d.internalFree);
                   patchText(fieldIn(section, 'statsLine'), d.statsLine);
-                  // The paused badge only exists while paused: show/hide it
-                  // instead of building any markup.
+                  // The paused badge is rendered on every crawler render and
+                  // only its `hidden` attribute is flipped here, so a pause that
+                  // starts after the page loaded appears within one tick. Only
+                  // the crawler card carries the field, and only the attribute
+                  // is touched: the `.state` pill styling is left alone.
                   var paused = fieldIn(section, 'pausedNoWifi');
+                  // A frame with no boolean yet leaves the rendered badge as is,
+                  // the same "null means no fresh snapshot" rule as patchText.
                   if (paused && typeof d.pausedNoWifi === 'boolean') {
-                    paused.style.display = d.pausedNoWifi ? '' : 'none';
+                    var pausedHidden = !d.pausedNoWifi;
+                    if (paused.hidden !== pausedHidden) paused.hidden = pausedHidden;
                   }
                   patchLogs(section.querySelector('[data-log-for]'), d.logs);
                 }

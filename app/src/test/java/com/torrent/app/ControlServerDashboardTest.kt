@@ -55,6 +55,7 @@ class ControlServerDashboardTest {
         daemons: List<ProcessStatus> = defaultDaemons(),
         rolledBack: Boolean = false,
         rpcSummary: () -> TransmissionSummary? = { null },
+        crawlerPausedNoWifi: () -> Boolean = { false },
     ): ControlServer {
         val config = AppConfig(
             wizardCompleted = true,
@@ -84,6 +85,7 @@ class ControlServerDashboardTest {
             startDaemon = { false },
             applyTransmission = { _, _ -> notWired },
             applyFtp = { notWired },
+            crawlerPausedNoWifi = crawlerPausedNoWifi,
         )
     }
 
@@ -182,6 +184,79 @@ class ControlServerDashboardTest {
         assertTrue("crawler card must link the search page", crawler.contains("<a href=\"/search\">"))
     }
 
+    /**
+     * Corrective stage 9 (P2.2a): the crawler's paused badge is rendered on
+     * every render and hidden by attribute when the crawler is not paused, so
+     * a pause that *starts* after the page loaded shows up within one push
+     * instead of waiting for a reload. Only the crawler card carries the field.
+     */
+    @Test fun crawlerCard_pausedBadgeAlwaysRenderedAndHiddenWhenNotPaused() {
+        val notPaused = card(html, DaemonService.CRAWLER_LABEL)
+        assertTrue(
+            "the crawler card must always carry the paused badge hook",
+            notPaused.contains("data-field=\"pausedNoWifi\""),
+        )
+        assertTrue(
+            "the badge must render hidden when the crawler is not paused",
+            notPaused.contains("data-field=\"pausedNoWifi\" hidden>"),
+        )
+        // It stays a `.state` pill: only the attribute toggles, never the class.
+        assertTrue(notPaused.contains("class=\"state STOPPED\" data-field=\"pausedNoWifi\""))
+        for (label in LABELS - DaemonService.CRAWLER_LABEL) {
+            assertFalse(
+                "$label must not gain a pausedNoWifi field",
+                card(html, label).contains("pausedNoWifi"),
+            )
+        }
+
+        val paused = card(
+            newServer(crawlerPausedNoWifi = { true }).buildDashboard(),
+            DaemonService.CRAWLER_LABEL,
+        )
+        assertTrue(paused.contains("data-field=\"pausedNoWifi\""))
+        assertFalse(
+            "the badge must be visible while paused",
+            paused.contains("data-field=\"pausedNoWifi\" hidden"),
+        )
+    }
+
+    /**
+     * Corrective stage 9 (P2.3): the log signature hashes the whole 30-line
+     * tail. The old `len:lines:last-80-chars` signature missed an update that
+     * happened earlier in the tail while keeping line count and total length.
+     */
+    @Test fun dashboardScript_logSignatureCoversTheWholeTail() {
+        val script = inlineScript(html)
+        assertTrue("the signature must be an FNV-1a hash", script.contains("Math.imul"))
+        assertTrue("the FNV-1a prime must be used", script.contains("16777619"))
+        assertTrue("the hash must fold in every character", script.contains("charCodeAt"))
+        assertTrue(
+            "the lossy last-80-chars signature must be gone",
+            !script.contains("text.slice(-80)"),
+        )
+        // The signature still gates the write (no DOM write on an unchanged tail).
+        assertTrue(script.contains("data-logsig"))
+        assertTrue(
+            "the hash must be computed before the signature gate",
+            script.indexOf("16777619") < script.indexOf("data-logsig"),
+        )
+    }
+
+    /** The client flips the badge's `hidden` attribute; it never rewrites markup. */
+    @Test fun dashboardScript_togglesThePausedBadgeByAttribute() {
+        val script = inlineScript(html)
+        assertTrue("the client must toggle the badge's hidden attribute",
+            script.contains("paused.hidden ="))
+        assertTrue(
+            "the badge must not be toggled through inline styles",
+            !script.contains("paused.style.display"),
+        )
+        assertFalse(
+            "the badge must never be added/removed by markup",
+            Regex("innerHTML\\s*=").find(script) != null,
+        )
+    }
+
     @Test fun everyCard_hasThreeActionFormsAndOneLogPane() {
         for (label in LABELS) {
             val c = card(html, label)
@@ -251,6 +326,8 @@ class ControlServerDashboardTest {
         assertTrue(html.contains(".daemon-card{"))
         assertTrue(html.contains(".daemon-head{"))
         assertTrue(html.contains(".daemon-body[hidden]{"))
+        // `.state` sets display, so the hidden badge needs its own rule.
+        assertTrue(html.contains(".daemon-head .state[hidden]{display:none}"))
         assertTrue(html.contains(".row .k{"))
         assertTrue(html.contains(".row .v{"))
         assertTrue(html.contains(".daemon-log{overflow:auto}"))
