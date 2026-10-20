@@ -247,7 +247,7 @@ class ControlServer(
                         val liveOnly = !TransmissionApplyMode.needsRestart(currentCfg, newCfg)
                         val r = applyTransmission(newCfg, liveOnly)
                         val token = parseCookieToken(call.request.headers["Cookie"]) ?: call.request.queryParameters["token"] ?: ""
-                        val mode = if (liveOnly) "live+RPC" else "restart"
+                        val mode = if (liveOnly) "no change" else "restart"
                         call.respondRedirect("/settings/transmission?msg=${urlEnc(r.message + " ($mode)")}&ok=${r.ok}&token=$token")
                     }
 
@@ -750,7 +750,7 @@ class ControlServer(
               <label>Data directory (under USB root; blank = root)<input name="dataSubpath" value="${esc(cfg.dataSubpath)}"></label>
               <button type="submit" class="btn">Apply</button>
             </form>
-            <p class="meta">Speed-only changes apply live via RPC. Username/password/peer-port/data-directory changes restart transmission.</p>
+            <p class="meta">Any change here, including speed limits, restarts transmission so settings.json is rewritten and the change persists.</p>
             <p><a href="/">Back to dashboard</a></p>
             </body></html>
         """.trimIndent()
