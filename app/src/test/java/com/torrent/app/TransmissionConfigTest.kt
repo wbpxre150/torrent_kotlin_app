@@ -51,8 +51,9 @@ class TransmissionConfigTest {
         val parsed = JSONObject(json)
         assertFalse(parsed.has("alt-speed-down"))
         assertFalse(parsed.has("alt-speed-up"))
-        // alt-speed-enabled stays daemon-owned.
-        assertFalse(parsed.has("alt-speed-enabled"))
+        // alt-speed-enabled / alt-speed-time-enabled are app-managed and always forced false.
+        assertFalse(parsed.getBoolean("alt-speed-enabled"))
+        assertFalse(parsed.getBoolean("alt-speed-time-enabled"))
         // Trailing keys still parse (no dangling comma).
         assertEquals(1, parsed.getInt("preallocation"))
         assertEquals(3, parsed.getInt("message-level"))
@@ -63,7 +64,15 @@ class TransmissionConfigTest {
         val parsed = JSONObject(json)
         assertEquals(50, parsed.getInt("alt-speed-down"))
         assertEquals(20, parsed.getInt("alt-speed-up"))
-        assertFalse(parsed.has("alt-speed-enabled"))
+        assertFalse(parsed.getBoolean("alt-speed-enabled"))
+        assertFalse(parsed.getBoolean("alt-speed-time-enabled"))
+    }
+
+    @Test fun buildSettingsJson_alwaysDisablesAltSpeedEnabledAndSchedule() {
+        val parsed = JSONObject(
+            TransmissionConfig.buildSettingsJson("torrentapp", "secret123", "/dir"))
+        assertFalse(parsed.getBoolean("alt-speed-enabled"))
+        assertFalse(parsed.getBoolean("alt-speed-time-enabled"))
     }
 
     @Test fun buildSettingsJson_emitsOnlyNonZeroAltSpeedKey() {

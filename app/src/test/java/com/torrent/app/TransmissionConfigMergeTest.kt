@@ -2,6 +2,7 @@ package com.torrent.app
 
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -17,13 +18,13 @@ class TransmissionConfigMergeTest {
     @Test fun merge_preservesUnmanagedKeys() {
         val existing = """
             {
-              "alt-speed-enabled": true,
+              "download-queue-enabled": true,
               "download-queue-size": 8,
               "ratio-limit": 1.5
             }
         """.trimIndent()
         val json = JSONObject(TransmissionConfig.mergeSettingsJson(existing, managed))
-        assertTrue(json.getBoolean("alt-speed-enabled"))
+        assertTrue(json.getBoolean("download-queue-enabled"))
         assertEquals(8, json.getInt("download-queue-size"))
         assertEquals(1.5, json.getDouble("ratio-limit"), 0.0)
     }
@@ -35,14 +36,14 @@ class TransmissionConfigMergeTest {
         val existing = """
             {
               "speed-limit-up": 999,
-              "alt-speed-enabled": true
+              "ratio-limit-enabled": true
             }
         """.trimIndent()
         val json = JSONObject(TransmissionConfig.mergeSettingsJson(existing, managed777))
         // Managed value wins over the pre-existing (daemon) value.
         assertEquals(777, json.getInt("speed-limit-up"))
         // Unmanaged key is still preserved.
-        assertTrue(json.getBoolean("alt-speed-enabled"))
+        assertTrue(json.getBoolean("ratio-limit-enabled"))
     }
 
     @Test fun merge_corruptExistingFallsBackToManaged() {
@@ -78,8 +79,9 @@ class TransmissionConfigMergeTest {
         assertEquals(8, json.getInt("download-queue-size"))
     }
 
-    @Test fun merge_preservesDaemonOwnedAltSpeedLimitsWhenAppValueIsZero() {
-        // App alt-speed value 0 = unmanaged: the daemon's own turtle limits must survive verbatim.
+    @Test fun merge_overwritesAltSpeedEnabledAndScheduleToFalse() {
+        // App alt-speed caps of 0 stay unmanaged (daemon's numeric limits survive), but the two
+        // alt-speed enabled flags are app-managed and must be forced false.
         val managedWithoutAlt = TransmissionConfig.buildSettingsJson(
             "torrentapp", "secret123", "/dir", altSpeedDown = 0, altSpeedUp = 0
         )
@@ -87,13 +89,17 @@ class TransmissionConfigMergeTest {
             {
               "alt-speed-down": 50,
               "alt-speed-up": 10,
-              "alt-speed-enabled": true
+              "alt-speed-enabled": true,
+              "alt-speed-time-enabled": true
             }
         """.trimIndent()
         val json = JSONObject(TransmissionConfig.mergeSettingsJson(existing, managedWithoutAlt))
+        // Numeric caps are preserved when the app value is 0.
         assertEquals(50, json.getInt("alt-speed-down"))
         assertEquals(10, json.getInt("alt-speed-up"))
-        assertTrue(json.getBoolean("alt-speed-enabled"))
+        // Stuck daemon/schedule turtle flags are overwritten.
+        assertFalse(json.getBoolean("alt-speed-enabled"))
+        assertFalse(json.getBoolean("alt-speed-time-enabled"))
     }
 
     @Test fun merge_nonZeroAltSpeedLimitsOverwriteDaemonValues() {

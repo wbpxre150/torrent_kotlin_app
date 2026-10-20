@@ -48,8 +48,10 @@ class TransmissionConfig(context: Context, private val store: ConfigStore) {
          * Merge the on-disk settings.json with the managed settings this app emits.
          *
          * The app owns the keys [buildSettingsJson] emits; the daemon owns everything else
-         * (session state set via the WebUI/RPC, e.g. alt-speed-enabled, download-queue-size,
-         * ratio-limit). A full overwrite on every start would drop the daemon's keys and
+         * (session state set via the WebUI/RPC, e.g. download-queue-size, ratio-limit).
+         * alt-speed-enabled/alt-speed-time-enabled are app-managed (always forced false), so
+         * they are overwritten like any other key [buildSettingsJson] emits. A full overwrite
+         * on every start would drop the daemon's keys and
          * re-default them, so we start from the existing object and only overwrite the
          * managed keys onto it (existing unmanaged keys are preserved verbatim, managed keys win).
          *
@@ -112,8 +114,12 @@ class TransmissionConfig(context: Context, private val store: ConfigStore) {
          * owns (turtle mode is usually driven by alt-speed-time-enabled + a schedule, e.g. a
          * 09:00-17:00 window), preventing the app from ever writing a 0 KB/s blackout.
          * A non-zero value is an enforced KB/s cap and is emitted (and thus managed).
-         * alt-speed-enabled is intentionally not emitted: it is daemon-side session state
-         * preserved by [mergeSettingsJson].
+         *
+         * alt-speed-enabled and alt-speed-time-enabled are ALWAYS emitted as false: both are
+         * app-managed keys, so [mergeSettingsJson] overwrites whatever the daemon or a
+         * previously-configured speed schedule left on disk (a stuck true turtle flag would
+         * otherwise throttle every session forever). The numeric alt-speed-down/up caps stay
+         * absolute KB/s values emitted only when non-zero.
          */
         fun buildSettingsJson(
             username: String,
@@ -142,6 +148,8 @@ class TransmissionConfig(context: Context, private val store: ConfigStore) {
             append("  \"speed-limit-down-enabled\": ").append(speedLimitDown > 0).append(",\n")
             append("  \"speed-limit-up\": ").append(speedLimitUp).append(",\n")
             append("  \"speed-limit-up-enabled\": ").append(speedLimitUp > 0).append(",\n")
+            append("  \"alt-speed-enabled\": false,\n")
+            append("  \"alt-speed-time-enabled\": false,\n")
             if (altSpeedDown > 0) append("  \"alt-speed-down\": ").append(altSpeedDown).append(",\n")
             if (altSpeedUp > 0) append("  \"alt-speed-up\": ").append(altSpeedUp).append(",\n")
             append("  \"message-level\": 3,\n")
