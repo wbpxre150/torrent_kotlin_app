@@ -733,6 +733,7 @@ class ControlServer(
               #live{width:auto;height:auto;padding:2px 8px;border-radius:10px;font-size:.85em;font-weight:600}
               #live.on{background:#e6f4ea;color:#137333}
               #live.wait{background:#fef7e0;color:#7a5900}
+              #live.bad{background:#fce8e6;color:#c5221f}
               a.cfg{display:inline-block;margin:.5em .5em .5em 0;padding:.4em .8em;background:var(--card);border-radius:8px;text-decoration:none;border:1px solid #dadce0;color:var(--blue);font-weight:600}
               .warn{background:#f8d7da;color:#721c24;padding:.6em;border-radius:8px;margin:1em 0}
               .daemon-card{margin:0 0 .75em}
@@ -2209,9 +2210,23 @@ ${adultSelectionRow(adultSelection)}
                 if (wasAtBottom) pre.scrollTop = pre.scrollHeight;
               }
 
+              // A frame that fails to parse is a dropped frame; without this
+              // the feed froze silently while the chip stayed green (a control
+              // byte in a log line was enough). Show the failure, and let the
+              // next frame that parses restore the chip to `on`.
+              var feedError = false;
+
               function applyFrame(ev) {
                 var f = null;
-                try { f = JSON.parse(ev.data); } catch (e) { return; }
+                try { f = JSON.parse(ev.data); } catch (e) {
+                  feedError = true;
+                  WS.setLive('bad', 'feed error');
+                  return;
+                }
+                if (feedError) {
+                  feedError = false;
+                  WS.setLive('on', 'live');
+                }
                 if (!f) return;
 
                 if (f.service) {
@@ -3714,8 +3729,45 @@ ${adultSelectionRow(adultSelection)}
             </body></html>
         """.trimIndent()
 
-        private fun jsonStr(s: String?): String =
-            if (s == null) "null" else "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+        /**
+         * Serializes [s] as a JSON string literal (webui corrective stage 8).
+         * RFC 8259 forbids raw U+0000–U+001F inside a string, so the two
+         * escapes this used to apply (backslash and quote) were not enough: a
+         * single ANSI ESC in a daemon log line made the client's `JSON.parse`
+         * throw, which silently froze the live feed under a green `#live` chip.
+         *
+         * The escapes are emitted by one char loop over the source, so the
+         * backslashes we insert are never re-processed (no double escaping);
+         * only the JSON-mandatory short escapes are used, and every other
+         * character — printable ASCII, `/`, `>`, `&`, non-ASCII — stays raw so
+         * the payloads stay compact and exact-substring assertions keep
+         * matching.
+         */
+        internal fun jsonStr(s: String?): String {
+            if (s == null) return "null"
+            return buildString(s.length + 2) {
+                append('"')
+                for (c in s) {
+                    when (c) {
+                        '\\' -> append("\\\\")
+                        '"' -> append("\\\"")
+                        '\b' -> append("\\b")
+                        '\u000C' -> append("\\f")
+                        '\n' -> append("\\n")
+                        '\r' -> append("\\r")
+                        '\t' -> append("\\t")
+                        else ->
+                            if (c < ' ') {
+                                // U+0000–U+001F only; DEL and above are legal raw.
+                                append("\\u").append(c.code.toString(16).padStart(4, '0'))
+                            } else {
+                                append(c)
+                            }
+                    }
+                }
+                append('"')
+            }
+        }
 
         /**
          * The /api/crawler/backup response body (Stage 4): state, message, last

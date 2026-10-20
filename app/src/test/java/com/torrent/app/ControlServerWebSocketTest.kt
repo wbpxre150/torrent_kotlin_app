@@ -565,6 +565,51 @@ class ControlServerWebSocketTest {
     }
 
     /**
+     * Corrective stage 8: RFC 8259 forbids raw U+0000–U+001F inside a JSON
+     * string. A log line carrying an ANSI ESC (0x1B) or any other control byte
+     * used to make the dashboard client's `JSON.parse` throw, so the frame was
+     * dropped and the live feed froze under a green `#live` chip. The frame
+     * must stay parseable, carry no raw control byte, and the line must come
+     * back byte-for-byte.
+     */
+    @Test fun dashboardWebSocket_controlBytesInLogLinesStillParse() {
+        val ansi = "\u001b[31merror\u001b[0m\r\n\tprogress 50%\u0000\u0007"
+        val daemon = ProcessStatus(
+            label = DaemonService.CRAWLER_LABEL,
+            state = ProcessState.RUNNING,
+            pid = 4242,
+            startTimeMs = System.currentTimeMillis() - 65_000,
+            restartCount = 3,
+            lastLogLines = listOf(ansi),
+        )
+        val live = startTestServer(
+            TOKEN, crawlerRunning = true, crawlerPort = 1, pushPeriodMs = 150,
+            daemons = listOf(daemon),
+        )
+        live.start()
+        try {
+            val ws = connectWithRetry(live.port, "/dashboard/ws?token=$TOKEN")
+            try {
+                assertTrue("expected a 101 upgrade, got: ${ws.statusLine}", ws.upgraded)
+                val frame = ws.nextText(10_000)
+                assertTrue("frame did not arrive", frame != null)
+                val logs = JSONObject(frame!!)
+                    .getJSONArray("daemons").getJSONObject(0).getJSONArray("logs")
+                assertEquals(1, logs.length())
+                assertEquals("control bytes must round-trip unchanged", ansi, logs.getString(0))
+                assertTrue(
+                    "no raw control byte may reach the wire: $frame",
+                    Regex("[\\x00-\\x1f]").find(frame) == null,
+                )
+            } finally {
+                ws.close()
+            }
+        } finally {
+            live.stop()
+        }
+    }
+
+    /**
      * Webui stage 6: the exact frame shape the dashboard client patches
      * against — `service`, `usb`, `wifiUp`, `ftp`, one `daemons[]` entry per
      * daemon with `label/state/pid/uptime/restarts/logs`, the crawler extras,

@@ -261,6 +261,50 @@ class ControlServerHelpersTest {
         assertEquals("plain", ControlServer.esc("plain"))
     }
 
+    /**
+     * Webui corrective stage 8: RFC 8259 forbids raw U+0000–U+001F inside a
+     * JSON string, so `jsonStr` must escape every control character. One ANSI
+     * ESC in a daemon log line used to make the dashboard client's
+     * `JSON.parse` throw, freezing the live feed under a green `#live` chip.
+     * The escapes are also asserted to be single-pass (no double escaping) and
+     * to leave legal characters — printable ASCII, `/`, `>`, `&`, non-ASCII —
+     * raw so the payloads stay compact and exact-substring assertions hold.
+     */
+    @Test fun jsonStr_escapesControlCharacters() {
+        // Kotlin has no \f escape, so the form feed is written \u000C.
+        val out = ControlServer.jsonStr("\u0000\u001b\t\r\n\b\u000C\"\\")
+        // Exactly one pass of escapes: backslash-quote, then the short forms,
+        // then \uXXXX for the two controls without a short form.
+        assertEquals("\"\\u0000\\u001b\\t\\r\\n\\b\\f\\\"\\\\\"", out)
+        assertTrue(out, out.contains("\\u0000"))
+        assertTrue(out, out.contains("\\u001b"))
+        assertTrue(out, out.contains("\\t"))
+        assertTrue(out, out.contains("\\r"))
+        assertTrue(out, out.contains("\\n"))
+        assertTrue(out, out.contains("\\b"))
+        assertTrue(out, out.contains("\\f"))
+        assertTrue(out, out.contains("\\\""))
+        assertTrue(out, out.contains("\\\\"))
+        // No raw control byte survives anywhere inside the literal.
+        val rawControl = Regex("[\\x00-\\x1f]")
+        assertFalse("raw control byte in: $out", rawControl.containsMatchIn(out))
+        // Compact: legal characters stay raw, and every control byte of the
+        // range is escaped (a sweep, not just the sample above).
+        assertEquals(
+            "\"a/b>c&d \u00e9\u4e2d\"",
+            ControlServer.jsonStr("a/b>c&d \u00e9\u4e2d"))
+        // The five controls with a short form use it; the rest are \uXXXX.
+        val short = mapOf(8 to "\\b", 9 to "\\t", 10 to "\\n", 12 to "\\f", 13 to "\\r")
+        for (code in 0..0x1f) {
+            val escaped = ControlServer.jsonStr(code.toChar().toString())
+            assertFalse("raw control byte $code in: $escaped", rawControl.containsMatchIn(escaped))
+            assertEquals(
+                short[code] ?: ("\\u" + code.toString(16).padStart(4, '0')),
+                escaped.substring(1, escaped.length - 1))
+        }
+        assertEquals("null", ControlServer.jsonStr(null))
+    }
+
     @Test fun backupSettingsFromForm_blankSecretKeepsCurrentValue() {
         val current = backupSettingsForFormTest()
         val s = ControlServer.backupSettingsFromForm(mapOf("r2SecretAccessKey" to ""), current)

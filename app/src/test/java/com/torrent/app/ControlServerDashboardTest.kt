@@ -346,4 +346,30 @@ class ControlServerDashboardTest {
                 script.contains(forbidden))
         }
     }
+
+    /**
+     * Corrective stage 8: a frame that fails to parse must never be a silent
+     * no-op. Before this, one control byte in a log line made `JSON.parse`
+     * throw, the frame was dropped, and the `#live` chip stayed green while
+     * the feed froze. The guard now flips the chip to `bad`/`feed error` and
+     * restores `on`/`live` on the next frame that parses.
+     */
+    @Test fun dashboardScript_surfacesAFrameParseFailure() {
+        val script = inlineScript(html)
+        assertTrue("the parse guard must label the failure", script.contains("'feed error'"))
+        assertTrue(
+            "the parse guard must flip the live chip to bad",
+            script.contains("setLive('bad', 'feed error')"))
+        assertTrue(
+            "the live chip must come back on the next good frame",
+            script.contains("setLive('on', 'live')"))
+        // The failure path returns before any patching, so a broken frame never
+        // half-applies (and never blanks a cell).
+        val failure = script.indexOf("'feed error'")
+        assertTrue(
+            "the failure path must return before the patch block",
+            failure < script.indexOf("if (f.service)"))
+        // The chip's `bad` state must be styled, not just its text changed.
+        assertTrue(html.contains("#live.bad{"))
+    }
 }
