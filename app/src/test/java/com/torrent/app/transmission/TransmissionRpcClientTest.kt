@@ -46,4 +46,27 @@ class TransmissionRpcClientTest {
         assertFalse(args.getBoolean("speed-limit-down-enabled"))
         assertFalse(args.getBoolean("speed-limit-up-enabled"))
     }
+
+    @Test fun buildSessionSetSpeedArgs_omitsAltSpeedKeysWhenZero() {
+        // Turtle limits are absolute KB/s caps, so 0 must never be pushed via session-set.
+        val args = TransmissionRpcClient.buildSessionSetSpeedArgs(0, 0, 0, 0)
+        assertFalse(args.has("alt-speed-down"))
+        assertFalse(args.has("alt-speed-up"))
+        assertFalse(args.has("alt-speed-enabled"))
+        assertTrue(args.has("speed-limit-down"))
+        assertTrue(args.has("speed-limit-up"))
+    }
+
+    @Test fun buildSessionSetSpeedArgs_includesAltSpeedKeysWhenNonZero() {
+        val args = TransmissionRpcClient.buildSessionSetSpeedArgs(0, 0, 50, 20)
+        assertEquals(50, args.getInt("alt-speed-down"))
+        assertEquals(20, args.getInt("alt-speed-up"))
+        assertFalse(args.has("alt-speed-enabled"))
+    }
+
+    @Test fun buildSessionSetSpeedArgs_omitsOnlyZeroAltSpeedKey() {
+        val args = TransmissionRpcClient.buildSessionSetSpeedArgs(0, 0, 0, 20)
+        assertFalse(args.has("alt-speed-down"))
+        assertEquals(20, args.getInt("alt-speed-up"))
+    }
 }

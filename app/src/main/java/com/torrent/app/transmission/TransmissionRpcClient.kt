@@ -130,21 +130,29 @@ class TransmissionRpcClient(
                 .put("bandwidthPriority", 0)
 
         /**
-         * Pure argument builder for `session-set` of the app's speed form. The `-enabled`
+         * Pure argument builder for `session-set` of the app's speed form. The `speed-limit-*`
          * flags are derived from the limit values: non-zero enables enforcement, 0 means
          * unlimited (disabled), matching the form legend "KB/s, 0 = unlimited".
+         *
+         * The turtle (alt-speed) keys are different: transmission treats alt-speed-down/up as
+         * absolute KB/s caps where 0 is a hard 0 KB/s cap, so 0 means unset/unmanaged here — the
+         * keys are omitted from the request and the daemon keeps whatever limits it owns (turtle
+         * is typically driven by alt-speed-enabled / alt-speed-time-enabled). That prevents a
+         * 0 KB/s blackout. A non-zero value is an enforced cap and is sent.
          */
         fun buildSessionSetSpeedArgs(
             speedLimitDown: Int, speedLimitUp: Int,
             altSpeedDown: Int, altSpeedUp: Int,
-        ): JSONObject =
-            JSONObject()
+        ): JSONObject {
+            val args = JSONObject()
                 .put("speed-limit-down", speedLimitDown)
                 .put("speed-limit-up", speedLimitUp)
-                .put("alt-speed-down", altSpeedDown)
-                .put("alt-speed-up", altSpeedUp)
                 .put("speed-limit-down-enabled", speedLimitDown > 0)
                 .put("speed-limit-up-enabled", speedLimitUp > 0)
+            if (altSpeedDown > 0) args.put("alt-speed-down", altSpeedDown)
+            if (altSpeedUp > 0) args.put("alt-speed-up", altSpeedUp)
+            return args
+        }
         fun buildRequestBody(method: String, arguments: JSONObject?): String {
             val o = JSONObject().put("method", method)
             if (arguments != null) o.put("arguments", arguments)

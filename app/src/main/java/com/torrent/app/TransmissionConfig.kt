@@ -104,9 +104,16 @@ class TransmissionConfig(context: Context, private val store: ConfigStore) {
          * "{" prefix and uses the hash directly without re-hashing or rewriting the file.
          * preallocation: 0=off, 1=fast/sparse (default on; uses fallocate), 2=full.
          * speed-limit-{down,up}-enabled are derived from the limit values (non-zero = enabled,
-         * 0 = unlimited = disabled, matching the WebUI form legend). alt-speed-enabled is
-         * intentionally not emitted: it is daemon-side session state preserved by
-         * [mergeSettingsJson].
+         * 0 = unlimited = disabled, matching the WebUI form legend).
+         *
+         * alt-speed-down/up (turtle mode) do NOT follow that legend: in transmission they are
+         * absolute KB/s caps where 0 is a hard 0 KB/s cap, not "unlimited". So 0 means
+         * unset/unmanaged here — the key is omitted entirely and the daemon keeps the limit it
+         * owns (turtle mode is usually driven by alt-speed-time-enabled + a schedule, e.g. a
+         * 09:00-17:00 window), preventing the app from ever writing a 0 KB/s blackout.
+         * A non-zero value is an enforced KB/s cap and is emitted (and thus managed).
+         * alt-speed-enabled is intentionally not emitted: it is daemon-side session state
+         * preserved by [mergeSettingsJson].
          */
         fun buildSettingsJson(
             username: String,
@@ -135,8 +142,8 @@ class TransmissionConfig(context: Context, private val store: ConfigStore) {
             append("  \"speed-limit-down-enabled\": ").append(speedLimitDown > 0).append(",\n")
             append("  \"speed-limit-up\": ").append(speedLimitUp).append(",\n")
             append("  \"speed-limit-up-enabled\": ").append(speedLimitUp > 0).append(",\n")
-            append("  \"alt-speed-down\": ").append(altSpeedDown).append(",\n")
-            append("  \"alt-speed-up\": ").append(altSpeedUp).append(",\n")
+            if (altSpeedDown > 0) append("  \"alt-speed-down\": ").append(altSpeedDown).append(",\n")
+            if (altSpeedUp > 0) append("  \"alt-speed-up\": ").append(altSpeedUp).append(",\n")
             append("  \"message-level\": 3,\n")
             append("  \"preallocation\": 1\n") // 0=off, 1=fast/sparse (fallocate, default on), 2=full
             append("}\n")

@@ -43,6 +43,36 @@ class TransmissionConfigTest {
         assertTrue(json.contains("\"speed-limit-up-enabled\": false"))
     }
 
+    @Test fun buildSettingsJson_omitsAltSpeedKeysWhenZero() {
+        val json = TransmissionConfig.buildSettingsJson("u", "p", "/d", altSpeedDown = 0, altSpeedUp = 0)
+        // Turtle (alt-speed) limits are absolute KB/s caps: 0 must never be written by the app.
+        assertFalse(json.contains("\"alt-speed-down\""))
+        assertFalse(json.contains("\"alt-speed-up\""))
+        val parsed = JSONObject(json)
+        assertFalse(parsed.has("alt-speed-down"))
+        assertFalse(parsed.has("alt-speed-up"))
+        // alt-speed-enabled stays daemon-owned.
+        assertFalse(parsed.has("alt-speed-enabled"))
+        // Trailing keys still parse (no dangling comma).
+        assertEquals(1, parsed.getInt("preallocation"))
+        assertEquals(3, parsed.getInt("message-level"))
+    }
+
+    @Test fun buildSettingsJson_emitsAltSpeedKeysWhenNonZero() {
+        val json = TransmissionConfig.buildSettingsJson("u", "p", "/d", altSpeedDown = 50, altSpeedUp = 20)
+        val parsed = JSONObject(json)
+        assertEquals(50, parsed.getInt("alt-speed-down"))
+        assertEquals(20, parsed.getInt("alt-speed-up"))
+        assertFalse(parsed.has("alt-speed-enabled"))
+    }
+
+    @Test fun buildSettingsJson_emitsOnlyNonZeroAltSpeedKey() {
+        val parsed = JSONObject(
+            TransmissionConfig.buildSettingsJson("u", "p", "/d", altSpeedDown = 0, altSpeedUp = 20))
+        assertFalse(parsed.has("alt-speed-down"))
+        assertEquals(20, parsed.getInt("alt-speed-up"))
+    }
+
     @Test fun buildSettingsJson_escapesQuotesAndBackslashes() {
         val json = TransmissionConfig.buildSettingsJson("user", "pa\"ss\\word", "/dir")
         // Escaped form must appear verbatim in the output.

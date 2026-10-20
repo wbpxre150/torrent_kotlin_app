@@ -77,4 +77,37 @@ class TransmissionConfigMergeTest {
         // Unmanaged key survives alongside the managed keys.
         assertEquals(8, json.getInt("download-queue-size"))
     }
+
+    @Test fun merge_preservesDaemonOwnedAltSpeedLimitsWhenAppValueIsZero() {
+        // App alt-speed value 0 = unmanaged: the daemon's own turtle limits must survive verbatim.
+        val managedWithoutAlt = TransmissionConfig.buildSettingsJson(
+            "torrentapp", "secret123", "/dir", altSpeedDown = 0, altSpeedUp = 0
+        )
+        val existing = """
+            {
+              "alt-speed-down": 50,
+              "alt-speed-up": 10,
+              "alt-speed-enabled": true
+            }
+        """.trimIndent()
+        val json = JSONObject(TransmissionConfig.mergeSettingsJson(existing, managedWithoutAlt))
+        assertEquals(50, json.getInt("alt-speed-down"))
+        assertEquals(10, json.getInt("alt-speed-up"))
+        assertTrue(json.getBoolean("alt-speed-enabled"))
+    }
+
+    @Test fun merge_nonZeroAltSpeedLimitsOverwriteDaemonValues() {
+        val managedAlt = TransmissionConfig.buildSettingsJson(
+            "torrentapp", "secret123", "/dir", altSpeedDown = 25, altSpeedUp = 5
+        )
+        val existing = """
+            {
+              "alt-speed-down": 50,
+              "alt-speed-up": 10
+            }
+        """.trimIndent()
+        val json = JSONObject(TransmissionConfig.mergeSettingsJson(existing, managedAlt))
+        assertEquals(25, json.getInt("alt-speed-down"))
+        assertEquals(5, json.getInt("alt-speed-up"))
+    }
 }
