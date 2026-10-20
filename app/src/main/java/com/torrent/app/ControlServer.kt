@@ -1830,6 +1830,7 @@ ${adultSelectionRow(adultSelection)}
             .peers.lo{color:#9aa0a6}
             .actions{display:flex;align-items:center;gap:14px;margin-top:10px}
             .add-btn{min-height:40px;padding:0 16px}
+            .refresh-btn{min-height:40px;padding:0 16px}
             .detail{color:var(--blue);text-decoration:none;font-size:1.1rem;font-weight:700;padding:8px}
         """.trimIndent()
 
@@ -2019,6 +2020,12 @@ ${adultSelectionRow(adultSelection)}
                 add.textContent = '\u2795 Add';
                 add.onclick = function () { addTorrent(r.info_hash, add); };
                 actions.appendChild(add);
+                var refreshBtn = document.createElement('button');
+                refreshBtn.type = 'button';
+                refreshBtn.className = 'btn refresh-btn';
+                refreshBtn.textContent = '\u21bb Refresh peers';
+                refreshBtn.onclick = function () { refreshPeers(r.info_hash, refreshBtn, peers); };
+                actions.appendChild(refreshBtn);
 
                 var detail = document.createElement('a');
                 detail.className = 'detail';
@@ -2213,6 +2220,30 @@ ${adultSelectionRow(adultSelection)}
                     toast(d.duplicate ? 'Already added (duplicate)' : 'Added to Transmission', false);
                   })
                   .catch(function () { btn.disabled = false; toast('Add failed', true); });
+              }
+
+              // Per-card peer refresh: the same /api/crawler/refresh route the
+              // torrent page uses, but the outcome lands in this card's peers span
+              // instead of replacing a peer-info line.
+              function refreshPeers(hash, btn, peers) {
+                if (!hash) { toast('Bad info hash', true); return; }
+                btn.disabled = true;
+                // The route holds the connection up to 30 s; give up before it.
+                var ctrl = new AbortController();
+                var timer = setTimeout(function () { ctrl.abort(); }, 25000);
+                fetch('/api/crawler/refresh?hash=' + encodeURIComponent(hash), { signal: ctrl.signal })
+                  .then(function (r) { clearTimeout(timer); return r.json(); })
+                  .then(function (j) {
+                    btn.disabled = false;
+                    if (!j || !j.ok || !j.payload || typeof j.payload.total_peers !== 'number') {
+                      toast('Refresh failed', true);
+                      return;
+                    }
+                    var n = j.payload.total_peers;
+                    peers.textContent = n + ' peers';
+                    peers.className = 'peers ' + (n > 100 ? 'hi' : (n > 10 ? 'mid' : 'lo'));
+                  })
+                  .catch(function () { btn.disabled = false; toast('Refresh failed', true); });
               }
 
               function selectOnly(row, chip) {

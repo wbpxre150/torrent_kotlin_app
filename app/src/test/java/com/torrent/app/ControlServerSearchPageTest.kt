@@ -280,6 +280,81 @@ class ControlServerSearchPageTest {
         }
     }
 
+    // ── per-card peer refresh on the search results ─────────────────────────
+
+    /** The `refreshPeers(hash, btn, peers)` body: everything from its declaration
+     * up to the next function (the cards' `selectOnly`). */
+    private fun refreshBody(): String {
+        val start = page.indexOf("function refreshPeers(")
+        assertTrue("missing refreshPeers()", start >= 0)
+        val end = page.indexOf("function selectOnly(", start)
+        assertTrue("unterminated refreshPeers()", end > start)
+        return page.substring(start, end)
+    }
+
+    @Test fun page_hasRefreshPeersButton() {
+        // Every result card carries a peer-refresh button in its actions row,
+        // built exactly like the Add button (no inline markup) and wired to the
+        // card's own hash and peers span.
+        assertTrue(page.contains("refreshBtn.type = 'button'"))
+        assertTrue(page.contains("refreshBtn.className = 'btn refresh-btn'"))
+        assertTrue(page.contains("refreshBtn.textContent = '\\u21bb Refresh peers'"))
+        assertTrue(
+            "the button must refresh its own card",
+            page.contains("refreshBtn.onclick = function () { refreshPeers(r.info_hash, refreshBtn, peers); }"),
+        )
+        assertTrue("missing the .refresh-btn style", page.contains(".refresh-btn{"))
+    }
+
+    @Test fun js_refreshCallsSameOriginRoute() {
+        // The card refresh reuses the torrent page's route through this server, so
+        // the search page still needs no crawler proxy origin.
+        assertTrue(
+            "must call the same-origin refresh route with the card hash",
+            refreshBody().contains(
+                "fetch('/api/crawler/refresh?hash=' + encodeURIComponent(hash), { signal: ctrl.signal })"),
+        )
+        assertTrue("the click wiring must pass the card's info_hash",
+            page.contains("refreshPeers(r.info_hash, refreshBtn, peers)"))
+        assertFalse(page.contains("proxyOrigin"))
+        assertFalse(page.contains("127.0.0.1:8081"))
+    }
+
+    @Test fun js_refreshAbortsBeforeServerTimeout() {
+        // /api/crawler/refresh holds the connection up to 30 s; the card gives up
+        // at 25 s so the button never stays disabled on a stalled crawler.
+        val body = refreshBody()
+        assertTrue(body.contains("var ctrl = new AbortController();"))
+        assertTrue("must abort before the server's 30 s timeout",
+            body.contains("}, 25000);"))
+        assertTrue(body.contains("clearTimeout(timer)"))
+        assertTrue("the abort signal must reach fetch", body.contains("{ signal: ctrl.signal }"))
+    }
+
+    @Test fun js_refreshUpdatesTheCardPeersSpan() {
+        // A successful refresh rewrites the card's peers span in place, with the
+        // same hi/mid/lo colour thresholds buildCard uses, and re-enables the
+        // button on every path (success and catch).
+        val body = refreshBody()
+        assertTrue(body.contains("var n = j.payload.total_peers;"))
+        assertTrue(body.contains("peers.textContent = n + ' peers';"))
+        assertTrue(body.contains("peers.className = 'peers ' + (n > 100 ? 'hi' : (n > 10 ? 'mid' : 'lo'));"))
+        val reenables = body.split("btn.disabled = false;").size - 1
+        assertTrue("expected the button re-enabled on success and catch, found $reenables",
+            reenables >= 2)
+        assertTrue("the catch path must re-enable the button",
+            body.contains(".catch(function () { btn.disabled = false; toast('Refresh failed', true); });"))
+    }
+
+    @Test fun js_refreshFailureIsAToast() {
+        // Failures (bad reply or aborted fetch) surface as the page's toast, never
+        // a blocking browser dialog.
+        val body = refreshBody()
+        assertTrue(body.contains("toast('Refresh failed', true)"))
+        assertTrue(body.contains("if (!hash) { toast('Bad info hash', true); return; }"))
+        assertFalse(page.contains("alert("))
+    }
+
     /** The body of the inline handler starting at [marker], up to its closing `};`. */
     private fun handlerBody(marker: String): String {
         val start = page.indexOf(marker)
