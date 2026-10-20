@@ -52,7 +52,8 @@ class TransmissionRpcClientTest {
         val args = TransmissionRpcClient.buildSessionSetSpeedArgs(0, 0, 0, 0)
         assertFalse(args.has("alt-speed-down"))
         assertFalse(args.has("alt-speed-up"))
-        assertFalse(args.has("alt-speed-enabled"))
+        assertFalse(args.getBoolean("alt-speed-enabled"))
+        assertFalse(args.getBoolean("alt-speed-time-enabled"))
         assertTrue(args.has("speed-limit-down"))
         assertTrue(args.has("speed-limit-up"))
     }
@@ -61,12 +62,19 @@ class TransmissionRpcClientTest {
         val args = TransmissionRpcClient.buildSessionSetSpeedArgs(0, 0, 50, 20)
         assertEquals(50, args.getInt("alt-speed-down"))
         assertEquals(20, args.getInt("alt-speed-up"))
-        assertFalse(args.has("alt-speed-enabled"))
+        assertFalse(args.getBoolean("alt-speed-enabled"))
+        assertFalse(args.getBoolean("alt-speed-time-enabled"))
     }
 
     @Test fun buildSessionSetSpeedArgs_omitsOnlyZeroAltSpeedKey() {
         val args = TransmissionRpcClient.buildSessionSetSpeedArgs(0, 0, 0, 20)
         assertFalse(args.has("alt-speed-down"))
         assertEquals(20, args.getInt("alt-speed-up"))
+    }
+
+    @Test fun buildAltSpeedDisableArgs_forcesBothFlagsFalse() {
+        val args = TransmissionRpcClient.buildAltSpeedDisableArgs()
+        assertFalse(args.getBoolean("alt-speed-enabled"))
+        assertFalse(args.getBoolean("alt-speed-time-enabled"))
     }
 }

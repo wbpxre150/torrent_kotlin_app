@@ -1307,8 +1307,16 @@ class DaemonService : Service() {
             // cannot wedge readiness.
             readinessProbe = {
                 val tx = configStore.load().transmission
-                com.torrent.app.transmission.TransmissionRpcClient(tx.username, tx.password)
-                    .sessionGet() != null
+                val rpc = com.torrent.app.transmission.TransmissionRpcClient(tx.username, tx.password)
+                val ready = rpc.sessionGet() != null
+                if (ready) {
+                    // Force turtle/alt-speed off the instant the daemon answers: settings.json is
+                    // already false (persisted), but re-asserting here clears any in-memory/stale
+                    // schedule so alt-speed can never re-enable on this run.
+                    rpc.sessionSet(
+                        com.torrent.app.transmission.TransmissionRpcClient.buildAltSpeedDisableArgs())
+                }
+                ready
             })
         transmission.start(); supervisors.add(transmission)
     }

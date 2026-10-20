@@ -134,11 +134,14 @@ class TransmissionRpcClient(
          * flags are derived from the limit values: non-zero enables enforcement, 0 means
          * unlimited (disabled), matching the form legend "KB/s, 0 = unlimited".
          *
-         * The turtle (alt-speed) keys are different: transmission treats alt-speed-down/up as
-         * absolute KB/s caps where 0 is a hard 0 KB/s cap, so 0 means unset/unmanaged here — the
-         * keys are omitted from the request and the daemon keeps whatever limits it owns (turtle
-         * is typically driven by alt-speed-enabled / alt-speed-time-enabled). That prevents a
-         * 0 KB/s blackout. A non-zero value is an enforced cap and is sent.
+         * Turtle (alt-speed) is always forced OFF: `alt-speed-enabled` (the live toggle) and
+         * `alt-speed-time-enabled` (the clock schedule that re-arms it) are sent `false` on
+         * every call, so a live speed apply also clears turtle mode. The numeric
+         * `alt-speed-down`/`alt-speed-up` limits are different: transmission treats them as
+         * absolute KB/s caps where 0 is a hard 0 KB/s cap, so 0 means unset/unmanaged here —
+         * those keys are omitted from the request and the daemon keeps whatever limits it owns.
+         * That prevents a 0 KB/s blackout. A non-zero value is an enforced cap and is sent
+         * (harmless while the toggle above stays false).
          */
         fun buildSessionSetSpeedArgs(
             speedLimitDown: Int, speedLimitUp: Int,
@@ -149,10 +152,23 @@ class TransmissionRpcClient(
                 .put("speed-limit-up", speedLimitUp)
                 .put("speed-limit-down-enabled", speedLimitDown > 0)
                 .put("speed-limit-up-enabled", speedLimitUp > 0)
+                .put("alt-speed-enabled", false)
+                .put("alt-speed-time-enabled", false)
             if (altSpeedDown > 0) args.put("alt-speed-down", altSpeedDown)
             if (altSpeedUp > 0) args.put("alt-speed-up", altSpeedUp)
             return args
         }
+        /**
+         * Pure builder for the session-set that forces turtle/alt-speed OFF. This is the
+         * "always disabled" invariant: alt-speed-enabled is the live toggle and
+         * alt-speed-time-enabled is the clock schedule that re-arms it, so both are forced
+         * false (the numeric caps alt-speed-down/up are NOT touched — they are harmless when
+         * the toggle is off).
+         */
+        fun buildAltSpeedDisableArgs(): JSONObject =
+            JSONObject()
+                .put("alt-speed-enabled", false)
+                .put("alt-speed-time-enabled", false)
         fun buildRequestBody(method: String, arguments: JSONObject?): String {
             val o = JSONObject().put("method", method)
             if (arguments != null) o.put("arguments", arguments)
