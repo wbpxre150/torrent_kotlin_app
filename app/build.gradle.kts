@@ -423,7 +423,8 @@ tasks.register("prepareDhtCrawlerSrc") {
             "restore-database.patch",
             "clear-failure-filter.patch",
             "remove-porn-filter.patch",
-            "save-categories.patch"
+            "save-categories.patch",
+            "search-rows-filtered-name.patch"
         )) {
             project.exec {
                 commandLine("patch", "-p1", "-d", destDir.absolutePath, "-i", file("$destDir/patches/$patchName").absolutePath)
