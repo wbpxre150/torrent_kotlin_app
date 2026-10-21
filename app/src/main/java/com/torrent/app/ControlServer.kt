@@ -1022,11 +1022,13 @@ class ControlServer(
         }
 
     /**
-     * The slim `transmission` object every /dashboard/ws frame carries: only the
-     * scalars the client patches (`reachable`, download dir, speed limits). The
-     * torrent array stays server-rendered, so a push never ships it (and a
-     * wedged RPC cannot make a frame expensive); `reachable:false` is what lets
-     * the client re-show its `rpcUnreachable` banner after a later outage.
+     * The slim `transmission` object every /dashboard/ws frame carries: the
+     * scalars the client patches (`reachable`, download dir, speed limits) plus
+     * the infohash-keyed slim `rows` the table renders. The full torrents array
+     * is /downloads-only, so a push never ships it (and a wedged RPC cannot make
+     * a frame expensive); `reachable:false` is what lets the client re-show its
+     * `rpcUnreachable` banner after a later outage. Every row cell is already a
+     * display string, so the client stays a dumb text patch.
      */
     private fun transmissionScalarsJson(
         rpc: com.torrent.app.transmission.TransmissionSummary?,
@@ -1035,7 +1037,15 @@ class ControlServer(
         append(",\"downloadDir\":").append(jsonStr(rpc?.downloadDir))
         append(",\"speedLimitUp\":").append(rpc?.speedLimitUp?.toString() ?: "null")
         append(",\"speedLimitDown\":").append(rpc?.speedLimitDown?.toString() ?: "null")
-        append("}")
+        append(",\"rows\":[")
+        append(rpc?.torrents.orEmpty().filter { it.hashString.isNotBlank() }.joinToString(",") { t ->
+            "{\"infohash\":" + jsonStr(t.hashString) + ",\"name\":" + jsonStr(t.name) +
+            ",\"done\":" + jsonStr("%.0f%%".format(t.percentDone * 100)) +
+            ",\"down\":" + jsonStr(formatRate(t.rateDownload)) +
+            ",\"up\":" + jsonStr(formatRate(t.rateUpload)) +
+            ",\"size\":" + jsonStr(formatBytes(t.sizeWhenDone)) + "}"
+        })
+        append("]}")
     }
 
     // ── settings panel builders ───────────────────────────────────────────

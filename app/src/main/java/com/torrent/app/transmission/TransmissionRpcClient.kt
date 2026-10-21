@@ -15,6 +15,8 @@ data class TorrentSummary(
     val rateUpload: Long,     // B/s
     val status: Int,
     val sizeWhenDone: Long,
+    // Webui stage 3: the row key the slim /dashboard/ws payload is built on.
+    val hashString: String = "",
 )
 
 data class TransmissionSummary(
@@ -51,7 +53,8 @@ class TransmissionRpcClient(
 
     fun torrentGetSummary(): List<TorrentSummary> {
         val args = JSONObject().put("fields", JSONArray(listOf(
-            "name", "percentDone", "rateDownload", "rateUpload", "status", "sizeWhenDone")))
+            "name", "percentDone", "rateDownload", "rateUpload", "status", "sizeWhenDone",
+            "hashString")))
         val resp = call("torrent-get", args) ?: return emptyList()
         val arr = resp.optJSONObject("arguments")?.optJSONArray("torrents") ?: return emptyList()
         val out = mutableListOf<TorrentSummary>()
@@ -64,6 +67,7 @@ class TransmissionRpcClient(
                 rateUpload = t.optLong("rateUpload", 0),
                 status = t.optInt("status", 0),
                 sizeWhenDone = t.optLong("sizeWhenDone", 0),
+                hashString = t.optString("hashString"),
             ))
         }
         return out

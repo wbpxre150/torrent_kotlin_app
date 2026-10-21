@@ -8,6 +8,7 @@ import com.torrent.app.config.CrawlerSettings
 import com.torrent.app.config.FtpSettings
 import com.torrent.app.config.TransmissionSettings
 import com.torrent.app.ftp.FtpStatus
+import com.torrent.app.transmission.TorrentSummary
 import com.torrent.app.transmission.TransmissionSummary
 import com.torrent.app.storage.SafStatus
 import java.io.BufferedInputStream
@@ -505,7 +506,17 @@ class ControlServerWebSocketTest {
             downloadDir = "/saf/usb/data/torrents",
             speedLimitDown = 500,
             speedLimitUp = 125,
-            torrents = emptyList(),
+            torrents = listOf(
+                TorrentSummary(
+                    name = "Ubuntu 24.04 desktop amd64",
+                    percentDone = 0.42,
+                    rateDownload = 2_048_000,
+                    rateUpload = 131_072,
+                    status = 4,
+                    sizeWhenDone = 3L shl 30,
+                    hashString = "0123456789abcdef0123456789abcdef01234567",
+                ),
+            ),
         )
         val live = startTestServer(
             TOKEN, crawlerRunning = false, crawlerPort = 1, pushPeriodMs = 150,
@@ -541,6 +552,23 @@ class ControlServerWebSocketTest {
                 assertEquals(125, tx.getInt("speedLimitUp"))
                 assertEquals(500, tx.getInt("speedLimitDown"))
                 assertFalse("slim frame must not ship a full torrents array", tx.has("torrents"))
+                // Webui stage 3: the row cells travel under `rows`, keyed by
+                // infohash, pre-formatted for the client's text patch.
+                val rows = tx.getJSONArray("rows")
+                assertEquals("one row per torrent", 1, rows.length())
+                val row = rows.getJSONObject(0)
+                assertEquals(
+                    "0123456789abcdef0123456789abcdef01234567", row.getString("infohash"))
+                assertEquals("Ubuntu 24.04 desktop amd64", row.getString("name"))
+                assertEquals("42%", row.getString("done"))
+                assertEquals("2000.0 KB/s", row.getString("down"))
+                assertEquals("128.0 KB/s", row.getString("up"))
+                assertEquals("3.0 GB", row.getString("size"))
+                assertFalse("rows carry display cells only, no status: $row", row.has("status"))
+                assertFalse(
+                    "rows carry display cells only, no raw bytes: $row",
+                    row.has("sizeWhenDone"),
+                )
             } finally {
                 ws.close()
             }
@@ -756,6 +784,8 @@ class ControlServerWebSocketTest {
                         tx.isNull(key),
                     )
                 }
+                // Webui stage 3: no snapshot means no rows either.
+                assertEquals("no rows without an RPC snapshot: $tx", 0, tx.getJSONArray("rows").length())
             } finally {
                 ws.close()
             }
