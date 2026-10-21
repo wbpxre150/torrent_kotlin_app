@@ -1184,7 +1184,20 @@ class DaemonService : Service() {
     }
 
     fun loadConfig(): com.torrent.app.config.AppConfig = configStore.load()
-    fun completeWizard() { configStore.setWizardCompleted(); startConfiguredDaemons() }
+    /**
+     * Finishes the first-run wizard: records completion, then starts everything
+     * [onStartCommand] and [startSupervisors] deferred until setup was done — the
+     * dashboard (0.0.0.0:8090), the crawler proxy (0.0.0.0:8080), the crawler and
+     * the transmission/FTP daemons. All of these are idempotent, and the crawler's
+     * mayStart gate only opens once setWizardCompleted() has run, so the order matters.
+     */
+    fun completeWizard() {
+        configStore.setWizardCompleted()
+        controlServer.start()
+        syncCrawlerProxy(configStore.load().crawler)
+        startCrawlerIfEnabled()
+        startConfiguredDaemons()
+    }
 
     private fun launchRollbackWatcher(sup: ProcessSupervisor?, statusAtApply: ProcessStatus, previous: com.torrent.app.config.AppConfig) {
         rollbackJob?.cancel()
