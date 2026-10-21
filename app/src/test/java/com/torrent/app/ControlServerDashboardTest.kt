@@ -514,4 +514,24 @@ class ControlServerDashboardTest {
         // The chip's `bad` state must be styled, not just its text changed.
         assertTrue(html.contains("#live.bad{"))
     }
+
+    /**
+     * The crawler panel's DB-restore poll renders the download progress the
+     * restore status carries: `objectsDone` of `objectCount` objects, so a
+     * 17k-object restore reads "(X of 17000 objects downloaded)" instead of a
+     * bare total. `objectsDone` is null before the count publishes, and the
+     * fragment degrades to "(N objects downloaded)" then.
+     */
+    @Test fun crawlerPanel_dbRestorePoll_showsNofMObjectsDownloaded() {
+        val page = newServer().buildCrawlerPanel(null, true, false)
+        assertTrue(
+            "the restore poll must read objectsDone",
+            page.contains("st.objectsDone"))
+        assertTrue(
+            "the restore poll must label the progress as downloaded",
+            page.contains("objects downloaded"))
+        assertTrue(
+            "the 5 s restore poll must stay wired",
+            page.contains("setInterval(pollDbRestore, 5000)"))
+    }
 }

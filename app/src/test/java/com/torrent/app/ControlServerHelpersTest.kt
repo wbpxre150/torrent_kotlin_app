@@ -256,6 +256,29 @@ class ControlServerHelpersTest {
             json)
     }
 
+    @Test fun restoreStatusJson_reportsDownloadProgressAndDropsTheKeyList() {
+        val st = com.torrent.app.backup.DbRestoreStatus(
+            state = com.torrent.app.backup.DbRestoreState.RUNNING,
+            running = true,
+            objectCount = 3,
+            objectsDone = 2,
+            objectKeys = listOf("a", "b", "c"),
+        )
+        val json = ControlServer.restoreStatusJson(st)
+        assertTrue(json, json.contains("\"objectsDone\":2"))
+        assertTrue(json, json.contains("\"objectCount\":3"))
+        // The per-object key list stays in memory only: 17k keys would flood
+        // every 5 s poll response during a real restore.
+        assertFalse(json, json.contains("\"objectKeys\""))
+        assertFalse(json, json.contains("\"a\""))
+    }
+
+    @Test fun restoreStatusJson_idleStatusHasNullProgress() {
+        val json = ControlServer.restoreStatusJson(com.torrent.app.backup.DbRestoreStatus())
+        assertTrue(json, json.contains("\"objectsDone\":null"))
+        assertTrue(json, json.contains("\"objectCount\":null"))
+    }
+
     @Test fun esc_escapesHtmlAndQuotes() {
         assertEquals("a&quot;b &amp; c&lt;d&gt;", ControlServer.esc("a\"b & c<d>"))
         assertEquals("plain", ControlServer.esc("plain"))

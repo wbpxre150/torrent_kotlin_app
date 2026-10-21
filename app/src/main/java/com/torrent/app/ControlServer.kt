@@ -1375,7 +1375,7 @@ class ControlServer(
                 fetch('/api/crawler/restore').then(function (r) { return r.json(); }).then(function (st) {
                   var box = document.getElementById('db-restore-status');
                   var text = 'DB restore: ' + st.state + (st.message ? ' \u2014 ' + st.message : '');
-                  if (st.objectCount != null) text += ' (' + st.objectCount + ' objects)';
+                  if (st.objectCount != null) text += ' (' + (st.objectsDone != null ? st.objectsDone + ' of ' : '') + st.objectCount + ' objects downloaded)';
                   if (st.lastSuccess != null) text += ' (last success ' + new Date(st.lastSuccess).toLocaleString() + ')';
                   box.textContent = text;
                 }).catch(function () {});
@@ -3921,8 +3921,10 @@ ${adultSelectionRow(adultSelection)}
         /**
          * The /api/crawler/restore response body (plan 2, Stage 4): state,
          * running, message, last attempt/success epoch millis, the last
-         * restore's object count + keys, the one-shot exit code and the
-         * output tail. Secrets never appear here.
+         * restore's object count + download progress, the one-shot exit code and
+         * the output tail. Secrets never appear here. The per-object key list is
+         * deliberately not serialized: no client reads it and a 17k-object
+         * restore would push hundreds of KB into every 5 s poll response.
          */
         internal fun restoreStatusJson(st: com.torrent.app.backup.DbRestoreStatus): String = buildString {
             append("{\"state\":\"").append(st.state.name).append("\"")
@@ -3931,8 +3933,7 @@ ${adultSelectionRow(adultSelection)}
             append(",\"lastAttempt\":").append(st.lastAttempt?.toString() ?: "null")
             append(",\"lastSuccess\":").append(st.lastSuccess?.toString() ?: "null")
             append(",\"objectCount\":").append(st.objectCount?.toString() ?: "null")
-            append(",\"objectKeys\":[").append(
-                st.objectKeys.joinToString(",") { jsonStr(it) }).append("]")
+            append(",\"objectsDone\":").append(st.objectsDone?.toString() ?: "null")
             append(",\"exitCode\":").append(st.exitCode?.toString() ?: "null")
             append(",\"lines\":[").append(
                 st.lines.joinToString(",") { jsonStr(it) }).append("]")
