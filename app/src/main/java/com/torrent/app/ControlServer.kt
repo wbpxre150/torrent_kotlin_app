@@ -216,10 +216,7 @@ class ControlServer(
                                 "restart" -> restartDaemon(label)
                             }
                         }
-                        val token = parseCookieToken(call.request.headers["Cookie"])
-                            ?: call.request.queryParameters["token"] ?: ""
-                        val qs = if (token.isNotEmpty()) "?token=$token" else ""
-                        call.respondRedirect("/$qs")
+                        redirectAuthed(call, "/")
                     }
 
                     get("saf/status") {
@@ -270,14 +267,14 @@ class ControlServer(
                             transmission = s,
                             dataSubpath = form["dataSubpath"] ?: currentCfg.dataSubpath,
                         )
-                        val token = parseCookieToken(call.request.headers["Cookie"]) ?: call.request.queryParameters["token"] ?: ""
                         val unchanged = !TransmissionApplyMode.needsRestart(currentCfg, newCfg)
                         if (unchanged) {
                             // Config is identical: nothing to persist and nothing to restart.
-                            call.respondRedirect("/settings/transmission?msg=${urlEnc("no changes")}&ok=true&token=$token")
+                            redirectAuthed(call, "/settings/transmission?msg=${urlEnc("no changes")}&ok=true")
                         } else {
                             val r = applyTransmission(newCfg, false)
-                            call.respondRedirect("/settings/transmission?msg=${urlEnc(r.message + " (restart)")}&ok=${r.ok}&token=$token")
+                            redirectAuthed(call,
+                                "/settings/transmission?msg=${urlEnc(r.message + " (restart)")}&ok=${r.ok}")
                         }
                     }
 
@@ -298,8 +295,7 @@ class ControlServer(
                             maxDownloadKiBps = form["maxDownloadKiBps"]?.toIntOrNull() ?: current.maxDownloadKiBps,
                         )
                         val r = applyFtp(s)
-                        val token = parseCookieToken(call.request.headers["Cookie"]) ?: call.request.queryParameters["token"] ?: ""
-                        call.respondRedirect("/settings/ftp?msg=${urlEnc(r.message)}&ok=${r.ok}&token=$token")
+                        redirectAuthed(call, "/settings/ftp?msg=${urlEnc(r.message)}&ok=${r.ok}")
                     }
 
                     get("settings/storage") {
@@ -316,12 +312,11 @@ class ControlServer(
                         val form = collapseForm(multi)
                         val currentCfg = loadConfig()
                         val current = currentCfg.crawler
-                        val token = parseCookieToken(call.request.headers["Cookie"]) ?: call.request.queryParameters["token"] ?: ""
                         when (val parsed = crawlerSettingsFromForm(multi, current)) {
                             // Rejected before anything is written or restarted (stage 4:
                             // an empty category selection would purge the whole database).
-                            is CrawlerSettingsFormResult.Bad -> call.respondRedirect(
-                                "/settings/crawler?msg=${urlEnc(parsed.message)}&ok=false&token=$token")
+                            is CrawlerSettingsFormResult.Bad -> redirectAuthed(call,
+                                "/settings/crawler?msg=${urlEnc(parsed.message)}&ok=false")
                             is CrawlerSettingsFormResult.Ok -> {
                                 val s = parsed.settings
                                 val backup = backupSettingsFromForm(form, currentCfg.backup)
@@ -332,8 +327,8 @@ class ControlServer(
                                 val rb = saveBackup(backup)
                                 val msg = if (r.ok && rb.ok) r.message else "${r.message} / backup: ${rb.message}"
                                 val rebuild = if (bloomChanged) "&rebuildBloom=true" else ""
-                                call.respondRedirect(
-                                    "/settings/crawler?msg=${urlEnc(msg)}&ok=${r.ok && rb.ok}&token=$token$rebuild")
+                                redirectAuthed(call,
+                                    "/settings/crawler?msg=${urlEnc(msg)}&ok=${r.ok && rb.ok}$rebuild")
                             }
                         }
                     }
@@ -482,9 +477,7 @@ class ControlServer(
                         val action = call.parameters["action"] ?: ""
                         val msg = crawlerMaintenanceStart(action)
                         val ok = !msg.startsWith("refused") && !msg.startsWith("unknown")
-                        val token = parseCookieToken(call.request.headers["Cookie"])
-                            ?: call.request.queryParameters["token"] ?: ""
-                        call.respondRedirect("/settings/crawler?msg=${urlEnc(msg)}&ok=$ok&token=$token")
+                        redirectAuthed(call, "/settings/crawler?msg=${urlEnc(msg)}&ok=$ok")
                     }
 
                     // Maintenance status JSON; `?offset=` returns only output
@@ -515,9 +508,7 @@ class ControlServer(
                     post("crawler/backup/upload") {
                         val msg = crawlerBackupUpload()
                         val ok = !msg.startsWith("refused")
-                        val token = parseCookieToken(call.request.headers["Cookie"])
-                            ?: call.request.queryParameters["token"] ?: ""
-                        call.respondRedirect("/settings/crawler?msg=${urlEnc(msg)}&ok=$ok&token=$token")
+                        redirectAuthed(call, "/settings/crawler?msg=${urlEnc(msg)}&ok=$ok")
                     }
 
                     // Backup status JSON for the crawler panel poller.
@@ -532,9 +523,7 @@ class ControlServer(
                     post("crawler/backup/db") {
                         val msg = crawlerBackupDbUpload()
                         val ok = !msg.startsWith("refused")
-                        val token = parseCookieToken(call.request.headers["Cookie"])
-                            ?: call.request.queryParameters["token"] ?: ""
-                        call.respondRedirect("/settings/crawler?msg=${urlEnc(msg)}&ok=$ok&token=$token")
+                        redirectAuthed(call, "/settings/crawler?msg=${urlEnc(msg)}&ok=$ok")
                     }
 
                     // DB backup status JSON for the crawler panel poller.
@@ -550,9 +539,7 @@ class ControlServer(
                     post("crawler/restore/db") {
                         val msg = crawlerRestoreDb()
                         val ok = !msg.startsWith("refused")
-                        val token = parseCookieToken(call.request.headers["Cookie"])
-                            ?: call.request.queryParameters["token"] ?: ""
-                        call.respondRedirect("/settings/crawler?msg=${urlEnc(msg)}&ok=$ok&token=$token")
+                        redirectAuthed(call, "/settings/crawler?msg=${urlEnc(msg)}&ok=$ok")
                     }
 
                     // DB restore status JSON for the crawler panel poller.
@@ -1675,6 +1662,24 @@ class ControlServer(
     }
 
     private fun urlEnc(s: String): String = URLEncoder.encode(s, "UTF-8")
+
+    /**
+     * Redirects a POST back to [path] with the token-free Location the
+     * dashboard client expects. The control token never rides in the URL: it
+     * is re-asserted as the `control_token` cookie instead (query-string
+     * sessions included), so a redirect target cannot leak it into history,
+     * logs or Referer headers.
+     */
+    private suspend fun redirectAuthed(call: ApplicationCall, path: String) {
+        val token = parseCookieToken(call.request.headers["Cookie"])
+            ?: call.request.queryParameters["token"] ?: ""
+        if (token.isNotEmpty()) {
+            call.response.headers.append(
+                "Set-Cookie", "control_token=$token; Path=/; HttpOnly; SameSite=Strict")
+        }
+        call.respondRedirect(path)
+    }
+
     // ── helpers ─────────────────────────────────────────────────────────────
 
     private fun formatUptime(ms: Long): String {
