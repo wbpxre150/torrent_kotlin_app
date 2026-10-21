@@ -792,8 +792,9 @@ class ControlServer(
         cfg: com.torrent.app.config.AppConfig,
         ftp: com.torrent.app.ftp.FtpStatus,
     ): String {
-        // Label goes into an attribute (data-daemon / form action) and the
-        // title text, so it is escaped once and used verbatim.
+        // The raw label goes into the attributes and form actions
+        // (data-daemon / action / data-log-for), so it is escaped once and
+        // used verbatim there; the visible title is humanized separately.
         val label = esc(d.label)
         val uptime = d.startTimeMs?.let { formatUptime(now - it) } ?: "—"
         val logs = d.lastLogLines.takeLast(30).joinToString("<br>") { esc(it) }
@@ -814,7 +815,7 @@ class ControlServer(
         }
         return """
             <section class="card daemon-card" data-daemon="$label">
-              <div class="daemon-head" data-toggle><span class="tri">▾</span><span class="dname">$label</span><span class="state ${d.state}" data-field="state">${d.state}</span>$pausedBadge</div>
+              <div class="daemon-head" data-toggle><span class="tri">▾</span><span class="dname">${esc(daemonTitle(d.label))}</span><span class="state ${d.state}" data-field="state">${d.state}</span>$pausedBadge</div>
               <div class="daemon-body">
                 <div class="row"><span class="k">PID</span><span class="v" data-field="pid">${d.pid ?: "—"}</span></div>
                 <div class="row"><span class="k">Uptime</span><span class="v" data-field="uptime">$uptime</span></div>
@@ -827,6 +828,16 @@ class ControlServer(
               </div>
             </section>
         """.trimIndent()
+    }
+
+    /** The human title a card shows for a daemon label. The raw label stays the
+     * key everywhere the client addresses it (`data-daemon`, form actions,
+     * `data-log-for`); only the visible `.dname` text is humanized. */
+    private fun daemonTitle(label: String): String = when (label) {
+        DaemonService.CRAWLER_LABEL -> "DHT Crawler"
+        DaemonService.TRANSMISSION_LABEL -> "Transmission"
+        DaemonService.FTP_LABEL -> "FTP Server"
+        else -> label
     }
 
     /** Transmission extras folded into its card: RPC link, unreachable banner,
@@ -856,7 +867,7 @@ class ControlServer(
         return listOf(
             """<div class="row"><span class="k">DB size</span><span class="v" data-field="dbSize">$dbSize</span></div>""",
             """<div class="row"><span class="k">Internal free</span><span class="v"><span data-field="internalFree">${formatBytes(free)}</span>$spaceWarn</span></div>""",
-            """<div class="row"><span class="k">Search dashboard</span><span class="v"><a href="/search">/search</a></span></div>""",
+            """<div class="row"><span class="k">Search</span><span class="v"><a href="/search">/search</a></span></div>""",
             """<div class="row"><span class="k">Stats</span><span class="v" data-field="statsLine">${esc(cachedCrawlerStatsLine ?: "—")}</span></div>""",
         )
     }
@@ -1004,9 +1015,10 @@ class ControlServer(
     }
 
     /**
-     * One [com.torrent.app.transmission.TransmissionSummary] as JSON: the field
-     * shape /downloads has always served, shared with the /dashboard/ws
-     * `transmission` object so the two serializers cannot drift.
+     * One [com.torrent.app.transmission.TransmissionSummary] as JSON in the full
+     * field shape /downloads has always served, torrent array included. The
+     * /dashboard/ws frame does not use it: a frame carries the slim
+     * [transmissionScalarsJson] object instead, so a push never ships torrents.
      */
     private fun transmissionSummaryJson(rpc: com.torrent.app.transmission.TransmissionSummary): String =
         buildString {
@@ -2149,16 +2161,18 @@ ${adultSelectionRow(adultSelection)}
         """.trimIndent()
 
         /**
-         * The dashboard live client (webui stage 3). It patches the
-         * server-rendered markup in place — `.textContent`, classes and
-         * attributes only — so scroll position and each card's open/closed
-         * state survive every push by construction: the card shell is never
-         * rebuilt and the page never navigates.
+         * The dashboard live client. It patches the server-rendered markup in
+         * place — `.textContent`, classes and attributes only — so scroll
+         * position and each card's open/closed state survive every push by
+         * construction: the card shell is never rebuilt and the page never
+         * navigates.
          *
-         * A `null` value in a frame means "no fresh snapshot yet", so the
-         * server-rendered value is left untouched (transmission, statsLine on
-         * the first frames). Logs go through [patchLogs], the single writer
-         * stage 4 refines into the tail-follow variant.
+         * `transmission` is always present in a frame — the slim
+         * [transmissionScalarsJson] object, never the torrent array — so
+         * `reachable:false` is a real outage that re-shows the banner. A `null`
+         * scalar means "no fresh value yet" and leaves the rendered cell
+         * untouched (`statsLine` until the crawler's /stats answers). Logs go
+         * through [patchLogs], the single tail-follow writer.
          */
         internal val DASHBOARD_JS = """
             (function () {

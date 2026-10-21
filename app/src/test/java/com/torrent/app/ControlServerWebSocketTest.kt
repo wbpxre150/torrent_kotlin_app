@@ -540,6 +540,7 @@ class ControlServerWebSocketTest {
                 assertFalse("speedLimitDown must be present: $tx", tx.isNull("speedLimitDown"))
                 assertEquals(125, tx.getInt("speedLimitUp"))
                 assertEquals(500, tx.getInt("speedLimitDown"))
+                assertFalse("slim frame must not ship a full torrents array", tx.has("torrents"))
             } finally {
                 ws.close()
             }

@@ -147,6 +147,33 @@ class ControlServerDashboardTest {
         }
     }
 
+    /**
+     * The cards show a human title while the raw daemon label stays the key the
+     * live client addresses (`data-daemon`, form actions, `data-log-for`), so
+     * only the visible `.dname` text is humanized.
+     */
+    @Test fun daemonCards_showHumanTitlesAndKeepTheRawLabelHooks() {
+        val titles = mapOf(
+            DaemonService.CRAWLER_LABEL to "DHT Crawler",
+            DaemonService.TRANSMISSION_LABEL to "Transmission",
+            DaemonService.FTP_LABEL to "FTP Server",
+        )
+        for ((label, title) in titles) {
+            assertTrue(
+                "$label card must show the human title",
+                card(html, label).contains("<span class=\"dname\">$title</span>"),
+            )
+            assertFalse(
+                "$label must not be rendered as its own title",
+                html.contains("<span class=\"dname\">$label</span>"),
+            )
+            assertTrue(
+                "$label card must keep the raw data-daemon hook",
+                html.contains("data-daemon=\"$label\""),
+            )
+        }
+    }
+
     @Test fun daemonsArea_keepsDaemonStatusOrder() {
         // Render order follows the supplier, so a fake that supplies a single
         // daemon (or a reordered list) still gets a coherent page.
@@ -182,6 +209,20 @@ class ControlServerDashboardTest {
             assertTrue("crawler card is missing data-field=$field", crawler.contains("data-field=\"$field\""))
         }
         assertTrue("crawler card must link the search page", crawler.contains("<a href=\"/search\">"))
+    }
+
+    /** The search link is labelled "Search": the crawler card carries no room
+     * for the old "Search dashboard" wording. */
+    @Test fun crawlerCard_labelsTheSearchLinkAsSearch() {
+        val crawler = card(html, DaemonService.CRAWLER_LABEL)
+        assertTrue(
+            "crawler card must label the search link 'Search'",
+            crawler.contains("<span class=\"k\">Search</span>"),
+        )
+        assertFalse(
+            "the old 'Search dashboard' label must be gone",
+            html.contains("Search dashboard"),
+        )
     }
 
     /**
