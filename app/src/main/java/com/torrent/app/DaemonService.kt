@@ -301,7 +301,11 @@ class DaemonService : Service() {
                 }
             },
             oneShot = { args, dir, onLine -> oneShotRunner.run(args, dir, onLine) },
-            workDir = { File(filesDir, "crawler") },
+            // The native --restore-database opens <workDir>/data/torrents.db with
+            // sqlite3_open, which does NOT create parent directories: on a fresh
+            // install (crawler never started) filesDir/crawler/data may not exist,
+            // so create it here before the one-shot runs.
+            workDir = { File(filesDir, "crawler").apply { File(this, "data").mkdirs() } },
             tmpDir = { File(filesDir, "tmp") },
             bookmarkFile = { File(filesDir, "backup/db_bookmark.txt") },
             stopCrawler = { stopCrawlerSupervisors() },
@@ -403,6 +407,13 @@ class DaemonService : Service() {
         fun requestGracefulShutdown(): Boolean = this@DaemonService.requestGracefulShutdown()
         fun requestShutdownAndExit() = this@DaemonService.requestShutdownAndExit()
         fun isShutdownRequested(): Boolean = this@DaemonService.isShutdownRequested()
+        // DB restore surface for the wizard's restore section (plan 2, Stage 2):
+        // save the section-5 values with restore validation, trigger the
+        // one-shot, and poll its in-memory status.
+        fun dbRestoreStatus(): com.torrent.app.backup.DbRestoreStatus = this@DaemonService.dbRestore.status
+        fun startDbRestore(): com.torrent.app.backup.DbRestoreStatus = this@DaemonService.dbRestore.restoreNow()
+        fun saveBackupForRestore(s: com.torrent.app.config.BackupSettings) =
+            this@DaemonService.saveBackupForRestore(s)
     }
 
     override fun onBind(intent: Intent?): IBinder = LocalBinder()
@@ -820,6 +831,21 @@ class DaemonService : Service() {
         bep51Backup.refreshConfigStatus()
         dbBackup.refreshConfigStatus()
         return com.torrent.app.config.ApplyResult(true, "backup settings saved", false)
+    }
+
+    /**
+     * Persists the section-5 backup settings on behalf of the wizard's restore
+     * section (plan 2, Stage 2): same store write as [saveBackupSettings], but
+     * gated on the stricter restore validation so the values the restore needs
+     * (endpoint, creds, DB bucket, DB prefix) are all present before they are
+     * saved. Restore itself reads them back through `dbRestore.loadSettings`.
+     */
+    fun saveBackupForRestore(s: com.torrent.app.config.BackupSettings): com.torrent.app.config.ApplyResult {
+        val errors = com.torrent.app.config.ConfigValidator.validateDbRestore(s).errors
+        if (errors.isNotEmpty()) {
+            return com.torrent.app.config.ApplyResult(false, errors.joinToString("; "), false)
+        }
+        return saveBackupSettings(s)
     }
 
     /** The port the crawler's HTTP UI listens on (the proxy port when lanDirect). */
