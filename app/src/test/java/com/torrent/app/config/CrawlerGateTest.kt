@@ -26,4 +26,23 @@ class CrawlerGateTest {
         assertFalse(CrawlerGate.exitedDuringWatch(2, 2))
         assertTrue(CrawlerGate.exitedDuringWatch(2, 3))
     }
+
+    @Test fun mayStart_wizardCompleteAndGateOpen_starts() {
+        assertTrue(CrawlerGate.mayStart(true, true, false, true))
+        assertTrue(CrawlerGate.mayStart(true, true, false, false))
+        assertTrue(CrawlerGate.mayStart(true, true, true, true))
+    }
+
+    @Test fun mayStart_wizardIncomplete_neverStarts() {
+        assertFalse(CrawlerGate.mayStart(false, true, false, true))
+        assertFalse(CrawlerGate.mayStart(false, true, true, true))
+    }
+
+    @Test fun mayStart_disabled_neverStarts() {
+        assertFalse(CrawlerGate.mayStart(true, false, false, true))
+    }
+
+    @Test fun mayStart_wifiOnlyWithoutWifi_doesNotStart() {
+        assertFalse(CrawlerGate.mayStart(true, true, true, false))
+    }
 }
