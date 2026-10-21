@@ -33,6 +33,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.Color
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.delay
@@ -369,6 +370,71 @@ fun WizardScreen(
     var bootstrapEnabled by remember { mutableStateOf(cfg?.backup?.bootstrapEnabled ?: false) }
     var bootstrapUrl by remember { mutableStateOf(cfg?.backup?.bootstrapUrl ?: "") }
     var errors by remember { mutableStateOf<List<String>>(emptyList()) }
+    // Section 6 restore gate: deliberately session-only (NOT rememberSaveable) —
+    // a re-shown wizard must not inherit a stale "restored" verdict, and
+    // "Finish setup" is unlocked only by a real SUCCESS from this session.
+    var restoreEnabled by remember { mutableStateOf(false) }
+    var restoreStatus by remember { mutableStateOf<com.torrent.app.backup.DbRestoreStatus?>(null) }
+    var restoreError by remember { mutableStateOf<String?>(null) }
+
+    // One form builder shared by "Restore now" and "Finish setup" so both see
+    // exactly the same mapping (including blank-secret-keeps-current below).
+    val buildForm = {
+        WizardSubmit.Form(
+            txUsername = txUser,
+            txPassword = txPass,
+            peerPort = peerPort.toIntOrNull() ?: 0,
+            dataSubpath = dlSubpath,
+            ftpUsername = ftpUser,
+            ftpPassword = ftpPass,
+            ftpPort = ftpPort.toIntOrNull() ?: 0,
+            ftpWifiOnly = ftpWifiOnly,
+            crawlerEnabled = crawlerEnabled,
+            crawlerAdultMode = if (crawlerAdultDrop) "drop" else "tag",
+            crawlerSaveCategories =
+                CrawlerTaxonomy.CATEGORIES.filter { it in saveCategories },
+            r2Endpoint = r2Endpoint,
+            r2Bucket = r2Bucket,
+            r2ObjectKey = r2ObjectKey,
+            r2AccessKeyId = r2AccessKeyId,
+            // Blank secret keeps the current value (same as the dashboard form),
+            // so re-showing the wizard with upload enabled can't fail on it.
+            r2SecretAccessKey =
+                if (r2SecretAccessKey.isBlank()) (boundService?.loadConfig()?.backup?.r2SecretAccessKey ?: "")
+                else r2SecretAccessKey,
+            uploadEnabled = uploadEnabled,
+            dbBackupEnabled = dbBackupEnabled,
+            r2DbBucket = r2DbBucket,
+            r2DbObjectPrefix = r2DbObjectPrefix,
+            bootstrapEnabled = bootstrapEnabled,
+            bootstrapUrl = bootstrapUrl,
+        )
+    }
+
+    // Saves the section-5 R2 values (restore validation) and starts the one-shot.
+    // A rejected save is a form error, not a restore attempt: it clears any
+    // previous status so a stale SUCCESS can't keep "Finish setup" unlocked.
+    fun doRestoreNow() {
+        val svc = boundService ?: return
+        val r = svc.saveBackupForRestore(WizardSubmit.backupSettings(buildForm()))
+        if (!r.ok) {
+            restoreError = r.message
+            restoreStatus = null
+        } else {
+            restoreError = null
+            restoreStatus = svc.startDbRestore()
+        }
+    }
+
+    // Follows RUNNING → SUCCESS/FAILED without blocking the main thread: the
+    // restore itself runs on the service's crawlerControlExecutor, and these
+    // status reads are cheap volatile/isBusy snapshots.
+    LaunchedEffect(restoreStatus?.running) {
+        while (isActive && restoreStatus?.running == true) {
+            delay(1000)
+            restoreStatus = boundService?.dbRestoreStatus()
+        }
+    }
 
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState()),
@@ -450,6 +516,43 @@ fun WizardScreen(
         OutlinedTextField(bootstrapUrl, { bootstrapUrl = it }, label = { Text("Bootstrap URL (https://…)") })
         Text("If set, the cache is downloaded before the crawler first starts.",
              style = MaterialTheme.typography.bodyMedium)
+
+        Text("6. Restore crawler DB from R2 (optional)", style = MaterialTheme.typography.titleMedium)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Switch(checked = restoreEnabled, onCheckedChange = { restoreEnabled = it })
+            Spacer(Modifier.width(8.dp))
+            Text("Restore the crawler DB from the R2 dump chain (uses the R2 credentials above)")
+        }
+        Button(
+            onClick = { doRestoreNow() },
+            enabled = boundService != null && restoreEnabled,
+        ) { Text("Restore now") }
+        // Prefix by state so a refused/not-configured attempt can never read as success.
+        val st = restoreStatus
+        if (st != null) {
+            Text(
+                text = when (st.state) {
+                    com.torrent.app.backup.DbRestoreState.SUCCESS -> "Restore succeeded — ${st.message}"
+                    com.torrent.app.backup.DbRestoreState.FAILED,
+                    com.torrent.app.backup.DbRestoreState.NOT_CONFIGURED,
+                    com.torrent.app.backup.DbRestoreState.REFUSED_BUSY,
+                    com.torrent.app.backup.DbRestoreState.REFUSED_RUNNING -> "Restore failed — ${st.message}"
+                    else -> "Restore running — ${st.message}"
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = when (st.state) {
+                    com.torrent.app.backup.DbRestoreState.SUCCESS -> Color(0xFF2E7D32)
+                    com.torrent.app.backup.DbRestoreState.FAILED,
+                    com.torrent.app.backup.DbRestoreState.NOT_CONFIGURED,
+                    com.torrent.app.backup.DbRestoreState.REFUSED_BUSY,
+                    com.torrent.app.backup.DbRestoreState.REFUSED_RUNNING -> MaterialTheme.colorScheme.error
+                    else -> MaterialTheme.colorScheme.onSurface
+                },
+            )
+        }
+        restoreError?.let {
+            Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
+        }
         if (errors.isNotEmpty()) {
             Column { errors.forEach { Text(it, color = MaterialTheme.colorScheme.error) } }
         }
@@ -457,35 +560,7 @@ fun WizardScreen(
         Button(
             onClick = {
                 val svc = boundService ?: return@Button
-                val form = WizardSubmit.Form(
-                    txUsername = txUser,
-                    txPassword = txPass,
-                    peerPort = peerPort.toIntOrNull() ?: 0,
-                    dataSubpath = dlSubpath,
-                    ftpUsername = ftpUser,
-                    ftpPassword = ftpPass,
-                    ftpPort = ftpPort.toIntOrNull() ?: 0,
-                    ftpWifiOnly = ftpWifiOnly,
-                    crawlerEnabled = crawlerEnabled,
-                    crawlerAdultMode = if (crawlerAdultDrop) "drop" else "tag",
-                    crawlerSaveCategories =
-                        CrawlerTaxonomy.CATEGORIES.filter { it in saveCategories },
-                    r2Endpoint = r2Endpoint,
-                    r2Bucket = r2Bucket,
-                    r2ObjectKey = r2ObjectKey,
-                    r2AccessKeyId = r2AccessKeyId,
-                    // Blank secret keeps the current value (same as the dashboard form),
-                    // so re-showing the wizard with upload enabled can't fail on it.
-                    r2SecretAccessKey =
-                        if (r2SecretAccessKey.isBlank()) (svc.loadConfig()?.backup?.r2SecretAccessKey ?: "")
-                        else r2SecretAccessKey,
-                    uploadEnabled = uploadEnabled,
-                    dbBackupEnabled = dbBackupEnabled,
-                    r2DbBucket = r2DbBucket,
-                    r2DbObjectPrefix = r2DbObjectPrefix,
-                    bootstrapEnabled = bootstrapEnabled,
-                    bootstrapUrl = bootstrapUrl,
-                )
+                val form = buildForm()
                 val outcome = WizardSubmit.submit(form)
                 if (!outcome.ok) { errors = outcome.errors; return@Button }
                 // Transmission apply first: it persists the shared data dir, which the
@@ -511,7 +586,8 @@ fun WizardScreen(
                 }
                 else { errors = listOf(ftpR.message, txR.message).filter { it.isNotEmpty() } }
             },
-            enabled = boundService != null && safStatus?.granted == true,
+            enabled = boundService != null && safStatus?.granted == true &&
+                com.torrent.app.backup.WizardRestoreGate.canFinish(restoreEnabled, restoreStatus?.state),
         ) { Text("Finish setup") }
     }
 }
