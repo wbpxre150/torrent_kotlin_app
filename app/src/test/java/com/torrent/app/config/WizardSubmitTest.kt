@@ -180,6 +180,44 @@ class WizardSubmitTest {
         assertTrue(o.errors.any { it.contains("prefix", true) })
     }
 
+    @Test fun backupSettings_mapsAllBackupFields() {
+        val f = validForm().copy(
+            r2Endpoint = "https://acme.r2.cloudflarestorage.com",
+            r2Bucket = "cache",
+            r2ObjectKey = "bep51/other.dat.gz",
+            r2AccessKeyId = "AKID",
+            r2SecretAccessKey = "s3cr3t",
+            uploadEnabled = true,
+            dbBackupEnabled = true,
+            r2DbBucket = "my-dht-backup",
+            r2DbObjectPrefix = "custom",
+            bootstrapEnabled = true,
+            bootstrapUrl = "https://example.com/cache.dat.gz",
+        )
+        val b = WizardSubmit.backupSettings(f)
+        assertEquals("https://acme.r2.cloudflarestorage.com", b.r2Endpoint)
+        assertEquals("cache", b.r2Bucket)
+        assertEquals("bep51/other.dat.gz", b.r2ObjectKey)
+        assertEquals("AKID", b.r2AccessKeyId)
+        assertEquals("s3cr3t", b.r2SecretAccessKey)
+        assertTrue(b.uploadEnabled)
+        assertTrue(b.dbBackupEnabled)
+        assertEquals("my-dht-backup", b.r2DbBucket)
+        assertEquals("custom", b.r2DbObjectPrefix)
+        assertTrue(b.bootstrapEnabled)
+        assertEquals("https://example.com/cache.dat.gz", b.bootstrapUrl)
+    }
+
+    @Test fun backupSettings_matchesSubmitOutcome() {
+        val f = validForm().copy(
+            r2Endpoint = "https://acme.r2.cloudflarestorage.com",
+            r2AccessKeyId = "AKID",
+            r2SecretAccessKey = "s3cr3t",
+            dbBackupEnabled = true,
+        )
+        assertEquals(WizardSubmit.backupSettings(f), WizardSubmit.submit(f).backup)
+    }
+
     @Test fun crawlerSaveCategoriesDefaultsToMediaSet() {
         val o = WizardSubmit.submit(validForm())
         assertTrue(o.ok)

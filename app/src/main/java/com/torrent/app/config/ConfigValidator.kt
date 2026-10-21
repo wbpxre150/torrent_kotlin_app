@@ -139,6 +139,20 @@ object ConfigValidator {
         return ValidationResult(errors.isEmpty(), errors)
     }
 
+    /**
+     * Validates the wizard's optional "Restore crawler DB from R2" section
+     * (section 6). It reuses section 5's R2 endpoint/keys and DB bucket/prefix,
+     * so a restore can only work when those are present: the upload/bootstrap
+     * checks of [validateBackup] apply, plus the [validateDbBackup] checks with
+     * [BackupSettings.dbBackupEnabled] forced on (the restore reads exactly the
+     * objects the DB dump writes). The restore switch itself is in-session only
+     * and is not part of [BackupSettings].
+     */
+    fun validateDbRestore(b: BackupSettings): ValidationResult {
+        val errors = validateBackup(b).errors +
+                     validateDbBackup(b.copy(dbBackupEnabled = true)).errors
+        return ValidationResult(errors.isEmpty(), errors)
+    }
     private fun validPort(p: Int) = p in 1..65535
 
     /** `https://` scheme with a non-empty host; `http://`, hostless and unparsable URLs are rejected. */

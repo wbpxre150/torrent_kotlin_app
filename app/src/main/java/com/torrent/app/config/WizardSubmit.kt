@@ -50,19 +50,7 @@ object WizardSubmit {
             speedLimitDown = 0, speedLimitUp = 0, altSpeedDown = 0, altSpeedUp = 0,
         )
         val ftp = FtpSettings(f.ftpUsername, f.ftpPassword, f.ftpPort, f.ftpWifiOnly)
-        val backup = BackupSettings(
-            r2Endpoint = f.r2Endpoint,
-            r2Bucket = f.r2Bucket,
-            r2ObjectKey = f.r2ObjectKey,
-            r2AccessKeyId = f.r2AccessKeyId,
-            r2SecretAccessKey = f.r2SecretAccessKey,
-            uploadEnabled = f.uploadEnabled,
-            dbBackupEnabled = f.dbBackupEnabled,
-            r2DbBucket = f.r2DbBucket,
-            r2DbObjectPrefix = f.r2DbObjectPrefix,
-            bootstrapEnabled = f.bootstrapEnabled,
-            bootstrapUrl = f.bootstrapUrl,
-        )
+        val backup = backupSettings(f)
         val cfg = AppConfig(
             wizardCompleted = true,
             transmission = tx,
@@ -86,6 +74,25 @@ object WizardSubmit {
                    )
                else Outcome(false, errors, null, null, null, false, adultMode, saveCategories)
     }
+
+    /**
+     * Builds the app-side [BackupSettings] from the wizard form. Shared by
+     * [submit] and by the restore section's validation so both see exactly the
+     * same R2 endpoint/keys/DB bucket/prefix mapping.
+     */
+    fun backupSettings(f: Form): BackupSettings = BackupSettings(
+        r2Endpoint = f.r2Endpoint,
+        r2Bucket = f.r2Bucket,
+        r2ObjectKey = f.r2ObjectKey,
+        r2AccessKeyId = f.r2AccessKeyId,
+        r2SecretAccessKey = f.r2SecretAccessKey,
+        uploadEnabled = f.uploadEnabled,
+        dbBackupEnabled = f.dbBackupEnabled,
+        r2DbBucket = f.r2DbBucket,
+        r2DbObjectPrefix = f.r2DbObjectPrefix,
+        bootstrapEnabled = f.bootstrapEnabled,
+        bootstrapUrl = f.bootstrapUrl,
+    )
 
     /**
      * Normalises a `save_categories` selection to names the crawler knows.

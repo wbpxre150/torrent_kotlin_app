@@ -285,4 +285,45 @@ class ConfigValidatorTest {
         assertFalse(ConfigValidator.validateDbBackup(
             validBackup().copy(dbBackupEnabled = true, r2DbObjectPrefix = "a/b")).ok)
     }
+
+    @Test fun dbRestoreValidConfig_passes() {
+        assertTrue(ConfigValidator.validateDbRestore(validBackup()).ok)
+    }
+
+    @Test fun dbRestoreBlankEndpoint_fails() {
+        val r = ConfigValidator.validateDbRestore(validBackup().copy(r2Endpoint = ""))
+        assertFalse(r.ok); assertTrue(r.errors.any { it.contains("R2 endpoint", true) })
+    }
+
+    @Test fun dbRestoreHttpEndpoint_fails() {
+        val r = ConfigValidator.validateDbRestore(validBackup().copy(r2Endpoint = "http://acme.r2.cloudflarestorage.com"))
+        assertFalse(r.ok); assertTrue(r.errors.any { it.contains("R2 endpoint", true) })
+    }
+
+    @Test fun dbRestoreBlankDbBucketAndKeys_fails() {
+        val r = ConfigValidator.validateDbRestore(
+            validBackup().copy(r2DbBucket = "", r2AccessKeyId = "", r2SecretAccessKey = ""))
+        assertFalse(r.ok)
+        assertTrue(r.errors.any { it.contains("DB bucket", true) })
+        assertTrue(r.errors.any { it.contains("access key ID", true) })
+        assertTrue(r.errors.any { it.contains("secret access key", true) })
+    }
+
+    @Test fun dbRestoreBlankPrefixFailsEvenWithDbBackupOff() {
+        val r = ConfigValidator.validateDbRestore(
+            validBackup().copy(dbBackupEnabled = false, r2DbObjectPrefix = ""))
+        assertFalse(r.ok); assertTrue(r.errors.any { it.contains("prefix", true) })
+    }
+
+    @Test fun dbRestoreSlashPrefixFailsEvenWithDbBackupOff() {
+        val r = ConfigValidator.validateDbRestore(
+            validBackup().copy(dbBackupEnabled = false, r2DbObjectPrefix = "a/b"))
+        assertFalse(r.ok); assertTrue(r.errors.any { it.contains("prefix", true) })
+    }
+
+    @Test fun dbRestoreHttpBootstrapUrl_fails() {
+        val r = ConfigValidator.validateDbRestore(
+            validBackup().copy(bootstrapUrl = "http://example.com/cache.dat.gz"))
+        assertFalse(r.ok); assertTrue(r.errors.any { it.contains("bootstrap", true) })
+    }
 }
