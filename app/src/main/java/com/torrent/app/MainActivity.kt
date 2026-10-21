@@ -570,6 +570,23 @@ fun WizardScreen(
                     else -> MaterialTheme.colorScheme.onSurface
                 },
             )
+            // The per-object counter is all the progress math needed — no ETA/rate logic.
+            // Both counts must be known: a RUNNING restore that is still listing has no M.
+            val done = st.objectsDone
+            val total = st.objectCount
+            com.torrent.app.backup.RestoreProgressText.format(done, total)?.let {
+                Text(
+                    text = it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (st.running && done != null && total != null && total > 0) {
+                LinearProgressIndicator(
+                    progress = { done.toFloat() / total },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
         }
         restoreError?.let {
             Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
