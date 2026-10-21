@@ -36,6 +36,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Color
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.isActive
@@ -370,12 +371,23 @@ fun WizardScreen(
     var bootstrapEnabled by remember { mutableStateOf(cfg?.backup?.bootstrapEnabled ?: false) }
     var bootstrapUrl by remember { mutableStateOf(cfg?.backup?.bootstrapUrl ?: "") }
     var errors by remember { mutableStateOf<List<String>>(emptyList()) }
-    // Section 6 restore gate: deliberately session-only (NOT rememberSaveable) —
+    // Section 6 restore gate: session-only (NOT rememberSaveable, never persisted) —
     // a re-shown wizard must not inherit a stale "restored" verdict, and
-    // "Finish setup" is unlocked only by a real SUCCESS from this session.
-    var restoreEnabled by remember { mutableStateOf(false) }
-    var restoreStatus by remember { mutableStateOf<com.torrent.app.backup.DbRestoreStatus?>(null) }
-    var restoreError by remember { mutableStateOf<String?>(null) }
+    // "Finish setup" is unlocked only by a real SUCCESS from this session. It does
+    // however have to survive a configuration change (rotation), otherwise the gate
+    // silently re-locks while the restore keeps running in the service — hence the
+    // ViewModel (activity ViewModelStore scope, dies with the process).
+    val restoreVm = viewModel<WizardRestoreViewModel>()
+    var restoreEnabled by restoreVm.restoreEnabled
+    var restoreStatus by restoreVm.restoreStatus
+    var restoreError by restoreVm.restoreError
+
+    // Editing any field the restore consumes invalidates a stale verdict (a SUCCESS would
+    // otherwise keep "Finish setup" unlocked for values that were never restored from).
+    // A live RUNNING status is never hidden: the polling effect below stays attached.
+    fun invalidateRestore() {
+        restoreStatus = restoreStatus?.takeIf { it.running }
+    }
 
     // One form builder shared by "Restore now" and "Finish setup" so both see
     // exactly the same mapping (including blank-secret-keeps-current below).
@@ -412,14 +424,14 @@ fun WizardScreen(
     }
 
     // Saves the section-5 R2 values (restore validation) and starts the one-shot.
-    // A rejected save is a form error, not a restore attempt: it clears any
-    // previous status so a stale SUCCESS can't keep "Finish setup" unlocked.
+    // A rejected save is a form error, not a restore attempt: it clears any previous
+    // verdict so a stale SUCCESS can't keep "Finish setup" unlocked — but a restore
+    // that is still RUNNING stays visible, or its polling effect would detach mid-restore.
     fun doRestoreNow() {
         val svc = boundService ?: return
         val r = svc.saveBackupForRestore(WizardSubmit.backupSettings(buildForm()))
         if (!r.ok) {
-            restoreError = r.message
-            restoreStatus = null
+            restoreStatus = svc.dbRestoreStatus().takeIf { it.running }
         } else {
             restoreError = null
             restoreStatus = svc.startDbRestore()
@@ -498,17 +510,17 @@ fun WizardScreen(
             Switch(checked = uploadEnabled, onCheckedChange = { uploadEnabled = it })
             Spacer(Modifier.width(8.dp)); Text("Enable R2 upload")
         }
-        OutlinedTextField(r2Endpoint, { r2Endpoint = it }, label = { Text("R2 endpoint (https://<accountid>.r2.cloudflarestorage.com)") })
+        OutlinedTextField(r2Endpoint, { r2Endpoint = it; invalidateRestore() }, label = { Text("R2 endpoint (https://<accountid>.r2.cloudflarestorage.com)") })
         OutlinedTextField(r2Bucket, { r2Bucket = it }, label = { Text("R2 bucket") })
         OutlinedTextField(r2ObjectKey, { r2ObjectKey = it }, label = { Text("R2 object key") })
-        OutlinedTextField(r2AccessKeyId, { r2AccessKeyId = it }, label = { Text("R2 access key ID") })
-        OutlinedTextField(r2SecretAccessKey, { r2SecretAccessKey = it }, label = { Text("R2 secret access key") })
+        OutlinedTextField(r2AccessKeyId, { r2AccessKeyId = it; invalidateRestore() }, label = { Text("R2 access key ID") })
+        OutlinedTextField(r2SecretAccessKey, { r2SecretAccessKey = it; invalidateRestore() }, label = { Text("R2 secret access key") })
         Row(verticalAlignment = Alignment.CenterVertically) {
             Switch(checked = dbBackupEnabled, onCheckedChange = { dbBackupEnabled = it })
             Spacer(Modifier.width(8.dp)); Text("Enable daily DB dump upload (uses the R2 credentials above)")
         }
-        OutlinedTextField(r2DbBucket, { r2DbBucket = it }, label = { Text("R2 DB bucket") })
-        OutlinedTextField(r2DbObjectPrefix, { r2DbObjectPrefix = it }, label = { Text("R2 DB object prefix") })
+        OutlinedTextField(r2DbBucket, { r2DbBucket = it; invalidateRestore() }, label = { Text("R2 DB bucket") })
+        OutlinedTextField(r2DbObjectPrefix, { r2DbObjectPrefix = it; invalidateRestore() }, label = { Text("R2 DB object prefix") })
         Row(verticalAlignment = Alignment.CenterVertically) {
             Switch(checked = bootstrapEnabled, onCheckedChange = { bootstrapEnabled = it })
             Spacer(Modifier.width(8.dp)); Text("Enable bootstrap download (fresh installs)")
@@ -528,10 +540,13 @@ fun WizardScreen(
             enabled = boundService != null && restoreEnabled,
         ) { Text("Restore now") }
         // Prefix by state so a refused/not-configured attempt can never read as success.
+        // A RUNNING status is checked first: a mid-restore double-tap answers
+        // REFUSED_RUNNING with running=true and must render as running, not "failed".
         val st = restoreStatus
         if (st != null) {
             Text(
-                text = when (st.state) {
+                text = if (st.running) "Restore running — ${st.message}"
+                else when (st.state) {
                     com.torrent.app.backup.DbRestoreState.SUCCESS -> "Restore succeeded — ${st.message}"
                     com.torrent.app.backup.DbRestoreState.FAILED,
                     com.torrent.app.backup.DbRestoreState.NOT_CONFIGURED,
@@ -540,7 +555,8 @@ fun WizardScreen(
                     else -> "Restore running — ${st.message}"
                 },
                 style = MaterialTheme.typography.bodyMedium,
-                color = when (st.state) {
+                color = if (st.running) MaterialTheme.colorScheme.onSurface
+                else when (st.state) {
                     com.torrent.app.backup.DbRestoreState.SUCCESS -> Color(0xFF2E7D32)
                     com.torrent.app.backup.DbRestoreState.FAILED,
                     com.torrent.app.backup.DbRestoreState.NOT_CONFIGURED,
