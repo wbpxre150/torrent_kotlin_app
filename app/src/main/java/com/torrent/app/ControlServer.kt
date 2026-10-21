@@ -872,17 +872,24 @@ class ControlServer(
 
     /**
      * The transmission torrent table, still server-rendered inside the
-     * transmission card (it refreshes on reload, exactly as before).
+     * transmission card. The live client patches it in place from the frame's
+     * `transmission.rows` (webui stage 4): every torrent row is keyed by its
+     * infohash (`data-infohash`) and the empty-state row is always rendered
+     * (`tr.tx-empty`), only hidden while there are torrents, so an
+     * add→remove cycle always has a row to toggle back on.
      */
     private fun downloadsTable(
         rpc: com.torrent.app.transmission.TransmissionSummary?,
     ): String {
         if (rpc == null) return ""
+        val emptyHidden = if (rpc.torrents.isEmpty()) "" else " hidden"
         return buildString {
             append("<table class=\"tx\"><tr><th>Torrent</th><th>Done</th><th>Down</th><th>Up</th><th>Size</th></tr>")
-            if (rpc.torrents.isEmpty()) append("<tr><td colspan=\"5\"><em>No torrents.</em></td></tr>")
+            append("<tr class=\"tx-empty\"").append(emptyHidden)
+                .append("><td colspan=\"5\"><em>No torrents.</em></td></tr>")
             for (t in rpc.torrents) {
-                append("<tr><td>").append(esc(t.name)).append("</td>")
+                append("<tr data-infohash=\"").append(esc(t.hashString)).append("\">")
+                append("<td>").append(esc(t.name)).append("</td>")
                 append("<td>").append("%.0f%%".format(t.percentDone * 100)).append("</td>")
                 append("<td>").append(formatRate(t.rateDownload)).append("</td>")
                 append("<td>").append(formatRate(t.rateUpload)).append("</td>")
@@ -2258,6 +2265,56 @@ ${adultSelectionRow(adultSelection)}
                 pre.setAttribute('data-logsig', sig);
                 if (wasAtBottom) pre.scrollTop = pre.scrollHeight;
               }
+              // The torrent table is server-rendered and patched in place: rows
+              // are keyed by infohash, a new one is built from
+              // document.createElement (never markup), a gone one is removed,
+              // and the persistent empty-state row only has its `hidden`
+              // attribute toggled. Nothing is rebuilt, so the card shell, the
+              // page scroll and every card's open/closed state survive by
+              // construction.
+              function patchTorrentRows(rows) {
+                var table = document.querySelector('table.tx');
+                if (!table) return;
+                var empty = table.querySelector('tr.tx-empty');
+                var existing = table.querySelectorAll('tr[data-infohash]');
+                var byHash = {};
+                for (var i = 0; i < existing.length; i++) {
+                  var h = existing[i].getAttribute('data-infohash');
+                  if (h) byHash[h] = existing[i];
+                }
+                var kept = {};
+                for (var r = 0; r < rows.length; r++) {
+                  var row = rows[r];
+                  if (!row || !row.infohash) continue;
+                  var tr = byHash[row.infohash];
+                  if (!tr) {
+                    tr = document.createElement('tr');
+                    tr.setAttribute('data-infohash', row.infohash);
+                    for (var c = 0; c < 5; c++) {
+                      tr.appendChild(document.createElement('td'));
+                    }
+                    if (empty && empty.parentNode === table) {
+                      table.insertBefore(tr, empty);
+                    } else {
+                      table.appendChild(tr);
+                    }
+                  }
+                  var cells = tr.querySelectorAll('td');
+                  patchText(cells[0], row.name);
+                  patchText(cells[1], row.done);
+                  patchText(cells[2], row.down);
+                  patchText(cells[3], row.up);
+                  patchText(cells[4], row.size);
+                  kept[row.infohash] = true;
+                }
+                for (var j = 0; j < existing.length; j++) {
+                  var old = existing[j];
+                  var oh = old.getAttribute('data-infohash');
+                  if (!oh || kept[oh]) continue;
+                  if (old.parentNode) old.parentNode.removeChild(old);
+                }
+                if (empty) empty.hidden = rows.length > 0;
+              }
 
               // A frame that fails to parse is a dropped frame; without this
               // the feed froze silently while the chip stayed green (a control
@@ -2332,6 +2389,9 @@ ${adultSelectionRow(adultSelection)}
                     patchText(field('limits'),
                       '↓' + tx.speedLimitDown + ' ↑' + tx.speedLimitUp +
                       ' KB/s (0 = unlimited)');
+                    // Webui stage 4: the torrent rows travel under `rows`
+                    // (never `torrents`), keyed by infohash, pre-formatted.
+                    if (Array.isArray(tx.rows)) patchTorrentRows(tx.rows);
                   } else {
                     if (red) red.hidden = false;
                     patchText(field('downloadDir'), '—');

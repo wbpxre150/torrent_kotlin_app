@@ -298,6 +298,30 @@ class ControlServerDashboardTest {
         )
     }
 
+    /**
+     * Webui stage 4: the torrent table is patched row by row from the frame's
+     * `transmission.rows`, keyed by infohash. New rows are built with
+     * document.createElement and filled via patchText, so no markup is rebuilt
+     * (card shell, page scroll and open/closed state survive by construction).
+     */
+    @Test fun dashboardScript_patchesTorrentRowsByInfohash() {
+        val script = inlineScript(html)
+        assertTrue("the torrent row writer is missing", script.contains("patchTorrentRows("))
+        assertTrue("rows must be addressed by infohash", script.contains("tr[data-infohash]"))
+        assertTrue(
+            "a new row must be built as an element, not as markup",
+            script.contains("createElement('tr')"),
+        )
+        assertTrue("the frame rows hook is missing", script.contains("tx.rows"))
+        assertTrue("the empty-state row must be toggleable", script.contains("tx-empty"))
+        // Cells go through the single text writer and the row list is not
+        // rebuilt: the forbidden writers stay out (see the never-rebuilds test).
+        assertTrue(
+            "the row cells must be written with patchText",
+            script.indexOf("patchTorrentRows(") < script.indexOf("patchText(cells[0]"),
+        )
+    }
+
     @Test fun everyCard_hasThreeActionFormsAndOneLogPane() {
         for (label in LABELS) {
             val c = card(html, label)
