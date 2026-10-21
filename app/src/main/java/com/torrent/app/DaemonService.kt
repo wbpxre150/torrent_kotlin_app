@@ -443,8 +443,13 @@ class DaemonService : Service() {
         startForegroundWithNotification()
 
         _state.value = ServiceState.Running
-        controlServer.start()
-        syncCrawlerProxy(configStore.load().crawler)
+        // Nothing may listen before the first-run wizard is finished: the dashboard
+        // (0.0.0.0:8090) and the crawler proxy (0.0.0.0:8080) are deferred until then;
+        // completeWizard() starts both once setup is done.
+        if (configStore.load().wizardCompleted) {
+            controlServer.start()
+            syncCrawlerProxy(configStore.load().crawler)
+        }
         safIpcServer.start()
         ftpSafIpcServer.start()
         ftpHangWatchdog.start()
@@ -1032,7 +1037,7 @@ class DaemonService : Service() {
         crawlerObservingJob = MainScope().launch {
             wifiGateMonitor.state.collect { ws ->
                 val crawler = configStore.load().crawler
-                if (CrawlerGate.shouldRun(crawler.enabled, crawler.wifiOnly, ws.wifi)) {
+                if (CrawlerGate.mayStart(configStore.load().wizardCompleted, crawler.enabled, crawler.wifiOnly, ws.wifi)) {
                     crawlerPausedNoWifi = false
                     runOnCrawlerControl { startCrawlerSupervisor() }
                 } else {
@@ -1068,7 +1073,7 @@ class DaemonService : Service() {
             // every other crawler lifecycle op (apply/gate), not
             // on the per-label daemon-action executor.
             val c = configStore.load().crawler
-            if (!CrawlerGate.shouldRun(c.enabled, c.wifiOnly, wifiGateMonitor.state.value.wifi)) {
+            if (!CrawlerGate.mayStart(configStore.load().wizardCompleted, c.enabled, c.wifiOnly, wifiGateMonitor.state.value.wifi)) {
                 return false
             }
             return runOnCrawlerControl {
@@ -1119,7 +1124,7 @@ class DaemonService : Service() {
         // crawler-control executor with every other crawler lifecycle op.
         if (label == CRAWLER_LABEL) {
             val c = configStore.load().crawler
-            if (!CrawlerGate.shouldRun(c.enabled, c.wifiOnly, wifiGateMonitor.state.value.wifi)) {
+            if (!CrawlerGate.mayStart(configStore.load().wizardCompleted, c.enabled, c.wifiOnly, wifiGateMonitor.state.value.wifi)) {
                 return false
             }
             startCrawlerSupervisor()
@@ -1304,7 +1309,7 @@ class DaemonService : Service() {
         // daemons table — start it here only when the wifi gate allows
         // (plan 10 §5); the gate collector starts it as soon as wifi is up.
         val crawler = configStore.load().crawler
-        if (CrawlerGate.shouldRun(crawler.enabled, crawler.wifiOnly, wifiGateMonitor.state.value.wifi)) {
+        if (CrawlerGate.mayStart(configStore.load().wizardCompleted, crawler.enabled, crawler.wifiOnly, wifiGateMonitor.state.value.wifi)) {
             startCrawlerSupervisor()
         }
     }
@@ -1498,7 +1503,7 @@ class DaemonService : Service() {
      */
     private fun startCrawlerIfEnabled() {
         val c = configStore.load().crawler
-        if (CrawlerGate.shouldRun(c.enabled, c.wifiOnly, wifiGateMonitor.state.value.wifi)) {
+        if (CrawlerGate.mayStart(configStore.load().wizardCompleted, c.enabled, c.wifiOnly, wifiGateMonitor.state.value.wifi)) {
             startCrawlerSupervisor()
         }
     }
