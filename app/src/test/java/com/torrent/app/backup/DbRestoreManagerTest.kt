@@ -46,6 +46,10 @@ class DbRestoreManagerTest {
         val bodies = mutableMapOf<String, ByteArray>()
         var listCalls = 0
         val getOrder = mutableListOf<String>()
+        /** Optional probe invoked at the top of every [get], so a test can
+         *  snapshot the manager's progress between downloads. */
+        var statusProbe: (() -> DbRestoreStatus)? = null
+        val getSnapshots = mutableListOf<DbRestoreStatus>()
 
         override fun list(prefix: String): S3ListResult {
             listCalls++
@@ -53,6 +57,7 @@ class DbRestoreManagerTest {
         }
 
         override fun get(objectKey: String): S3GetResult {
+            statusProbe?.let { getSnapshots.add(it()) }
             getOrder.add(objectKey)
             val body = bodies[objectKey]
                 ?: return S3GetResult.ClientError(404, "missing $objectKey")
@@ -112,6 +117,7 @@ class DbRestoreManagerTest {
         clock: () -> Long = { T0 },
         bookmarkFile: File = File(tmp.root, "db_bookmark.txt"),
         objects: List<Pair<String, String>> = emptyList(),
+        executor: CapturingExecutor = CapturingExecutor(),
         stopThrows: Boolean = false,
     ): Triple<DbRestoreManager, FakeFlags, File> {
         val flags = FakeFlags()
@@ -128,7 +134,7 @@ class DbRestoreManagerTest {
                 if (stopThrows) throw IllegalStateException("stop failed")
             },
             startCrawlerIfEnabled = { flags.startCount++ },
-            executor = CapturingExecutor(),
+            executor = executor,
             clock = clock,
         )
         for ((key, sql) in objects) restorer.bodies[key] = gzipBytes(sql.encodeToByteArray())
@@ -721,5 +727,65 @@ class DbRestoreManagerTest {
         val st = m.runRestore()
         assertEquals(DbRestoreState.SUCCESS, st.state)
         assertEquals(listOf("restored"), st.lines)
+    }
+
+    @Test fun restoreCountsObjectsDone() {
+        val restorer = FakeRestorer()
+        val runner = FakeRunner(exitCode = 0)
+        val exec = CapturingExecutor()
+        val (m, _, _) = newManager(
+            restorer, runner,
+            executor = exec,
+            objects = listOf(
+                "db/incremental_20231114_0-10.sql.gz" to "A",
+                "db/incremental_20231115_11-20.sql.gz" to "B",
+            ),
+        )
+        // Probe the manager between downloads; the runnable is driven on the
+        // test thread so the RUNNING state set by restoreNow() is visible.
+        restorer.statusProbe = { m.status }
+        m.restoreNow()
+        exec.last!!.run()
+        val st = m.status
+
+        assertEquals(DbRestoreState.SUCCESS, st.state)
+        assertEquals(2, st.objectsDone)
+        assertEquals(st.objectCount, st.objectsDone)
+        // The probe runs at the TOP of each get(): the first download sees 0
+        // done, the second sees 1; the terminal status carries the final 2.
+        assertEquals(listOf(0, 1), restorer.getSnapshots.map { it.objectsDone })
+        assertEquals(listOf(0, 1, 2),
+            restorer.getSnapshots.map { it.objectsDone } + st.objectsDone)
+        for (snap in restorer.getSnapshots) {
+            assertTrue(snap.running)
+            assertEquals(DbRestoreState.RUNNING, snap.state)
+            assertEquals(2, snap.objectCount)
+            assertEquals(2, snap.objectKeys.size)
+            // The progress copy must not change the count message.
+            assertEquals("downloading 2 object(s)", snap.message)
+        }
+    }
+
+    @Test fun restoreKeepsObjectsDoneOnFailedOneShot() {
+        val restorer = FakeRestorer()
+        val runner = FakeRunner(exitCode = 3)
+        val (m, _, _) = newManager(
+            restorer, runner,
+            objects = listOf(
+                "db/incremental_20231114_0-10.sql.gz" to "A",
+                "db/incremental_20231115_11-20.sql.gz" to "B",
+            ),
+        )
+        restorer.statusProbe = { m.status }
+
+        val st = m.runRestore()
+
+        assertEquals(DbRestoreState.FAILED, st.state)
+        assertTrue(st.message, st.message.contains("exited with code 3"))
+        // The download completed before the one-shot failed: the terminal
+        // status keeps the final count alongside the chain description.
+        assertEquals(2, st.objectsDone)
+        assertEquals(st.objectCount, st.objectsDone)
+        assertEquals(listOf(0, 1), restorer.getSnapshots.map { it.objectsDone })
     }
 }

@@ -45,6 +45,9 @@ data class DbRestoreStatus(
     val lastAttempt: Long? = null,
     val lastSuccess: Long? = null,
     val objectCount: Int? = null,
+    /** Objects of [objectKeys] downloaded so far (null before the count
+     *  is published; monotonic 0..objectCount while RUNNING). */
+    val objectsDone: Int? = null,
     val objectKeys: List<String> = emptyList(),
     val exitCode: Int? = null,
     val lines: List<String> = emptyList(),
@@ -259,13 +262,18 @@ class DbRestoreManager(
             val keys = chain.map { it.first }
 
             status = status.copy(objectCount = keys.size, objectKeys = keys,
+                objectsDone = 0,
                 message = "downloading ${keys.size} object(s)")
             tmpFile.outputStream().use { out ->
                 val client = clientFactory(settings)
-                for (key in keys) {
+                for ((i, key) in keys.withIndex()) {
                     when (val g = client.get(key)) {
-                        is S3GetResult.Success ->
+                        is S3GetResult.Success -> {
                             out.write(gunzipBytes(g.body))
+                            // Copy-on-write progress: single writer (this
+                            // executor thread), like pushLine below.
+                            status = status.copy(objectsDone = i + 1)
+                        }
                         is S3GetResult.ClientError ->
                             throw IllegalStateException("R2 rejected the download of $key " +
                                 "(HTTP ${g.statusCode})")
@@ -360,6 +368,7 @@ class DbRestoreManager(
             lastAttempt = if (state != DbRestoreState.NOT_CONFIGURED) clock() else status.lastAttempt,
             lastSuccess = lastSuccess ?: status.lastSuccess,
             objectCount = status.objectCount,
+            objectsDone = status.objectsDone,
             objectKeys = status.objectKeys,
             exitCode = exitCode ?: status.exitCode,
             lines = status.lines,
