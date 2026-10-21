@@ -431,6 +431,7 @@ fun WizardScreen(
         val svc = boundService ?: return
         val r = svc.saveBackupForRestore(WizardSubmit.backupSettings(buildForm()))
         if (!r.ok) {
+            restoreError = r.message
             restoreStatus = svc.dbRestoreStatus().takeIf { it.running }
         } else {
             restoreError = null
@@ -441,10 +442,14 @@ fun WizardScreen(
     // Follows RUNNING → SUCCESS/FAILED without blocking the main thread: the
     // restore itself runs on the service's crawlerControlExecutor, and these
     // status reads are cheap volatile/isBusy snapshots.
+    // Rotation-safe: a recreated activity's first composition can run before the async
+    // onServiceConnected callback, so the loop must read the latest binder (and never
+    // write a null status) or polling would detach mid-restore and the gate re-lock.
+    val svcState = rememberUpdatedState(boundService)
     LaunchedEffect(restoreStatus?.running) {
         while (isActive && restoreStatus?.running == true) {
             delay(1000)
-            restoreStatus = boundService?.dbRestoreStatus()
+            svcState.value?.let { restoreStatus = it.dbRestoreStatus() }
         }
     }
 
