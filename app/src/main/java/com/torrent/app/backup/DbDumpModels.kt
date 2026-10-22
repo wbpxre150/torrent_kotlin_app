@@ -28,6 +28,12 @@ sealed class SqlValue {
 }
 
 /**
+ * One classifier verdict of the crawler DB's `torrent_class` table, reduced to
+ * the two columns the import filter needs: the torrent and its category.
+ */
+data class ClassEntry(val torrentId: Long, val category: Int)
+
+/**
  * One consistent read of the crawler database: the snapshot max ids plus
  * the rows already gated by [DbBookmark] (path_prefixes/torrents on their
  * own id, torrent_files on torrent_id). The source guarantees all of this
@@ -49,6 +55,16 @@ data class DbSnapshot(
      * boundary, not the table's true max.
      */
     val capped: Boolean = false,
+    /**
+     * The `torrent_class` rows of this range's torrent window, in PK
+     * (`torrent_id`) order — the raw material of the class-index sidecar.
+     *
+     * Read inside the same read transaction, over exactly the window the
+     * `torrents` and `torrent_files` rows of this snapshot come from, so ONE
+     * sidecar resolves every statement of its dump object. Empty by default
+     * (fake sources).
+     */
+    val classEntries: List<ClassEntry> = emptyList(),
 ) {
     /** Total number of INSERT statements [renderSql] emits for this snapshot. */
     val statementCount: Int
@@ -68,6 +84,13 @@ sealed interface DbDumpOutcome {
      * text; [newCursor] is the bookmark to persist AFTER a successful
      * upload of [objectKey] (never before).
      *
+     * [sidecarBytes] is the gzip-compressed CLASS INDEX of the same range
+     * (one `<torrent_id> <category>` line per `torrent_class` row, see
+     * [renderClassIndex]) and [sidecarObjectKey] its object key. The sidecar
+     * is ALWAYS produced, even when the range has zero classified torrents:
+     * an empty index means "this range is fully covered, unclassified
+     * torrents are unknown", which is different from "no index → unfiltered".
+     *
      * [capped] flows from the [DbSnapshot] it was built from: `true` when the
      * source hit its chunk cap, i.e. rows beyond [newCursor] still have to be
      * dumped by a later run.
@@ -79,6 +102,8 @@ sealed interface DbDumpOutcome {
         val objectKey: String,
         val newTorrentCount: Long,
         val capped: Boolean = false,
+        val sidecarBytes: ByteArray,
+        val sidecarObjectKey: String,
     ) : DbDumpOutcome
 
     /** Empty range (`max_torrent_id <= last_torrent_id`): nothing to dump. */

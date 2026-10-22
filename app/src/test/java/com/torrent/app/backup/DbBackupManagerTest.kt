@@ -35,16 +35,26 @@ import java.util.concurrent.atomic.AtomicInteger
  * are deterministic; a no-op [ScheduledExecutorService] stands in for the real
  * scheduler and records the follow-ups instead of running them.
  */
+// One scripted dump outcome. The class-index sidecar is derived from
+// `objectKey` (`.sql.gz` → `.idx.gz`) and carries `sidecarText`, so a test can
+// assert both objects of a chunk without spelling out two keys.
 private fun testDumpOutcome(
     cursor: DbBookmark = DbBookmark(10, 2),
     objectKey: String = "db/incremental_20231114_0-10.sql.gz",
+    sidecarText: String = "1 3\n2 0\n",
 ): DbDumpOutcome.Dump = DbDumpOutcome.Dump(
     sqlBytes = gzipBytes("INSERT OR IGNORE INTO torrents VALUES(1);".encodeToByteArray()),
     statementCount = 3,
     newCursor = cursor,
     objectKey = objectKey,
     newTorrentCount = 10,
+    sidecarBytes = gzipBytes(sidecarText.encodeToByteArray()),
+    sidecarObjectKey = sidecarKeyOf(objectKey),
 )
+
+/** The class-index sidecar key of a dump key (`.sql.gz` → `.idx.gz`). */
+private fun sidecarKeyOf(objectKey: String): String =
+    objectKey.removeSuffix(".sql.gz") + ".idx.gz"
 
 class DbBackupManagerTest {
 
@@ -53,21 +63,44 @@ class DbBackupManagerTest {
     /** Day 1: 2023-11-14 in UTC. */
     private val DAY1 = 1_700_000_000_000L
 
+    /**
+     * Records every PUT of a check. The two objects of a chunk are told apart
+     * by their key suffix: the SQL artifact ends in `.sql.gz`, its class-index
+     * sidecar in `.idx.gz` — the sidecar has its own scripted [sidecarResult],
+     * so a test can fail either one independently.
+     */
     private class FakeUploader : S3DbUploader {
+        class Put(val objectKey: String, val contentType: String, val body: ByteArray)
+
+        /** Scripted result for SQL-artifact PUTs. */
         var result: S3PutResult = S3PutResult.Success(200, "etag")
         /** Optional per-call results (drain tests): consumed before [result]. */
         val results = mutableListOf<S3PutResult>()
-        var calls = 0
-        var lastKey: String? = null
-        var lastContentType: String? = null
-        var lastBody: ByteArray? = null
+        /** Scripted result for class-index sidecar PUTs. */
+        var sidecarResult: S3PutResult = S3PutResult.Success(200, "etag")
+
+        /** Every PUT in call order (SQL artifacts and sidecars interleaved). */
+        val puts = mutableListOf<Put>()
+        /** Invoked with each PUT's object key, right after it was recorded. */
+        var onPut: ((String) -> Unit)? = null
+
+        /** Number of SQL-artifact PUTs (= chunks uploaded). */
+        val calls: Int get() = puts.count { it.objectKey.endsWith(".sql.gz") }
+        /** Number of class-index sidecar PUTs. */
+        val sidecarCalls: Int get() = puts.count { it.objectKey.endsWith(".idx.gz") }
+        private val lastSqlPut: Put? get() = puts.lastOrNull { it.objectKey.endsWith(".sql.gz") }
+        val lastKey: String? get() = lastSqlPut?.objectKey
+        val lastContentType: String? get() = lastSqlPut?.contentType
+        val lastBody: ByteArray? get() = lastSqlPut?.body
 
         override fun put(objectKey: String, contentType: String, body: ByteArray): S3PutResult {
-            calls++
-            lastKey = objectKey
-            lastContentType = contentType
-            lastBody = body
-            return if (results.isNotEmpty()) results.removeAt(0) else result
+            puts += Put(objectKey, contentType, body)
+            onPut?.invoke(objectKey)
+            return if (objectKey.endsWith(".idx.gz")) {
+                sidecarResult
+            } else {
+                if (results.isNotEmpty()) results.removeAt(0) else result
+            }
         }
     }
 
@@ -762,6 +795,68 @@ class DbBackupManagerTest {
         assertEquals(DbBookmark.FIRST_RUN, d.lastBookmark)
     }
 
+    // --- class-index sidecar (Stage 1) --------------------------------------
+
+    /**
+     * One chunk PUTs its SQL artifact, then its class-index sidecar, and only
+     * then advances the bookmark: upload-first covers BOTH objects.
+     */
+    @Test fun sidecarIsUploadedAfterTheSqlAndBeforeTheBookmark() {
+        val up = FakeUploader()
+        val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        DbBookmark.write(bookmarkFile, DbBookmark(0, 0))
+        val bookmarkAtPut = mutableListOf<DbBookmark?>()
+        up.onPut = { bookmarkAtPut += DbBookmark.readOrNull(bookmarkFile) }
+        val m = newManager(dbFile(), FakeDumper(outcome = testDumpOutcome()), up,
+            bookmarkFile = bookmarkFile)
+
+        val st = m.runCheck(manual = true)
+
+        assertEquals(DbBackupState.SUCCESS, st.state)
+        // SQL artifact first, its sidecar second — same range, same prefix.
+        assertEquals(
+            listOf(
+                "db/incremental_20231114_0-10.sql.gz",
+                "db/incremental_20231114_0-10.idx.gz",
+            ),
+            up.puts.map { it.objectKey },
+        )
+        assertEquals(1, up.calls)
+        assertEquals(1, up.sidecarCalls)
+        assertEquals(
+            listOf("application/gzip", "application/gzip"),
+            up.puts.map { it.contentType },
+        )
+        // The sidecar body is the gzipped class index of the range.
+        assertEquals("1 3\n2 0\n", gunzipBytes(up.puts[1].body).decodeToString())
+        // Neither PUT observed the advanced bookmark; it moved only afterwards.
+        assertEquals(listOf(DbBookmark(0, 0), DbBookmark(0, 0)), bookmarkAtPut)
+        assertEquals(DbBookmark(10, 2), DbBookmark.read(bookmarkFile))
+    }
+
+    /**
+     * A sidecar PUT failure fails the check and leaves the bookmark untouched,
+     * so the next run re-dumps and re-uploads BOTH objects (idempotent).
+     */
+    @Test fun sidecarPutFailureLeavesBookmarkUnchanged() {
+        val up = FakeUploader().apply {
+            sidecarResult = S3PutResult.ClientError(403, "Forbidden")
+        }
+        val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        DbBookmark.write(bookmarkFile, DbBookmark(0, 0))
+        val m = newManager(dbFile(), FakeDumper(outcome = testDumpOutcome()), up,
+            bookmarkFile = bookmarkFile)
+
+        val st = m.runCheck(manual = true)
+
+        assertEquals(DbBackupState.FAILED, st.state)
+        assertTrue(st.message, st.message.contains("R2 rejected the upload"))
+        // The SQL artifact landed, the sidecar did not.
+        assertEquals(1, up.calls)
+        assertEquals(1, up.sidecarCalls)
+        assertEquals(DbBookmark(0, 0), DbBookmark.read(bookmarkFile))
+    }
+
     // --- bounded chunk drain (Stage 2) ---
 
     /**
@@ -781,6 +876,9 @@ class DbBackupManagerTest {
         objectKey = objectKey,
         newTorrentCount = 10,
         capped = capped,
+        // A small, per-chunk class index: one entry per chunk.
+        sidecarBytes = gzipBytes("${cursor.lastTorrentId} 1\n".encodeToByteArray()),
+        sidecarObjectKey = sidecarKeyOf(objectKey),
     )
 
     @Test fun cappedSuccessDoesNotWriteDailyDateAndDrainsNextCheck() {

@@ -30,6 +30,27 @@ class DbObjectKeyTest {
         assertEquals(big, DbObjectKey.parse(big.key))
     }
 
+    /**
+     * The class-index sidecar key of a range: same prefix/date/range, `.idx.gz`
+     * instead of `.sql.gz` — and invisible to [DbObjectKey.parse], so sidecars
+     * sharing the prefix never disturb the dump chain's gap/overlap/sort rules.
+     */
+    @Test fun sidecarKeyNamesTheClassIndexNextToTheDump() {
+        val key = DbObjectKey.build("db", "20260102", 0, 57)
+        assertEquals("db/incremental_20260102_0-57.idx.gz", key.sidecarKey)
+        assertEquals("db/incremental_20260102_0-57.sql.gz", key.key)
+        // Same prefix and range, only the suffix differs.
+        assertEquals(
+            key.sidecarKey,
+            key.key.removeSuffix(".sql.gz") + ".idx.gz",
+        )
+        assertNull(DbObjectKey.parse(key.sidecarKey))
+        assertEquals(
+            "custom/incremental_19991231_58-1000000.idx.gz",
+            DbObjectKey.build("custom", "19991231", 58, 1000000).sidecarKey,
+        )
+    }
+
     @Test fun firstRunKeyHasZeroStart() {
         // last_torrent_id = -1 → START = 0, END = max.
         val key = DbObjectKey.parse("db/incremental_20260102_0-3.sql.gz")!!

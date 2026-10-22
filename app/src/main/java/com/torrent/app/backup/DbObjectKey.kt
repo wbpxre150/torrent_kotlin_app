@@ -23,6 +23,17 @@ data class DbObjectKey(val prefix: String, val date: String, val start: Long, va
     val key: String
         get() = "$prefix/incremental_${date}_$start-$end.sql.gz"
 
+    /**
+     * The class-index sidecar key of the same range:
+     * `<prefix>/incremental_<YYYYMMDD>_<START>-<END>.idx.gz`.
+     *
+     * The `.idx.gz` suffix deliberately does NOT match [KEY_PATTERN] (which
+     * requires `.sql.gz`), so sidecars sharing a prefix are invisible to
+     * [parse]: gap/overlap/sort rules of the dump chain are untouched.
+     */
+    val sidecarKey: String
+        get() = "$prefix/incremental_${date}_$start-$end.idx.gz"
+
     companion object {
         /** Default key prefix (plan 2: `db/...` in the shared bucket). */
         const val DEFAULT_PREFIX = "db"

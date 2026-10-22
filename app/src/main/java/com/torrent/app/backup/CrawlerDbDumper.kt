@@ -237,6 +237,13 @@ class CrawlerDbDumper(
                 lo = hi
             }
             val chunkMax = cut
+            // Class index of the SAME window: (bookmark, chunkMax] covers
+            // both the `torrents` rows read below and every `torrent_files`
+            // row of the chunk (files are gated on torrent_id in
+            // (bookmark, cut] with cut == chunkMax), so ONE sidecar resolves
+            // every statement of this object. PK order; read inside the same
+            // read transaction, so it cannot disagree with the rows.
+            val classIndex = classEntries(bookmark.lastTorrentId, chunkMax)
             val hasNewTorrents = chunkMax > bookmark.lastTorrentId
             return DbSnapshot(
                 maxTorrentId = chunkMax,
@@ -253,6 +260,7 @@ class CrawlerDbDumper(
                 },
                 torrentFiles = filesOut,
                 capped = chunkMax < trueMaxTorrentId || prefixCut < trueMaxPrefixId,
+                classEntries = classIndex,
             )
         }
 
@@ -282,6 +290,24 @@ class CrawlerDbDumper(
                         row += valueAt(c, i)
                     }
                     out += row
+                }
+            }
+            return out
+        }
+
+        /**
+         * `(torrent_id, category)` of `torrent_class` in (exclusiveMin,
+         * inclusiveMax], in PK order — the class index of one dump range.
+         */
+        private fun classEntries(exclusiveMin: Long, inclusiveMax: Long): List<ClassEntry> {
+            val out = ArrayList<ClassEntry>()
+            db.rawQuery(
+                "SELECT torrent_id, category FROM $TABLE_TORRENT_CLASS " +
+                    "WHERE torrent_id > ? AND torrent_id <= ? ORDER BY torrent_id",
+                arrayOf(exclusiveMin.toString(), inclusiveMax.toString()),
+            ).use { c ->
+                while (c.moveToNext()) {
+                    out += ClassEntry(c.getLong(0), c.getInt(1))
                 }
             }
             return out

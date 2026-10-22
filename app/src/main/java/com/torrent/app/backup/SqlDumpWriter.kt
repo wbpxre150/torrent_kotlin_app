@@ -68,15 +68,21 @@ class SqlDumpWriter(
             )
         }
         val sql = renderSql(snapshot)
+        val objectKey = DbObjectKey.build(
+            keyPrefix, utcDateString(), bookmark.lastTorrentId + 1, snapshot.maxTorrentId
+        )
         return DbDumpOutcome.Dump(
             sqlBytes = gzipBytes(sql.encodeToByteArray()),
             statementCount = snapshot.statementCount,
             newCursor = DbBookmark(snapshot.maxTorrentId, snapshot.maxPrefixId),
-            objectKey = DbObjectKey.build(
-                keyPrefix, utcDateString(), bookmark.lastTorrentId + 1, snapshot.maxTorrentId
-            ).key,
+            objectKey = objectKey.key,
             newTorrentCount = snapshot.torrents.size.toLong(),
             capped = snapshot.capped,
+            // ALWAYS emitted, even for zero entries: an empty index asserts
+            // "this range is fully covered, unclassified torrents are
+            // unknown", which is different from "no index → unfiltered".
+            sidecarBytes = gzipBytes(renderClassIndex(snapshot.classEntries).encodeToByteArray()),
+            sidecarObjectKey = objectKey.sidecarKey,
         )
     }
 
@@ -119,6 +125,20 @@ fun renderSql(snapshot: DbSnapshot): String {
     return sb.toString()
 }
 
+/**
+ * Renders the CLASS INDEX text of [entries]: one `"<torrent_id> <category>\n"`
+ * line per entry, in the given (PK) order — the decompressed content of a
+ * dump's `.idx.gz` sidecar. Zero entries render as the empty string (the
+ * "fully covered, nothing classified" index).
+ */
+fun renderClassIndex(entries: List<ClassEntry>): String {
+    val sb = StringBuilder()
+    for (entry in entries) {
+        sb.append(entry.torrentId).append(' ').append(entry.category).append('\n')
+    }
+    return sb.toString()
+}
+
 private fun appendTable(sb: StringBuilder, table: String, rows: List<List<SqlValue>>) {
     for (row in rows) {
         sb.append(renderStatement(table, row)).append('\n')
@@ -148,3 +168,6 @@ fun gunzipBytes(bytes: ByteArray): ByteArray =
 internal const val TABLE_PATH_PREFIXES = "path_prefixes"
 internal const val TABLE_TORRENTS = "torrents"
 internal const val TABLE_TORRENT_FILES = "torrent_files"
+
+/** Never dumped: only read for the class-index sidecar of a range. */
+internal const val TABLE_TORRENT_CLASS = "torrent_class"

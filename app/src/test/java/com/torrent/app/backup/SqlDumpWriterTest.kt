@@ -229,6 +229,53 @@ class SqlDumpWriterTest {
         assertTrue(!dump.capped)
     }
 
+    // --- class-index sidecar (Stage 1) --------------------------------------
+
+    /**
+     * Mixed entries: one `"<torrent_id> <category>\n"` line per
+     * `torrent_class` row, gzipped, named next to its SQL artifact.
+     */
+    @Test fun sidecarRendersOneLinePerClassEntry() {
+        val snapshot = fixtureSnapshot().copy(
+            classEntries = listOf(ClassEntry(1, 3), ClassEntry(2, 0), ClassEntry(3, 12)),
+        )
+        val dump = SqlDumpWriter(FakeSource(snapshot), clock = fixedClock)
+            .buildDump(DbBookmark.FIRST_RUN) as DbDumpOutcome.Dump
+
+        assertEquals("db/incremental_20260102_0-3.idx.gz", dump.sidecarObjectKey)
+        assertEquals("1 3\n2 0\n3 12\n", gunzipBytes(dump.sidecarBytes).decodeToString())
+        // The sidecar does not disturb the SQL artifact.
+        assertEquals("db/incremental_20260102_0-3.sql.gz", dump.objectKey)
+        assertEquals(renderSql(snapshot), gunzipBytes(dump.sqlBytes).decodeToString())
+        assertEquals(8, dump.statementCount)
+    }
+
+    /**
+     * Zero entries STILL produce a (gzipped, empty) sidecar: an empty index
+     * asserts "this range is fully covered, nothing classified", which is not
+     * the same as a missing index ("unfiltered").
+     */
+    @Test fun zeroEntrySidecarIsStillEmitted() {
+        val dump = SqlDumpWriter(FakeSource(fixtureSnapshot()), clock = fixedClock)
+            .buildDump(DbBookmark.FIRST_RUN) as DbDumpOutcome.Dump
+
+        assertEquals("db/incremental_20260102_0-3.idx.gz", dump.sidecarObjectKey)
+        assertEquals("", gunzipBytes(dump.sidecarBytes).decodeToString())
+        // Gzip framing, not a zero-length byte array.
+        assertEquals(0x1F.toByte(), dump.sidecarBytes[0])
+        assertEquals(0x8B.toByte(), dump.sidecarBytes[1])
+    }
+
+    /** The sidecar follows a custom prefix like the SQL artifact does. */
+    @Test fun sidecarUsesTheSamePrefixAndRange() {
+        val dump = SqlDumpWriter(
+            FakeSource(fixtureSnapshot()), keyPrefix = "dht", clock = fixedClock
+        ).buildDump(DbBookmark(2, 2)) as DbDumpOutcome.Dump
+
+        assertEquals("dht/incremental_20260102_3-3.sql.gz", dump.objectKey)
+        assertEquals("dht/incremental_20260102_3-3.idx.gz", dump.sidecarObjectKey)
+    }
+
     // --- gzip ----------------------------------------------------------------
 
     @Test fun gzipRoundTripIsByteIdentical() {

@@ -119,11 +119,12 @@ data class DbBackupStatus(
  *
  * Upload-first ordering (the critical invariant): the [DbBookmark] is
  * advanced to a chunk's [DbDumpOutcome.Dump.newCursor] ONLY after that
- * chunk's PUT succeeded. A failed/ killed upload leaves the bookmark
- * unchanged, so the next run re-dumps (and re-uploads) the exact same range
- * — idempotent thanks to `INSERT OR IGNORE`. A failure in the middle of a
- * drain likewise costs only the failed chunk: every earlier chunk's PUT was
- * already followed by its own bookmark write.
+ * chunk's PUTs succeeded — the SQL artifact AND its class-index sidecar.
+ * A failed/killed upload leaves the bookmark unchanged, so the next run
+ * re-dumps (and re-uploads) the exact same range — idempotent thanks to
+ * `INSERT OR IGNORE`. A failure in the middle of a drain likewise costs only
+ * the failed chunk: every earlier chunk's PUTs were already followed by its
+ * own bookmark write.
  *
  * All collaborators are constructor-injected (plain-JUnit testable);
  * [clock] and [zone] drive the calendar-day gate.
@@ -339,6 +340,7 @@ class DbBackupManager(
         var chunks = 0
         var totalBytes = 0L
         var totalStatements = 0
+        var totalIndexBytes = 0L
         var lastDump: DbDumpOutcome.Dump? = null
         while (chunks < MAX_CHUNKS_PER_CHECK) {
             val outcome = try {
@@ -355,25 +357,18 @@ class DbBackupManager(
                     uploadEnabled = true, configured = true)
             }
             val dump = outcome as DbDumpOutcome.Dump
-            val result = try {
-                clientFactory(settings).put(dump.objectKey, CONTENT_TYPE_GZIP, dump.sqlBytes)
-            } catch (e: Exception) {
-                return finish(DbBackupState.FAILED, "upload failed: ${e.message ?: e.javaClass.simpleName}",
+            val uploadFailure = putObject(settings, dump.objectKey, dump.sqlBytes)
+            if (uploadFailure != null) {
+                return finish(DbBackupState.FAILED, uploadFailure,
                     uploadEnabled = true, configured = true)
             }
-            when (result) {
-                is S3PutResult.Success -> Unit
-                is S3PutResult.ClientError -> return finish(
-                    DbBackupState.FAILED,
-                    "R2 rejected the upload (HTTP ${result.statusCode})",
-                    uploadEnabled = true, configured = true)
-                is S3PutResult.ServerError -> return finish(
-                    DbBackupState.FAILED,
-                    "R2 server error (HTTP ${result.statusCode} after ${result.attempts} attempts)",
-                    uploadEnabled = true, configured = true)
-                is S3PutResult.Failure -> return finish(
-                    DbBackupState.FAILED,
-                    "upload failed: ${result.cause.message ?: result.cause.javaClass.simpleName}",
+            // The class-index sidecar goes up right after its SQL artifact and
+            // still BEFORE the bookmark write: a sidecar failure fails the
+            // check with the bookmark unchanged, so the next run re-dumps and
+            // re-uploads BOTH objects (INSERT OR IGNORE keeps that idempotent).
+            val indexFailure = putObject(settings, dump.sidecarObjectKey, dump.sidecarBytes)
+            if (indexFailure != null) {
+                return finish(DbBackupState.FAILED, "class index: $indexFailure",
                     uploadEnabled = true, configured = true)
             }
             // Upload-first: the bookmark advances ONLY after this chunk's PUT
@@ -391,8 +386,9 @@ class DbBackupManager(
             }
             chunks++
             cursor = dump.newCursor
-            totalBytes += dump.sqlBytes.size
+            totalBytes += dump.sqlBytes.size + dump.sidecarBytes.size
             totalStatements += dump.statementCount
+            totalIndexBytes += dump.sidecarBytes.size
             // Only the last chunk's dump is retained (for the status fields);
             // the earlier chunks' byte arrays are released as the loop runs.
             lastDump = dump
@@ -407,13 +403,15 @@ class DbBackupManager(
         // The loop can only exit with at least one uploaded chunk: every other
         // exit path returns above.
         val last = checkNotNull(lastDump) { "drain loop exited without a chunk" }
-        val message = if (chunks > 1) {
+        // The byte figures include the class-index sidecars (each chunk PUTs
+        // one); the index share is spelled out separately.
+        val message = (if (chunks > 1) {
             "uploaded $chunks chunks, $totalBytes bytes to ${last.objectKey} " +
                 "($totalStatements statements)"
         } else {
-            "uploaded ${last.sqlBytes.size} bytes to ${last.objectKey} " +
-                "(${last.statementCount} statements)"
-        }
+            "uploaded ${last.sqlBytes.size + last.sidecarBytes.size} bytes to " +
+                "${last.objectKey} (${last.statementCount} statements)"
+        }) + ", +$totalIndexBytes index bytes"
         return finish(
             DbBackupState.SUCCESS,
             if (last.capped) {
@@ -432,6 +430,34 @@ class DbBackupManager(
             sqlBytes = last.sqlBytes.size.toLong(),
             statementCount = last.statementCount,
             objectKey = last.objectKey, lastSuccess = clock())
+    }
+
+    /**
+     * One object PUT of a check, mapped to a failure message (`null` = the
+     * object landed). Both objects of a chunk — the SQL artifact and its
+     * class-index sidecar — go through this, so they share the exact same
+     * [S3PutResult] handling (any failure → [DbBackupState.FAILED], bookmark
+     * unchanged).
+     */
+    private fun putObject(
+        settings: BackupSettings,
+        objectKey: String,
+        body: ByteArray,
+    ): String? {
+        val result = try {
+            clientFactory(settings).put(objectKey, CONTENT_TYPE_GZIP, body)
+        } catch (e: Exception) {
+            return "upload failed: ${e.message ?: e.javaClass.simpleName}"
+        }
+        return when (result) {
+            is S3PutResult.Success -> null
+            is S3PutResult.ClientError ->
+                "R2 rejected the upload (HTTP ${result.statusCode})"
+            is S3PutResult.ServerError ->
+                "R2 server error (HTTP ${result.statusCode} after ${result.attempts} attempts)"
+            is S3PutResult.Failure ->
+                "upload failed: ${result.cause.message ?: result.cause.javaClass.simpleName}"
+        }
     }
 
     /**

@@ -108,27 +108,16 @@ class CrawlerDbDumperTest {
         dumper = CrawlerDbDumper()
     }
 
-    /** Fresh (or existing) DB with the crawler's three base tables. */
+    /**
+     * Fresh (or existing) DB with the crawler's five base tables, created from
+     * [CrawlerDbSchema] — the dumper reads `torrent_class` too (the class-index
+     * sidecar of a range), so the fixture must carry the full non-FTS schema.
+     */
     private fun createDb(path: File): SQLiteDatabase {
         val db = SQLiteDatabase.openOrCreateDatabase(path, null)
-        db.execSQL(
-            "CREATE TABLE IF NOT EXISTS path_prefixes(" +
-                "id INTEGER PRIMARY KEY AUTOINCREMENT, prefix TEXT NOT NULL UNIQUE)"
-        )
-        db.execSQL(
-            "CREATE TABLE IF NOT EXISTS torrents(" +
-                "id INTEGER PRIMARY KEY AUTOINCREMENT, info_hash BLOB NOT NULL UNIQUE, " +
-                "name TEXT NOT NULL, size_bytes INTEGER NOT NULL, " +
-                "total_peers INTEGER DEFAULT 0, added_timestamp INTEGER NOT NULL)"
-        )
-        db.execSQL(
-            "CREATE TABLE IF NOT EXISTS torrent_files(" +
-                "id INTEGER PRIMARY KEY AUTOINCREMENT, torrent_id INTEGER NOT NULL, " +
-                "prefix_id INTEGER, filename TEXT NOT NULL, size_bytes INTEGER NOT NULL, " +
-                "file_index SMALLINT NOT NULL, " +
-                "FOREIGN KEY (torrent_id) REFERENCES torrents(id) ON DELETE CASCADE, " +
-                "FOREIGN KEY (prefix_id) REFERENCES path_prefixes(id))"
-        )
+        for (statement in CrawlerDbSchema.tableStatements) {
+            db.execSQL(statement)
+        }
         return db
     }
 
@@ -403,6 +392,51 @@ class CrawlerDbDumperTest {
         } finally {
             fresh.close()
         }
+    }
+
+    // --- class-index sidecar (Stage 1) --------------------------------------
+
+    /**
+     * The class index of a dump covers EXACTLY the chunk's torrent window
+     * `(bookmark.lastTorrentId, chunkMax]` — the window the `torrents` and
+     * `torrent_files` rows of that object come from — and is named as the
+     * `.idx.gz` sidecar of the very same range.
+     */
+    @Test
+    fun classIndexCoversExactlyTheChunkWindow() {
+        // `torrent_class` rows for ids 1..4 (id 4 has no `torrents` row: the FK
+        // is not enforced here, so it stands in for "beyond the dump range").
+        createDb(dbFile).use { sdb ->
+            for (id in 1L..4L) {
+                sdb.insert("torrent_class", null, ContentValues().apply {
+                    put("torrent_id", id)
+                    put("category", (id * 10).toInt())
+                    put("clf_ver", 1)
+                })
+            }
+        }
+
+        // Incremental chunk (1, 3]: torrents 2 and 3 — neither the row at the
+        // bookmark (1) nor the one beyond the chunk end (4).
+        val chunk = dumper.dump(dbFile, DbBookmark(1, 2)) as DbDumpOutcome.Dump
+        assertEquals(DbBookmark(3, 2), chunk.newCursor)
+        assertEquals("2 20\n3 30\n", gunzipBytes(chunk.sidecarBytes).decodeToString())
+        val parsed = DbObjectKey.parse(chunk.objectKey)!!
+        assertEquals(2L, parsed.start)
+        assertEquals(3L, parsed.end)
+        assertEquals(parsed.sidecarKey, chunk.sidecarObjectKey)
+        assertEquals(
+            "db/incremental_${parsed.date}_2-3.idx.gz",
+            chunk.sidecarObjectKey,
+        )
+
+        // The same DB dumped from the start covers every torrent id it dumps.
+        val full = dumper.dump(dbFile, DbBookmark.FIRST_RUN) as DbDumpOutcome.Dump
+        assertEquals(DbBookmark(3, 2), full.newCursor)
+        assertEquals("1 10\n2 20\n3 30\n", gunzipBytes(full.sidecarBytes).decodeToString())
+        assertEquals(3L, full.newTorrentCount)
+        // Class rows are never dumped as SQL: the statement count is unchanged.
+        assertEquals(9, full.statementCount)
     }
 
     // --- Stage 1: chunk cap -------------------------------------------------
