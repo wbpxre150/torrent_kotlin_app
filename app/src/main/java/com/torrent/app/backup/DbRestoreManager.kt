@@ -369,18 +369,28 @@ class DbRestoreManager(
                         // when a statement threw) — it must run on every path, so
                         // the connection is never left mid-transaction.
                         opened.beginChunk()
+                        var nulDropped = 0
                         try {
                             try {
-                                SqlStatementSplitter.split(
+                                nulDropped = SqlStatementSplitter.split(
                                     GZIPInputStream(ByteArrayInputStream(g.body))) { sql ->
                                     opened.statement(sql)
-                                }
+                                }.nulDropped
                             } catch (e: IOException) {
                                 throw IllegalStateException("corrupt gzip in chunk $key: " +
                                     (e.message ?: e.javaClass.simpleName))
                             }
                         } finally {
                             opened.endChunk()
+                        }
+                        // Embedded U+0000 is stripped by the splitter (execSQL
+                        // would truncate the statement at it): make the count
+                        // visible in both the status lines and logcat.
+                        if (nulDropped > 0) {
+                            val note = "chunk ${i + 1}/${keys.size}: dropped $nulDropped " +
+                                "embedded NUL character(s) (C-string truncation guard)"
+                            pushLine(lines, note)
+                            Log.i(TAG, note)
                         }
                         // The chunk is committed: advance the resume marker
                         // BEFORE the next download, so a kill here re-imports at

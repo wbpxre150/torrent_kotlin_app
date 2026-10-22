@@ -32,6 +32,19 @@ import java.nio.charset.StandardCharsets
  * stream is still emitted, so a truncated dump fails at execution rather than
  * silently losing its last chunk.
  *
+ * **Embedded U+0000 characters are dropped** from the emitted text (and
+ * counted in [SplitStats.nulDropped]). `SQLiteDatabase.execSQL` hands a
+ * statement to `sqlite3_prepare_v2` as a C string, so a NUL inside a dumped
+ * text literal truncates the statement there and SQLite sees an unterminated
+ * literal (`unrecognized token`). The real dump contains such bytes — GBK
+ * text emitted verbatim, e.g. `VALUES(107059, '\xcd\xbc\xc6\xac\xd2\xbb\x00')`
+ * — and the native `--restore-database` replay passes the dump to the same C
+ * API, so dropping the NUL matches exactly what that path would have stored.
+ * Stripping happens before the state machine looks at the character: U+0000 is
+ * never `'` or `;`, so quote tracking and boundary detection are unchanged,
+ * and the 8 MB runaway guard is unaffected (stripping only shrinks a
+ * statement).
+ *
  * No Android imports — plain JUnit4 testable.
  */
 object SqlStatementSplitter {
@@ -46,25 +59,36 @@ object SqlStatementSplitter {
 
     private const val QUOTE = '\''
     private const val TERMINATOR = ';'
+    private const val NUL = '\u0000'
 
     /**
      * Reads [input] as UTF-8 and invokes [onStatement] once per non-blank SQL
-     * statement, in stream order.
+     * statement, in stream order. Embedded U+0000 characters are dropped from
+     * the emitted text; [SplitStats] reports how many.
      *
      * @throws IllegalStateException when a single statement grows beyond
      *   [MAX_STATEMENT_CHARS].
      */
-    fun split(input: InputStream, onStatement: (String) -> Unit) {
+    fun split(input: InputStream, onStatement: (String) -> Unit): SplitStats {
         val reader = PushbackReader(
             InputStreamReader(BufferedInputStream(input), StandardCharsets.UTF_8),
             2,
         )
         val buffer = StringBuilder()
         var inQuote = false
+        var statementCount = 0
+        var nulDropped = 0
         while (true) {
             val next = reader.read()
             if (next == -1) break
             val c = next.toChar()
+            if (c == NUL) {
+                // Drop it (see the class KDoc): execSQL() would truncate the
+                // statement at this character and fail the literal. The buffer
+                // did not grow, so the runaway guard needs no re-check.
+                nulDropped++
+                continue
+            }
             if (inQuote) {
                 buffer.append(c)
                 if (c == QUOTE) {
@@ -83,7 +107,7 @@ object SqlStatementSplitter {
                     buffer.append(c)
                 }
 
-                TERMINATOR -> emit(buffer, onStatement)
+                TERMINATOR -> if (emit(buffer, onStatement)) statementCount++
 
                 else -> buffer.append(c)
             }
@@ -93,13 +117,29 @@ object SqlStatementSplitter {
                 )
             }
         }
-        emit(buffer, onStatement)
+        if (emit(buffer, onStatement)) statementCount++
+        return SplitStats(statementCount = statementCount, nulDropped = nulDropped)
     }
 
-    /** Emits the trimmed content of [buffer] (if any) and clears it. */
-    private fun emit(buffer: StringBuilder, onStatement: (String) -> Unit) {
+    /**
+     * Emits the trimmed content of [buffer] (if any) and clears it; returns
+     * true when a statement was actually handed to [onStatement].
+     */
+    private fun emit(buffer: StringBuilder, onStatement: (String) -> Unit): Boolean {
         val statement = buffer.toString().trim()
         buffer.setLength(0)
-        if (statement.isNotEmpty()) onStatement(statement)
+        if (statement.isEmpty()) return false
+        onStatement(statement)
+        return true
     }
 }
+
+/**
+ * Result of one [SqlStatementSplitter.split] pass: the number of statements
+ * emitted, and how many embedded U+0000 characters were dropped on the way
+ * (the `execSQL` C-string truncation guard).
+ */
+data class SplitStats(
+    val statementCount: Int,
+    val nulDropped: Int,
+)

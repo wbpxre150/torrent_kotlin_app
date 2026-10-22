@@ -1187,4 +1187,49 @@ class DbRestoreManagerTest {
         assertEquals(st.objectCount, st.objectsDone)
         assertEquals(listOf(0, 1), restorer.getSnapshots.map { it.objectsDone })
     }
+
+    @Test fun chunkWithAnEmbeddedNul_pushesAStripCountLine() {
+        val restorer = FakeRestorer()
+        val runner = FakeRunner(exitCode = 0)
+        // The real chunk-1 shape: a text literal whose value ends with a NUL.
+        val (m, _, _) = newManager(
+            restorer, runner,
+            objects = listOf(
+                "db/incremental_20231114_0-10.sql.gz" to
+                    "INSERT OR IGNORE INTO path_prefixes VALUES(107059, 'a\u0000');",
+            ),
+        )
+
+        val st = m.runRestore()
+
+        assertEquals(DbRestoreState.SUCCESS, st.state)
+        // The statement reached the sink with the NUL dropped and the closing
+        // quote/paren intact.
+        assertEquals(
+            listOf(listOf("INSERT OR IGNORE INTO path_prefixes VALUES(107059, 'a')")),
+            sinks.single().chunks,
+        )
+        assertTrue(
+            st.lines.toString(),
+            st.lines.contains(
+                "chunk 1/1: dropped 1 embedded NUL character(s) (C-string truncation guard)"),
+        )
+    }
+
+    @Test fun cleanChunks_pushNoStripCountLine() {
+        val restorer = FakeRestorer()
+        val runner = FakeRunner(exitCode = 0)
+        val (m, _, _) = newManager(
+            restorer, runner,
+            objects = listOf(
+                "db/incremental_20231114_0-10.sql.gz" to bodyFor("db/incremental_20231114_0-10.sql.gz"),
+                "db/incremental_20231115_11-20.sql.gz" to bodyFor("db/incremental_20231115_11-20.sql.gz"),
+            ),
+        )
+
+        val st = m.runRestore()
+
+        assertEquals(DbRestoreState.SUCCESS, st.state)
+        assertFalse(st.lines.toString(), st.lines.any { it.contains("embedded NUL") })
+    }
 }
