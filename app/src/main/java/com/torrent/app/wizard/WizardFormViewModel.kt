@@ -40,6 +40,15 @@ class WizardFormViewModel(private val cfg: AppConfig? = null) : ViewModel() {
     /** The screen currently shown; the wizard starts on the USB step. */
     val screen = mutableStateOf(WizardNav.first)
 
+    /**
+     * Set once the wizard has been finished (by the download's auto-advance or by "Finish
+     * without downloading"), so finishing can never run twice: `completeWizard()` starts the
+     * control server, the crawler proxy and the daemons, and a second call would restart
+     * them. Activity-scoped like the rest of the form — it survives a rotation and dies with
+     * the process, where a fresh wizard legitimately starts over.
+     */
+    val wizardFinished = mutableStateOf(false)
+
     // --- Step 2: Transmission -------------------------------------------------------------
 
     val txUser = mutableStateOf(cfg?.transmission?.username ?: ConfigDefaults.TRANSMISSION_USERNAME)

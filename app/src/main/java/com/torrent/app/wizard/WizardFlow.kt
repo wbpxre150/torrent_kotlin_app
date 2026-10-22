@@ -19,24 +19,14 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.torrent.app.DaemonService
 import com.torrent.app.WizardRestoreViewModel
-import com.torrent.app.backup.WizardRestoreGate
-import com.torrent.app.backup.WizardRestorePollPolicy
 import com.torrent.app.config.ApplyResult
 import com.torrent.app.config.ConfigDefaults
 import com.torrent.app.config.ConfigValidator
@@ -46,8 +36,6 @@ import com.torrent.app.config.TransmissionSettings
 import com.torrent.app.config.WizardSubmit
 import com.torrent.app.storage.SafStatus
 import com.torrent.app.ui.theme.TorrentPalette
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 
 /**
  * The first-run wizard: one screen per step, with a "Step N of 5" header, the step dots,
@@ -56,12 +44,13 @@ import kotlinx.coroutines.isActive
  * The form state lives in the activity-scoped [WizardFormViewModel] (so a rotation keeps
  * every value) and the restore state in [WizardRestoreViewModel]. This file owns the
  * actions: Next validates and persists exactly one section, Skip leaves that section's
- * stored values untouched, and "Finish setup" on the last step keeps the full
- * [WizardSubmit] sequence as the safety net.
+ * stored values untouched, "Start download" on the last step persists the restore inputs
+ * and hands over to the dedicated [RestoreProgressScreen], and "Finish without
+ * downloading" completes setup without a download.
  *
- * The restore card on the last step is service-anchored exactly as before: the service owns
- * the restore, so the card adopts its snapshot on every composition/resume and polls while
- * one is in flight.
+ * The wizard ends exactly once: [completeSetup] persists `wizardCompleted`, starts the
+ * dashboard/proxy/daemons and shows the main screen, guarded by
+ * [WizardFormViewModel.wizardFinished] so the download's auto-advance cannot run it twice.
  */
 @Composable
 fun WizardFlow(
@@ -77,81 +66,73 @@ fun WizardFlow(
     val restoreVm = viewModel<WizardRestoreViewModel>()
 
     var screen by form.screen
-    var restoreEnabled by restoreVm.restoreEnabled
     var restoreStatus by restoreVm.restoreStatus
     var restoreError by restoreVm.restoreError
 
-    val step = screen.stepOrNull
     val bound = boundService != null
     val usbGranted = safStatus?.granted == true
+    // The persisted R2 secret: a blank field keeps it (same rule as the dashboard form), so
+    // the download block stays usable on a re-shown wizard without retyping the secret.
+    val storedSecret = boundService?.loadConfig()?.backup?.r2SecretAccessKey ?: ""
 
-    // --- Restore card plumbing (unchanged from the single-form wizard) ---------------------
+    /** The whole form as [WizardSubmit.Form], with the blank-secret-keeps-stored rule applied. */
+    fun buildForm(): WizardSubmit.Form = submitFormFrom(form, storedSecret)
 
-    // The form builder shared by "Restore now" and "Finish setup" so both see exactly the
-    // same mapping (including blank-secret-keeps-current).
-    fun buildForm(): WizardSubmit.Form =
-        submitFormFrom(form, boundService?.loadConfig()?.backup?.r2SecretAccessKey ?: "")
-
-    // Persists the restore inputs, then starts the one-shot. The chip selection is
-    // saved FIRST: the restore's category filter reads the persisted selection, so the
-    // chips must reach the store before startDbRestore queues the restore — otherwise
-    // wizard display, persisted config and the filter could disagree.
-    // A rejected save is a form error, not a restore attempt: it clears any previous
-    // verdict so a stale SUCCESS can't keep "Finish setup" unlocked — but a restore
-    // that is still RUNNING stays visible, or its polling effect would detach mid-restore.
-    fun doRestoreNow() {
+    /**
+     * Finishes the wizard: `completeWizard()` persists the flag and starts the control
+     * server, the crawler proxy and the daemons, then the activity shows the main screen.
+     *
+     * Both exits land here — the download screen's auto-advance on SUCCESS and the explicit
+     * "Finish without downloading" — so it must be ONCE-ONLY: starting the servers twice is
+     * not idempotent. The guard lives in the activity-scoped ViewModel, so it survives a
+     * rotation but not a process death (where the wizard legitimately starts over).
+     */
+    fun completeSetup() {
+        if (form.wizardFinished.value) return
         val svc = boundService ?: return
-        val (categoryErrors, saveCategories) =
-            WizardSubmit.normalizeSaveCategories(buildForm().crawlerSaveCategories)
+        form.wizardFinished.value = true
+        svc.completeWizard()
+        onFinished()
+    }
+
+    /**
+     * "Start download" (and the progress screen's "Retry"): persists the restore inputs, then
+     * starts the one-shot restore.
+     *
+     * This is the old `doRestoreNow()` order and it is load-bearing: the chip selection is
+     * saved FIRST, because the restore's category filter reads the persisted selection inside
+     * its own run — i.e. after `startDbRestore` has returned. `saveBackupForRestore` runs
+     * `validateDbRestore` in the service, so a rejection is a form error, not an attempt: it
+     * clears any previous verdict (a stale SUCCESS must not survive inputs that were never
+     * restored from) but keeps a restore that is still RUNNING visible.
+     */
+    fun startDownload() {
+        val svc = boundService ?: return
+        val data = buildForm()
+        // The form only emits known names, so normalisation can only reorder/drop — the error
+        // branch is unreachable in practice and aborts rather than restoring from a store
+        // that disagrees with the chips.
+        val (categoryErrors, categories) =
+            WizardSubmit.normalizeSaveCategories(data.crawlerSaveCategories)
         val r: ApplyResult = if (categoryErrors.isNotEmpty()) {
             ApplyResult(false, categoryErrors.joinToString("; "), false)
         } else {
-            val saved = svc.saveCrawlerSaveCategoriesForRestore(saveCategories)
-            if (!saved.ok) saved else svc.saveBackupForRestore(WizardSubmit.backupSettings(buildForm()))
+            val saved = svc.saveCrawlerSaveCategoriesForRestore(categories)
+            if (!saved.ok) saved else svc.saveBackupForRestore(WizardSubmit.backupSettings(data))
         }
         if (!r.ok) {
             restoreError = r.message
             restoreVm.invalidate()
             svc.dbRestoreStatus().takeIf { it.running }?.let { restoreVm.adopt(it) }
-        } else {
-            restoreError = null
-            restoreStatus = svc.startDbRestore()
+            return
         }
-    }
-
-    // The restore lives in the service, so the card is SERVICE-anchored: the local copy is
-    // only a cache. An activity the OS recreates mid-restore (guaranteed with a multi-hour
-    // restore) comes back with a fresh ViewModel and restoreStatus == null, which used to
-    // leave the card blank, the section switch OFF and "Finish setup" locked even on SUCCESS.
-    val svcState = rememberUpdatedState(boundService)
-    fun adoptServiceStatus() {
-        val svc = svcState.value ?: return
-        restoreVm.adopt(svc.dbRestoreStatus())
-    }
-
-    // One snapshot on every restore-card composition, on each resume, and whenever the binder
-    // (re)appears — a recreated activity composes before the async onServiceConnected callback.
-    val lifecycleOwner = LocalLifecycleOwner.current
-    var resumeTick by remember { mutableStateOf(0) }
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) resumeTick++
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
-    LaunchedEffect(boundService, resumeTick) { adoptServiceStatus() }
-
-    // Follows RUNNING → SUCCESS/FAILED without blocking the main thread: the restore itself
-    // runs on the service's crawlerControlExecutor, and these status reads are cheap
-    // volatile/isBusy snapshots. Keyed on the ADOPTED snapshot, so the re-attach above is
-    // what starts the loop; every tick adopts through the same policy and always reads the
-    // latest binder.
-    LaunchedEffect(restoreStatus?.running) {
-        while (isActive && WizardRestorePollPolicy.shouldPoll(restoreStatus)) {
-            delay(1000)
-            adoptServiceStatus()
-        }
+        restoreError = null
+        val started = svc.startDbRestore()
+        restoreVm.adopt(started)
+        // A queued restore (RUNNING) and one that was already in flight (REFUSED_RUNNING)
+        // both belong on the progress screen. A busy/shutting-down refusal does not: it never
+        // starts anything, so it stays on this step with its reason.
+        if (started.running) screen = WizardScreenKind.Progress
     }
 
     // --- Per-step Next actions: validate, then persist ONE section ------------------------
@@ -237,7 +218,7 @@ fun WizardFlow(
             WizardStep.TRANSMISSION -> applyTransmissionSection()
             WizardStep.FTP -> applyFtpSection()
             WizardStep.CRAWLER -> applyCrawlerSection()
-            // Finishing is the explicit "Finish setup" button on the last step, never a Next.
+            // The last step has no Next: it starts a download or finishes explicitly.
             WizardStep.DB_DOWNLOAD -> false
         }
         if (!ok) return
@@ -253,110 +234,83 @@ fun WizardFlow(
         screen = WizardNav.next(current)
     }
 
-    // The last step's "Finish setup" keeps the old full-submit sequence as the safety net: it
-    // re-validates every section and re-applies the ones the earlier steps already persisted.
-    fun finish() {
-        val svc = boundService ?: return
-        val data = buildForm()
-        val outcome = WizardSubmit.submit(data)
-        if (!outcome.ok) {
-            form.setErrors(WizardStep.DB_DOWNLOAD, outcome.errors)
-            return
-        }
-        // Transmission apply first: it persists the shared data dir, which the FTP controller
-        // construction below reads from the store (Stage 11).
-        val newCfg = svc.loadConfig().copy(
-            transmission = outcome.transmission!!,
-            ftp = outcome.ftp!!,
-            backup = outcome.backup!!,
-            dataSubpath = data.dataSubpath,
-        )
-        val txR = svc.applyTransmissionSettings(newCfg, liveOnly = false)
-        val ftpR = svc.applyFtpSettings(newCfg.ftp)
-        if (txR.ok && ftpR.ok) {
-            // Written before the start below (same serialized executor), so the first crawler
-            // launch already sees the chosen adult_mode. The categories write is queued ahead
-            // of it for the same reason: the crawler reads save_categories only at startup.
-            svc.setCrawlerSaveCategories(outcome.crawlerSaveCategories)
-            svc.setCrawlerAdultMode(outcome.crawlerAdultMode)
-            if (outcome.crawlerEnabled) svc.setCrawlerEnabled(true)
-            svc.completeWizard()
-            onFinished()
-        } else {
-            form.setErrors(
-                WizardStep.DB_DOWNLOAD,
-                listOf(ftpR.message, txR.message).filter { it.isNotEmpty() },
-            )
-        }
-    }
-
     // --- Shell ---------------------------------------------------------------------------
 
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text(
-            text = WizardNav.stepIndicator(screen),
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        StepDots(WizardNav.stepNumber(screen))
-        Text(
-            text = step?.title ?: WizardStep.DB_DOWNLOAD.title,
-            style = MaterialTheme.typography.headlineMedium,
-        )
-        // Only the current step is composed: one screen per step, no scrolling mega-form.
-        Column(
-            modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            when (step) {
-                WizardStep.USB -> StepUsb(
-                    safStatus = safStatus,
-                    bound = bound,
-                    onGrantUsb = onGrantUsb,
+        when (val current = screen) {
+            // The dedicated download screen replaces the whole step layout (header, dots,
+            // action row): it owns its own title and actions while the restore runs.
+            WizardScreenKind.Progress -> RestoreProgressScreen(
+                modifier = Modifier.weight(1f),
+                boundService = boundService,
+                restoreVm = restoreVm,
+                onRetry = { startDownload() },
+                onFinishWithoutDownload = { completeSetup() },
+                onSucceeded = { completeSetup() },
+            )
+            is WizardScreenKind.Step -> {
+                val step = current.step
+                Text(
+                    text = WizardNav.stepIndicator(current),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                WizardStep.TRANSMISSION -> StepTransmission(form)
-                WizardStep.FTP -> StepFtp(form)
-                WizardStep.CRAWLER -> StepCrawler(form)
-                WizardStep.DB_DOWNLOAD -> StepDbDownload(
-                    form = form,
-                    bound = bound,
-                    restoreEnabled = restoreEnabled,
-                    onRestoreEnabledChange = { restoreEnabled = it },
-                    restoreStatus = restoreStatus,
-                    restoreError = restoreError,
-                    onEditRestoreInputs = { restoreVm.invalidate() },
-                    onRestoreNow = { doRestoreNow() },
-                    onFinish = { finish() },
-                    canFinish = bound && usbGranted &&
-                        WizardRestoreGate.canFinish(restoreEnabled, restoreStatus?.state),
-                )
-                // The dedicated progress screen arrives in Stage 4; nothing is composed here.
-                null -> Unit
-            }
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            OutlinedButton(
-                onClick = { screen = WizardNav.back(screen) },
-                // Back on the first step is a no-op (WizardNav.back) — disable it instead of
-                // letting a tap do nothing.
-                enabled = step != null && step != WizardNav.steps.first(),
-            ) { Text("Back") }
-            Spacer(Modifier.weight(1f))
-            if (step != null && step.isSkippable && step != WizardStep.DB_DOWNLOAD) {
-                TextButton(onClick = { skip() }) { Text("Skip") }
-            }
-            if (step != null && step != WizardStep.DB_DOWNLOAD) {
-                Button(
-                    onClick = { proceed() },
-                    enabled = WizardNav.canProceed(step, usbGranted),
-                ) { Text("Next") }
+                StepDots(WizardNav.stepNumber(current))
+                Text(step.title, style = MaterialTheme.typography.headlineMedium)
+                // Only the current step is composed: one screen per step, no scrolling
+                // mega-form.
+                Column(
+                    modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    when (step) {
+                        WizardStep.USB -> StepUsb(
+                            safStatus = safStatus,
+                            bound = bound,
+                            onGrantUsb = onGrantUsb,
+                        )
+                        WizardStep.TRANSMISSION -> StepTransmission(form)
+                        WizardStep.FTP -> StepFtp(form)
+                        WizardStep.CRAWLER -> StepCrawler(form)
+                        WizardStep.DB_DOWNLOAD -> StepDbDownload(
+                            form = form,
+                            bound = bound,
+                            storedSecret = storedSecret,
+                            restoreStatus = restoreStatus,
+                            restoreError = restoreError,
+                            onEditRestoreInputs = { restoreVm.invalidate() },
+                            onStartDownload = { startDownload() },
+                            onFinishWithoutDownload = { completeSetup() },
+                        )
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    OutlinedButton(
+                        onClick = { screen = WizardNav.back(current) },
+                        // Back on the first step is a no-op (WizardNav.back) — disable it
+                        // instead of letting a tap do nothing.
+                        enabled = step != WizardNav.steps.first(),
+                    ) { Text("Back") }
+                    Spacer(Modifier.weight(1f))
+                    // The DB-download step's Skip affordance is its own "Finish without
+                    // downloading" button, so the generic Skip stays off the last step.
+                    if (step.isSkippable && step != WizardStep.DB_DOWNLOAD) {
+                        TextButton(onClick = { skip() }) { Text("Skip") }
+                    }
+                    if (step != WizardStep.DB_DOWNLOAD) {
+                        Button(
+                            onClick = { proceed() },
+                            enabled = WizardNav.canProceed(step, usbGranted),
+                        ) { Text("Next") }
+                    }
+                }
             }
         }
     }
