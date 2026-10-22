@@ -23,6 +23,7 @@ import com.torrent.app.config.ConfigDefaults
 import com.torrent.app.config.WizardSubmit
 import com.torrent.app.config.CrawlerTaxonomy
 import com.torrent.app.config.ApplyResult
+import com.torrent.app.wizard.WizardDefaultSaveCategories
 import androidx.compose.foundation.Image
 import androidx.compose.material3.*
 import androidx.compose.material3.Button
@@ -306,9 +307,6 @@ fun MainScreen(
         }
     }
 }
-
-/** Fresh-install pre-check of the wizard's categories step: media only. */
-private val WizardDefaultSaveCategories = listOf("movie", "tv", "anime", "music")
 
 /** Display label for a `save_categories` name ("tv" reads better as "TV"). */
 private fun categoryLabel(name: String): String =
