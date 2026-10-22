@@ -853,7 +853,7 @@ class DaemonService : Service() {
         if (errors.isNotEmpty()) {
             return com.torrent.app.config.ApplyResult(false, errors.joinToString("; "), false)
         }
-        configStore.save(configStore.load().copy(backup = s))
+        configStore.saveBackup(s)
         // Refresh both managers' config-gate snapshots so the panel's
         // "disabled" notes reflect the just-saved settings immediately
         // (otherwise they linger until the next periodic check).

@@ -347,4 +347,66 @@ class ConfigStoreTest {
         assertFalse(lkg.classifierEnabled)
         assertEquals(16, lkg.numTrees)
     }
+
+    /**
+     * Regression (device `b93dac74`): `POST /settings/crawler` queues the async
+     * `applyCrawler(s)` — which persists `crawler.saveCategories` — and then
+     * synchronously saves the backup section. A full-section write here
+     * (`save(load().copy(backup = s))`) reused a snapshot that predated the queued
+     * crawler save and reverted the freshly applied selection while `config.ini` kept
+     * it; the restore filter reads that persisted selection, so it must be un-losable.
+     */
+    @Test fun saveBackup_isSectionTargeted() {
+        val s = store()
+        s.saveTransmission(TransmissionSettings("txuser", "txpass123", 51515, 111, 222, 33, 44))
+        s.saveFtp(FtpSettings("ftpuser", "ftppass123", 2323, true, 777))
+        s.saveCrawler(CrawlerSettings(logLevel = "DEBUG", saveCategories = listOf("movie")))
+        s.save(s.load().copy(dataSubpath = "keep_me"))
+
+        s.saveBackup(
+            BackupSettings(
+                r2Endpoint = "https://new.r2.cloudflarestorage.com",
+                r2Bucket = "new-bucket",
+                r2ObjectKey = "new/x.dat.gz",
+                r2AccessKeyId = "NEWAKID",
+                r2SecretAccessKey = "newsecret",
+                uploadEnabled = true,
+                dbBackupEnabled = true,
+                r2DbBucket = "new-db-bucket",
+                r2DbObjectPrefix = "newprefix",
+                bootstrapEnabled = false,
+                bootstrapUrl = "https://example.com/new.dat.gz",
+            )
+        )
+
+        val c = s.load()
+        // The backup keys took the new values...
+        assertEquals("https://new.r2.cloudflarestorage.com", c.backup.r2Endpoint)
+        assertEquals("new-bucket", c.backup.r2Bucket)
+        assertEquals("new/x.dat.gz", c.backup.r2ObjectKey)
+        assertEquals("NEWAKID", c.backup.r2AccessKeyId)
+        assertEquals("newsecret", c.backup.r2SecretAccessKey)
+        assertTrue(c.backup.uploadEnabled)
+        assertTrue(c.backup.dbBackupEnabled)
+        assertEquals("new-db-bucket", c.backup.r2DbBucket)
+        assertEquals("newprefix", c.backup.r2DbObjectPrefix)
+        assertFalse(c.backup.bootstrapEnabled)
+        assertEquals("https://example.com/new.dat.gz", c.backup.bootstrapUrl)
+
+        // ...and no other section moved: the crawler selection (read by the restore
+        // filter) survives a racing/concurrent backup save untouched.
+        assertEquals(listOf("movie"), c.crawler.saveCategories)
+        assertEquals(setOf("movie"), prefs().getStringSet("crawler_save_categories", emptySet()))
+        assertEquals("DEBUG", c.crawler.logLevel)
+        assertEquals("txuser", c.transmission.username)
+        assertEquals("txpass123", c.transmission.password)
+        assertEquals(51515, c.transmission.peerPort)
+        assertEquals(111, c.transmission.speedLimitDown)
+        assertEquals("ftpuser", c.ftp.username)
+        assertEquals("ftppass123", c.ftp.password)
+        assertEquals(2323, c.ftp.port)
+        assertTrue(c.ftp.wifiOnly)
+        assertEquals(777, c.ftp.maxDownloadKiBps)
+        assertEquals("keep_me", c.dataSubpath)
+    }
 }
