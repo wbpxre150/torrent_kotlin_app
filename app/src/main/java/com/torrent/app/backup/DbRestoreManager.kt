@@ -99,11 +99,19 @@ data class DbRestoreStatus(
  * recovery tool.
  *
  * Resume: a FAILED restore keeps the temp DB and the marker, so the retry
- * imports only the missing chunks (a kill mid-chunk re-replays that one
- * chunk, which is safe and deterministic: every dump statement is
- * `INSERT OR IGNORE` and the replay is id-major first-writer-wins). A
- * marker whose chain is not a prefix of the freshly listed chain is
- * discarded and the import starts over. A FAILED import closes the sink's
+ * continues where it stopped (a kill mid-chunk re-replays that one chunk,
+ * which is safe and deterministic: every dump statement is `INSERT OR
+ * IGNORE` and the replay is id-major first-writer-wins). A resumed run
+ * REWINDS its start by [RESUME_REWIND_CHUNKS] chunks ([resumeStartIndex])
+ * so the marker can never point past a rolled-back WAL tail: the bulk phase
+ * runs at `synchronous=OFF` with `wal_autocheckpoint=0` (see
+ * [RestorePragmas.bulkPhase]), so after a power loss SQLite's WAL recovery
+ * can roll back frames the marker already counted — and re-importing
+ * already-committed chunks is a deterministic no-op (all rows exist, so
+ * `INSERT OR IGNORE` ignores them), while the rewind re-covers the realistic
+ * loss window (kernel writeback flushes WAL writes within ~30 s, i.e. 1-2
+ * chunks). A marker whose chain is not a prefix of the freshly listed chain
+ * is discarded and the import starts over. A FAILED import closes the sink's
  * handle without deleting anything ([RestoreStatementSink.suspendImport]),
  * so the retry never races a stale handle left by the failed attempt.
  *
@@ -329,13 +337,14 @@ class DbRestoreManager(
                 keys.subList(0, progress.keys.size) == progress.keys &&
                 RestoreFileOps.targetDbExists(tmpDb)
             ) progress.nextIndex else null
-            val startIndex = resumeAt ?: 0
+            val startIndex = resumeAt?.let { resumeStartIndex(it) } ?: 0
             // Triage-visible phase lines: `logcat -s DbRestore` must show where a
             // retry picks up without needing the dashboard or the marker file.
             Log.i(TAG, if (resumeAt == null)
                 "fresh import of ${keys.size} chunk(s)"
             else
-                "resuming at chunk ${startIndex + 1}/${keys.size} (${startIndex} imported)")
+                "resuming at chunk ${startIndex + 1}/${keys.size} (marker $resumeAt, " +
+                    "rewound ${resumeAt - startIndex} chunk(s) for WAL-durability safety)")
 
             val opened = sinkFactory(tmpDb).also { sink = it }
             if (resumeAt != null) {
@@ -541,5 +550,20 @@ class DbRestoreManager(
         internal const val MAX_LINES = 2000
         /** logcat tag of the restore flow — the sink logs under the same tag. */
         private const val TAG = "DbRestore"
+
+        /**
+         * How many already-imported chunks a RESUMED run replays before
+         * continuing at the marker: the bulk phase's `synchronous=OFF` +
+         * `wal_autocheckpoint=0` means a power loss can leave the marker ahead
+         * of WAL frames SQLite rolls back at the next open, and 3 chunks covers
+         * the realistic window (writeback flushes within ~30 s, i.e. 1-2
+         * chunks). Replaying them is a no-op — every dump statement is
+         * `INSERT OR IGNORE` and the replay order is unchanged.
+         */
+        internal const val RESUME_REWIND_CHUNKS = 3
+
+        /** The chunk index a resumed run starts at: the marker, rewound and clamped at 0. */
+        internal fun resumeStartIndex(markerNextIndex: Int): Int =
+            maxOf(0, markerNextIndex - RESUME_REWIND_CHUNKS)
     }
 }

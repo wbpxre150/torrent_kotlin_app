@@ -17,16 +17,22 @@ import java.io.IOException
  * `cache_size` is pinned to 64 MiB so SQLite's page cache cannot grow with the
  * ~36 GB replay.
  *
- * What makes it fast (measured: ~3 ms per replayed statement, i.e. ~46-52 s of
- * CPU per chunk, with the secondary indexes present): [prepare] with
- * `fresh = true` creates ONLY the five base tables
- * ([CrawlerDbSchema.tableStatements]), so each of the ~190 M
+ * What makes it fast: [prepare] with `fresh = true` creates ONLY the five base
+ * tables ([CrawlerDbSchema.tableStatements]), so each of the ~190 M
  * `INSERT OR IGNORE` statements appends to one rowid B-tree instead of
  * maintaining 5+ secondary ones, and [finishImport] builds the six `idx_*` in
- * one single pass over the finished rows. A fresh temp DB also gets a 32 KiB
- * page size (the crawler's own) and the 64 MiB cache. A RESUMED temp DB created
- * by the pre-deferred-index build keeps its page size but has its `idx_*`
- * dropped ([dropLegacyIndexes]) so the remaining chunks get the same rate.
+ * one single pass over the finished rows. The bulk phase also runs with
+ * [RestorePragmas.bulkPhase]: `wal_autocheckpoint=0` turns the WAL into a pure
+ * append log, so a per-chunk COMMIT is a page-cache append instead of fighting
+ * incremental checkpoints of a growing WAL back into the DB on slow flash
+ * (measured on-device: 54 s per chunk, every thread asleep), and
+ * `synchronous=OFF` skips the per-commit fsync. [finishImport] then folds the
+ * whole WAL back in ONE sequential pass at `synchronous=FULL`, so the DB is
+ * fully durable before the swap. A RESUMED temp DB created by the
+ * pre-deferred-index build has its `idx_*` dropped ([dropLegacyIndexes]) so the
+ * remaining chunks get the same rate. The page size stays the platform default
+ * (4096 on-device): `PRAGMA page_size` cannot change it, because
+ * `openDatabase(CREATE_IF_NECESSARY)` has already initialised the header.
  *
  * What makes the import resumable: one chunk = one transaction
  * ([beginChunk]/[endChunk]). A chunk that commits survives a process kill; the
@@ -53,7 +59,7 @@ class SqliteRestoreSink(private val dbFile: File) : RestoreStatementSink {
     /** `journal_mode` the platform SQLite actually granted, for the summary. */
     private var journalMode: String = UNKNOWN_VERSION
 
-    /** `page_size` the temp DB actually has, for the summary (fresh 32768, legacy 4096). */
+    /** `page_size` the temp DB actually has (the platform default), for the summary. */
     private var pageSize: String = UNKNOWN_VERSION
 
     /**
@@ -84,34 +90,13 @@ class SqliteRestoreSink(private val dbFile: File) : RestoreStatementSink {
         )
         db = opened
         platformSqliteVersion = readSqliteVersion(opened)
-        if (fresh) {
-            // A page size can only be chosen while the database holds no object
-            // at all: this must precede BOTH the table DDL below and the WAL
-            // conversion (a journal-mode change writes the header). 32 KiB is
-            // the crawler's own page size, so the swapped-in DB needs no
-            // conversion on its side. A RESUMED (legacy) temp DB keeps whatever
-            // page size it was created with: page_size cannot change on a
-            // non-empty DB without a full VACUUM rewrite, and with the 64 MiB
-            // cache below it is not the dominant cost.
-            opened.execSQL("PRAGMA page_size=$PAGE_SIZE_BYTES")
-        }
-        // Session pragmas apply to a RESUMED import exactly as to a fresh one.
-        // They are per-connection (not persisted in the file), so re-applying
-        // them here is what keeps a retry on the same footing as the first
-        // attempt: without it a resume would fall back to the platform's
-        // foreign_keys default and lose the bounded page cache.
-        //
-        // foreign_keys stays OFF for the whole import: the dump inserts
-        // torrents, prefixes and files in chain order, so a row can
-        // reference an id that a LATER object adds.
-        opened.execSQL("PRAGMA foreign_keys=OFF")
-        // synchronous=NORMAL is the WAL-appropriate setting (a kill can
-        // lose at most the in-flight chunk, which a retry replays).
-        opened.execSQL("PRAGMA synchronous=NORMAL")
-        // 64 MiB page cache (the crawler's own tuning): still a hard bound on
-        // SQLite's heap use, but big enough that the index-free bulk insert and
-        // the deferred index build are not thrashing the page cache.
-        opened.execSQL("PRAGMA cache_size=$CACHE_SIZE_KIB")
+        // Bulk-phase pragmas, hoisted ABOVE the fresh/resume split (the Stage 6
+        // fix): they are per-connection settings that are not stored in the
+        // file, so a resumed import must get exactly the same session as a
+        // fresh one — otherwise a retry would fall back to the platform's
+        // foreign_keys default, fsync every commit again (synchronous=NORMAL)
+        // and lose the bounded page cache. See [RestorePragmas.bulkPhase].
+        for (sql in RestorePragmas.bulkPhase) opened.execSQL(sql)
         if (fresh) {
             journalMode = readJournalMode(opened, "WAL")
             // ONLY the base tables: the six `idx_*` are created by
@@ -120,8 +105,9 @@ class SqliteRestoreSink(private val dbFile: File) : RestoreStatementSink {
             for (sql in CrawlerDbSchema.tableStatements) opened.execSQL(sql)
             pageSize = readPageSize(opened)
             Log.i(TAG, "prepared ${dbFile.path}: journal_mode=$journalMode " +
-                "page_size=$pageSize cache_size=${CACHE_SIZE_KIB}KiB " +
-                "sqlite=$platformSqliteVersion tables=" +
+                "page_size=$pageSize (platform default; not settable via PRAGMA) " +
+                "cache_size=${RestorePragmas.CACHE_SIZE_KIB}KiB synchronous=OFF " +
+                "wal_autocheckpoint=0 sqlite=$platformSqliteVersion tables=" +
                 CrawlerDbSchema.tableStatements.size + " (deferred indexes=" +
                 CrawlerDbSchema.indexStatements.size + ")")
         } else {
@@ -132,7 +118,8 @@ class SqliteRestoreSink(private val dbFile: File) : RestoreStatementSink {
             dropLegacyIndexes(opened)
             pageSize = readPageSize(opened)
             Log.i(TAG, "resumed ${dbFile.path}: journal_mode=$journalMode " +
-                "page_size=$pageSize sqlite=$platformSqliteVersion")
+                "page_size=$pageSize cache_size=${RestorePragmas.CACHE_SIZE_KIB}KiB " +
+                "synchronous=OFF wal_autocheckpoint=0 sqlite=$platformSqliteVersion")
         }
     }
 
@@ -177,7 +164,13 @@ class SqliteRestoreSink(private val dbFile: File) : RestoreStatementSink {
             // them. Idempotent (`IF NOT EXISTS`), so a retry that re-enters
             // finishImport after a kill completes a partial build.
             lines += createDeferredIndexes(d)
-            d.rawQuery("PRAGMA wal_checkpoint(TRUNCATE)", null).use { c ->
+            // The bulk phase ran at synchronous=OFF (no fsync per chunk commit):
+            // switch to FULL for the ONE final checkpoint below, so the whole DB
+            // — the WAL fold-back included — is on stable storage before the
+            // temp DB is renamed over the live one. This one-time fsync is
+            // exactly the cost the bulk phase deferred.
+            d.execSQL(RestorePragmas.FINAL_DURABILITY)
+            d.rawQuery(RestorePragmas.FINAL_CHECKPOINT, null).use { c ->
                 if (c.moveToFirst()) {
                     val busy = c.getInt(0)
                     checkpoint = "busy=$busy log=${c.getInt(1)} checkpointed=${c.getInt(2)}"
@@ -193,6 +186,7 @@ class SqliteRestoreSink(private val dbFile: File) : RestoreStatementSink {
             "sqlite_version=$platformSqliteVersion (platform SQLite)",
             "journal_mode=$journalMode",
             "page_size=$pageSize",
+            "synchronous=FULL for the final checkpoint (bulk phase ran at OFF)",
             "wal_checkpoint(TRUNCATE): $checkpoint",
             "import complete; FTS5 tables, triggers and the torrent_search/" +
                 "file_search rebuild are delegated to the native --rebuild-fts",
@@ -324,11 +318,67 @@ class SqliteRestoreSink(private val dbFile: File) : RestoreStatementSink {
 
         /** Placeholder when a PRAGMA/version query cannot be read. */
         private const val UNKNOWN_VERSION = "unknown"
-
-        /** Page size of a freshly created temp DB (the crawler's own, 32 KiB). */
-        private const val PAGE_SIZE_BYTES = 32768
-
-        /** Negative = KiB: 64 MiB of page cache, matching the crawler's tuning. */
-        private const val CACHE_SIZE_KIB = -64000
     }
+}
+
+/**
+ * The PRAGMA sequence of the bulk import, as pure data (no Android types), so
+ * the ordering the importer depends on is JVM-testable — the sink itself needs
+ * a device.
+ *
+ * [bulkPhase] is executed by [SqliteRestoreSink.prepare] for a FRESH and a
+ * RESUMED import alike: every entry is a per-connection setting that is not
+ * stored in the file, so a retry must re-apply it.
+ */
+internal object RestorePragmas {
+
+    /** Negative = KiB: 64 MiB of page cache, matching the crawler's tuning. */
+    const val CACHE_SIZE_KIB = -64000
+
+    /**
+     * Bulk-phase pragmas, in execution order:
+     *
+     * 1. `foreign_keys=OFF` — the dump inserts torrents, prefixes and files in
+     *    chain order, so a row may reference an id a LATER object adds.
+     * 2. `synchronous=OFF` — no fsync per chunk commit during the replay. Safe
+     *    because the temp DB is disposable and every chunk replay is idempotent
+     *    (`INSERT OR IGNORE`, deterministic first-writer-wins), so a lost
+     *    in-flight chunk is simply re-imported. A process-level kill (OOM
+     *    SIGKILL, force-stop) never loses committed chunks: `commit()` and the
+     *    resume-marker write both land in the kernel page cache, which survives
+     *    process death, and SQLite's WAL recovery on the next open replays to
+     *    the last valid commit frame. Only sudden power loss could drop
+     *    unflushed frames, and the exposure is identical to `synchronous=NORMAL`
+     *    under WAL (which also fsyncs only at a checkpoint — and
+     *    `wal_autocheckpoint` is 0 below).
+     * 3. `cache_size=-64000` — a hard bound on SQLite's heap, big enough that
+     *    the index-free append and the deferred index build are not thrashing
+     *    the page cache.
+     * 4. `wal_autocheckpoint=0` — the crawler's own `database_init` setting
+     *    (`database.c:125-131`): the WAL becomes a pure append log, so a
+     *    per-chunk COMMIT is a page-cache append instead of fighting
+     *    incremental checkpoints of a growing WAL back into the DB on slow
+     *    flash. [SqliteRestoreSink.finishImport] folds the whole WAL back in ONE
+     *    sequential pass at the end. A `journal_size_limit` is NOT needed: it
+     *    only matters when a WAL is reset and reused repeatedly (the crawler's
+     *    steady state); this import checkpoints exactly once and the sidecars
+     *    are deleted at the swap.
+     */
+    val bulkPhase: List<String> = listOf(
+        "PRAGMA foreign_keys=OFF",
+        "PRAGMA synchronous=OFF",
+        "PRAGMA cache_size=$CACHE_SIZE_KIB",
+        "PRAGMA wal_autocheckpoint=0",
+    )
+
+    /**
+     * Applied by [SqliteRestoreSink.finishImport] immediately BEFORE
+     * [FINAL_CHECKPOINT]: the one-time fsync of the whole DB is exactly the cost
+     * the bulk phase deferred, and it makes the swapped-in live DB fully durable
+     * before the rename.
+     */
+    const val FINAL_DURABILITY = "PRAGMA synchronous=FULL"
+
+    /** The single checkpoint that folds the append-only WAL back into the DB. */
+    const val FINAL_CHECKPOINT = "PRAGMA wal_checkpoint(TRUNCATE)"
 }

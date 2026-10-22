@@ -23,10 +23,13 @@ import java.util.concurrent.atomic.AtomicInteger
  * bookmark), the chain ordering (ID-MAJOR: sorted by start id, then date;
  * malformed and zero-size keys skipped), the chain coherence failures (a gap
  * against the running max end; overlap is legal), the per-chunk resume marker
- * (advance after every committed chunk; resume from it; discard a mismatched
- * one), the FTS-rebuild-before-swap ordering (exit != 0 → FAILED, no swap, the
- * temp DB and marker kept so a retry re-runs only the rebuild), the bookmark
- * ordering (reset to [DbBookmark.FIRST_RUN] ONLY on success), the crawler
+ * (advance after every committed chunk; resume from it, rewound by
+ * [DbRestoreManager.RESUME_REWIND_CHUNKS] chunks so the marker can never point
+ * past a WAL tail a power loss rolled back; discard a mismatched one), the
+ * FTS-rebuild-before-swap ordering (exit != 0 → FAILED, no swap, the temp DB
+ * and marker kept so a retry re-runs the rebuild after the rewound chunks),
+ * the bookmark ordering (reset to [DbBookmark.FIRST_RUN] ONLY on success), the
+ * crawler
  * restart on every stopped outcome (even a throwing stopCrawler), the
  * OOM-safety of the status (a [Throwable] from the sink lands FAILED with
  * `running = false`), and the busy/in-flight/shutdown refusals.
@@ -434,7 +437,7 @@ class DbRestoreManagerTest {
         assertEquals(1, flags.startCount)
     }
 
-    @Test fun retryResumesAtTheMarkerAndNeverReRequestsImportedChunks() {
+    @Test fun retryRewindsAndReplaysAlreadyCommittedChunksIdempotently() {
         val restorer = FakeRestorer()
         val runner = FakeRunner()
         val keys = listOf(
@@ -459,6 +462,11 @@ class DbRestoreManagerTest {
         assertEquals("fake-db-1", tempDbFile().readText())
 
         // Retry: the bucket is unchanged, so the marker's chain is a prefix.
+        // The marker sits at 2 and a resume rewinds 3 chunks, so the run starts
+        // at 0 again: the already-committed chunks are replayed on purpose
+        // (they re-cover WAL frames a power loss could have rolled back below
+        // the marker; every dump statement is INSERT OR IGNORE, so re-applying
+        // a committed chunk is a deterministic no-op).
         restorer.failGetCall = null
         restorer.getOrder.clear()
         val second = m.runRestore()
@@ -468,17 +476,65 @@ class DbRestoreManagerTest {
         val resumed = sinks[1]
         assertEquals(1, resumed.prepareCalls)
         assertEquals(false, resumed.fresh)
-        // Only the missing chunk is re-requested and replayed.
-        assertEquals(listOf(keys[2]), restorer.getOrder)
-        assertEquals(listOf(listOf("INSERT OR IGNORE INTO torrents VALUES(22)")), resumed.chunks)
-        // Progress counting starts at the marker, not at zero.
-        assertEquals(listOf(0, 1, 2, 2), restorer.getSnapshots.map { it.objectsDone })
+        assertEquals(keys, restorer.getOrder)
+        assertEquals(
+            listOf(
+                listOf("INSERT OR IGNORE INTO path_prefixes VALUES(1)"),
+                listOf("INSERT OR IGNORE INTO torrents VALUES(2)"),
+                listOf("INSERT OR IGNORE INTO torrents VALUES(22)"),
+            ),
+            resumed.chunks)
+        // Progress counting starts at the REWOUND index, not at the marker.
+        assertEquals(listOf(0, 1, 2, 0, 1, 2), restorer.getSnapshots.map { it.objectsDone })
         assertEquals("importing 3 of 3 object(s)", restorer.getSnapshots.last().message)
         assertEquals(DbBookmark.FIRST_RUN, DbBookmark.read(bookmarkFile))
         assertFalse(progressFile().exists())
     }
 
-    @Test fun retryAfterAnFtsFailureRerunsOnlyTheRebuild() {
+    @Test fun resumedRunRewindsThreeChunksBeforeContinuingAtTheMarker() {
+        val restorer = FakeRestorer()
+        val runner = FakeRunner()
+        // Eight contiguous objects, so the marker can sit at 5 (the plan's
+        // validation shape: nextIndex=5 -> keys 2-4 are re-requested).
+        val keys = (0 until 8).map { i ->
+            "db/incremental_202311${(10 + i).toString().padStart(2, '0')}_" +
+                "${i * 10}-${i * 10 + 9}.sql.gz"
+        }
+        val (m, _, _) = newManager(restorer, runner, objects = keys.map { it to bodyFor(it) })
+        progressFile().parentFile?.mkdirs()
+        RestoreProgress.write(progressFile(), RestoreProgress(keys.subList(0, 5), 5))
+        dataDir().mkdirs()
+        tempDbFile().writeText("partial-db")
+        restorer.statusProbe = { m.status }
+
+        val st = m.runRestore()
+
+        assertEquals(DbRestoreState.SUCCESS, st.state)
+        val resumed = sinks.single()
+        assertEquals(false, resumed.fresh)
+        // start = max(0, 5 - 3) = 2: chunks 2, 3 and 4 are replayed before the
+        // run continues at 5.
+        assertEquals(keys.subList(2, 8), restorer.getOrder)
+        assertEquals(6, resumed.chunks.size)
+        assertEquals(
+            listOf(2, 3, 4, 5, 6, 7),
+            restorer.getSnapshots.map { it.objectsDone })
+        // The loop publishes its phase line as it starts at the rewound index.
+        assertEquals("importing 3 of 8 object(s)", restorer.getSnapshots.first().message)
+        assertEquals(8, st.objectsDone)
+        assertEquals(8, st.objectCount)
+        assertFalse(progressFile().exists())
+    }
+
+    @Test fun resumeStartIndexRewindsByThreeChunksAndClampsAtZero() {
+        assertEquals(3, DbRestoreManager.RESUME_REWIND_CHUNKS)
+        assertEquals(2, DbRestoreManager.resumeStartIndex(5))
+        assertEquals(0, DbRestoreManager.resumeStartIndex(3))
+        assertEquals(0, DbRestoreManager.resumeStartIndex(0))
+        assertEquals(7, DbRestoreManager.resumeStartIndex(10))
+    }
+
+    @Test fun retryAfterAnFtsFailureRewindsReplaysThenRerunsTheRebuild() {
         val restorer = FakeRestorer()
         val runner = FakeRunner(exitCode = 1)
         val keys = listOf(
@@ -491,22 +547,24 @@ class DbRestoreManagerTest {
         assertEquals(DbRestoreState.FAILED, first.state)
         assertEquals(1, runner.calls)
 
-        // Everything is imported and marked: the retry only rebuilds the FTS
-        // indexes and swaps, it must not download a single chunk again.
+        // Everything is imported and marked. A resume still rewinds 3 chunks
+        // (here: the whole 2-chunk chain), so the retry re-downloads and
+        // re-replays them — a no-op on the DB — and then reruns the rebuild.
+        // The rewind is unconditional because the marker alone cannot tell a
+        // completed import from one whose WAL tail a power loss rolled back.
         runner.exitCode = 0
         restorer.getOrder.clear()
         val second = m.runRestore()
 
         assertEquals(DbRestoreState.SUCCESS, second.state)
-        assertEquals(0, restorer.getOrder.size)
+        assertEquals(keys, restorer.getOrder)
         assertEquals(2, sinks.size)
         assertEquals(false, sinks[1].fresh)
-        assertEquals(0, sinks[1].chunks.size)
+        assertEquals(2, sinks[1].chunks.size)
         assertEquals(1, sinks[1].finishCalls)
         assertEquals(2, runner.calls)
-        // The resume phase is visible in the status while the rebuild runs.
-        assertEquals("all 2 object(s) imported; resuming at the FTS rebuild",
-            sinks[1].statusAtFinish?.message)
+        // The re-import is visible in the status while the rebuild runs.
+        assertEquals("importing 2 of 2 object(s)", sinks[1].statusAtFinish?.message)
         // The swapped-in DB is the one the resumed sink prepared (each FakeSink
         // counts its own prepare calls, so both runs write "fake-db-1").
         assertEquals("fake-db-1", liveDbFile().readText())
@@ -577,9 +635,15 @@ class DbRestoreManagerTest {
         assertEquals(DbRestoreState.SUCCESS, st.state)
         val sink = sinks.single()
         assertEquals(false, sink.fresh)
-        // Only the chunk the marker had not reached is requested.
-        assertEquals(listOf(second), restorer.getOrder)
-        assertEquals(listOf(listOf("INSERT OR IGNORE INTO torrents VALUES(2)")), sink.chunks)
+        // Marker 1 rewound by 3 clamps at 0, so the committed first chunk is
+        // replayed (a no-op) before the chunk the marker had not reached.
+        assertEquals(listOf(first, second), restorer.getOrder)
+        assertEquals(
+            listOf(
+                listOf("INSERT OR IGNORE INTO path_prefixes VALUES(1)"),
+                listOf("INSERT OR IGNORE INTO torrents VALUES(2)"),
+            ),
+            sink.chunks)
         assertEquals(DbBookmark.FIRST_RUN,
             DbBookmark.read(File(tmp.root, "db_bookmark.txt")))
     }
