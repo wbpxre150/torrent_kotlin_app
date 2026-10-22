@@ -151,6 +151,17 @@ class DbRestoreManagerTest {
         override fun suspendImport() {
             suspendImportCalls++
         }
+
+        /** How often the manager asked for a WAL checkpoint (once per chunk). */
+        var checkpointCalls = 0
+
+        /** Value returned by the nth (1-based) [maybeCheckpoint]; null = no checkpoint. */
+        var checkpointResult: ((Int) -> String?)? = null
+
+        override fun maybeCheckpoint(): String? {
+            checkpointCalls++
+            return checkpointResult?.invoke(checkpointCalls)
+        }
     }
 
     /** Scripted one-shot: records the args, the dir and the DB bytes it saw. */
@@ -226,6 +237,7 @@ class DbRestoreManagerTest {
         executor: CapturingExecutor = CapturingExecutor(),
         stopThrows: Boolean = false,
         sinkTemplate: (FakeSink) -> Unit = {},
+        freeSpaceBytes: () -> Long = { Long.MAX_VALUE },
     ): Triple<DbRestoreManager, FakeFlags, File> {
         val flags = FakeFlags()
         sinks.clear()
@@ -245,6 +257,7 @@ class DbRestoreManagerTest {
             tmpDir = { File(tmp.root, "tmp") },
             bookmarkFile = { bookmarkFile },
             progressFile = { progressFile() },
+            freeSpaceBytes = freeSpaceBytes,
             stopCrawler = {
                 flags.stopCount++
                 if (stopThrows) throw IllegalStateException("stop failed")
@@ -1295,5 +1308,132 @@ class DbRestoreManagerTest {
 
         assertEquals(DbRestoreState.SUCCESS, st.state)
         assertFalse(st.lines.toString(), st.lines.any { it.contains("embedded NUL") })
+    }
+
+    // ---- Stage 11: bounded WAL (periodic TRUNCATE checkpoint) + disk guard ----
+
+    @Test fun checkpointHookRunsAfterEveryCommitAndMarkerAndOnlyItsLinesArePushed() {
+        val restorer = FakeRestorer()
+        val runner = FakeRunner()
+        val keys = listOf(
+            "db/incremental_20231114_0-10.sql.gz",
+            "db/incremental_20231115_11-20.sql.gz",
+            "db/incremental_20231116_21-30.sql.gz",
+        )
+        // The marker as seen from inside the sink's maybeCheckpoint(): it must
+        // already describe the chunk that was just committed, i.e. the hook runs
+        // AFTER the commit AND after the resume-marker write.
+        val markerAtCheckpoint = mutableListOf<Int?>()
+        val (m, _, _) = newManager(
+            restorer, runner,
+            objects = keys.map { it to bodyFor(it) },
+            sinkTemplate = { sink ->
+                sink.checkpointResult = { n ->
+                    markerAtCheckpoint.add(RestoreProgress.read(progressFile())?.nextIndex)
+                    if (n == 2) "checkpoint: folded WAL (1100 MB, 900 ms)" else null
+                }
+            },
+        )
+
+        val st = m.runRestore()
+
+        assertEquals(DbRestoreState.SUCCESS, st.state)
+        val sink = sinks.single()
+        assertEquals(3, sink.checkpointCalls)
+        assertEquals(listOf(1, 2, 3), markerAtCheckpoint)
+        // Only the non-null line reaches the status tail, and exactly once.
+        assertEquals(
+            st.lines.toString(),
+            1, st.lines.count { it.startsWith("checkpoint: folded WAL") })
+    }
+
+    @Test fun insufficientFreeSpaceOnAFreshRunFailsBeforeAnyDownload() {
+        val restorer = FakeRestorer()
+        val runner = FakeRunner()
+        val (m, _, _) = newManager(
+            restorer, runner,
+            objects = listOf(
+                "db/incremental_20231114_0-10.sql.gz" to
+                    bodyFor("db/incremental_20231114_0-10.sql.gz")),
+            freeSpaceBytes = { 0L },
+        )
+
+        val st = m.runRestore()
+
+        assertEquals(DbRestoreState.FAILED, st.state)
+        assertFalse(st.running)
+        assertTrue(st.message, st.message.contains("not enough free space"))
+        // The chain was listed (the guard needs the sizes) but nothing was
+        // downloaded, no sink was created and no temp DB/marker was touched.
+        assertEquals(1, restorer.listCalls)
+        assertTrue(restorer.getOrder.toString(), restorer.getOrder.isEmpty())
+        assertTrue(sinks.toString(), sinks.isEmpty())
+        assertFalse(tempDbFile().exists())
+        assertFalse(progressFile().exists())
+    }
+
+    @Test fun insufficientFreeSpaceOnAResumedRunKeepsTheTempDbAndTheMarker() {
+        val restorer = FakeRestorer()
+        val runner = FakeRunner()
+        val keys = (0 until 5).map { i ->
+            "db/incremental_202311${(10 + i).toString().padStart(2, '0')}_" +
+                "${i * 10}-${i * 10 + 9}.sql.gz"
+        }
+        val (m, _, _) = newManager(
+            restorer, runner,
+            objects = keys.map { it to bodyFor(it) },
+            freeSpaceBytes = { 0L },
+        )
+        progressFile().parentFile?.mkdirs()
+        RestoreProgress.write(progressFile(), RestoreProgress(keys.subList(0, 4), 4))
+        dataDir().mkdirs()
+        tempDbFile().writeText("partial-db")
+
+        val st = m.runRestore()
+
+        assertEquals(DbRestoreState.FAILED, st.state)
+        assertTrue(st.message, st.message.contains("not enough free space"))
+        // The resume state survives untouched, so freeing space and retrying
+        // continues at the marker instead of starting over.
+        assertEquals("partial-db", tempDbFile().readText())
+        assertEquals(4, RestoreProgress.read(progressFile())?.nextIndex)
+        assertTrue(restorer.getOrder.toString(), restorer.getOrder.isEmpty())
+        assertTrue(sinks.toString(), sinks.isEmpty())
+    }
+
+    @Test fun insufficientFreeSpaceAtACheckpointFailsTheRunAndKeepsTheResumeState() {
+        val restorer = FakeRestorer()
+        val runner = FakeRunner()
+        val keys = listOf(
+            "db/incremental_20231114_0-10.sql.gz",
+            "db/incremental_20231115_11-20.sql.gz",
+            "db/incremental_20231116_21-30.sql.gz",
+        )
+        var free = Long.MAX_VALUE
+        val (m, _, _) = newManager(
+            restorer, runner,
+            objects = keys.map { it to bodyFor(it) },
+            freeSpaceBytes = { free },
+            sinkTemplate = { sink ->
+                sink.checkpointResult = { n ->
+                    // The volume filled up while the run was going (transmission
+                    // and FTP share it): the checkpoint re-check catches it.
+                    free = 0L
+                    if (n == 1) "checkpoint: folded WAL (1100 MB, 900 ms)" else null
+                }
+            },
+        )
+
+        val st = m.runRestore()
+
+        assertEquals(DbRestoreState.FAILED, st.state)
+        assertTrue(st.message, st.message.contains("not enough free space"))
+        // The failure happens at chunk 1's checkpoint: chunk 2 is never fetched.
+        assertEquals(1, restorer.getOrder.size)
+        assertEquals(1, sinks.single().suspendImportCalls)
+        // The committed chunk's marker and the temp DB are kept for the resume.
+        assertEquals(1, RestoreProgress.read(progressFile())?.nextIndex)
+        assertEquals("fake-db-1", tempDbFile().readText())
+        assertTrue(st.lines.toString(), st.lines.any { it.startsWith("checkpoint: folded WAL") })
     }
 }

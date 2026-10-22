@@ -98,6 +98,15 @@ data class DbRestoreStatus(
  * executed by the app any more; it stays in the binary as a manual
  * recovery tool.
  *
+ * Two guards keep a multi-hour run safe on a shared volume (plan 3, Stage 11):
+ * after every chunk's COMMIT and marker write the sink gets a
+ * [RestoreStatementSink.maybeCheckpoint] call, which folds the WAL back once it
+ * reaches 1 GiB (so it is bounded at ~1.2 GB instead of the measured 2.1 GB
+ * after 420 MB of SQL), and [RestoreDiskGuard] decides the free-space budget
+ * from the LIST's compressed sizes before anything is downloaded and again at
+ * every checkpoint — insufficient space fails cleanly with the temp DB and the
+ * marker kept, so a retry after freeing space resumes.
+ *
  * Resume: a FAILED restore keeps the temp DB and the marker, so the retry
  * continues where it stopped (a kill mid-chunk re-replays that one chunk,
  * which is safe and deterministic: every dump statement is `INSERT OR
@@ -147,6 +156,13 @@ class DbRestoreManager(
     private val bookmarkFile: () -> File,
     /** The per-chunk resume marker (production: `filesDir/backup/db_restore_progress.txt`). */
     private val progressFile: () -> File,
+    /**
+     * Free bytes on the volume that holds the temp DB (production:
+     * `StatFs(filesDir).availableBytes`). Consulted by [RestoreDiskGuard]
+     * before any download and again at every WAL checkpoint; injected so the
+     * budget decision is plain-JUnit testable.
+     */
+    private val freeSpaceBytes: () -> Long,
     private val stopCrawler: () -> Unit,
     private val startCrawlerIfEnabled: () -> Unit,
     private val executor: Executor,
@@ -279,8 +295,11 @@ class DbRestoreManager(
                 if (o.size == 0L) return@mapNotNull null
                 val k = DbObjectKey.parse(o.key) ?: return@mapNotNull null
                 if (k.prefix != settings.r2DbObjectPrefix) return@mapNotNull null
-                o.key to k
-            }.sortedWith(compareBy({ it.second.start }, { it.second.date }))
+                // Carry the listed compressed size: the disk-space guard
+                // estimates the remaining SQL volume from it (plan 3,
+                // Stage 11) and the LIST has already paid for it.
+                ChainEntry(o.key, k, o.size)
+            }.sortedWith(compareBy({ it.meta.start }, { it.meta.date }))
             if (chain.isEmpty()) {
                 throw IllegalStateException("nothing to restore: no parseable dump objects " +
                     "under ${prefixDir(settings)}")
@@ -305,10 +324,12 @@ class DbRestoreManager(
             // `start > runningMaxEnd + 1`, i.e. no earlier object covers the
             // ids right below it — means the bucket is missing data and
             // restoring it would silently drop rows; fail that case.
-            val first = chain.first().second
+            val first = chain.first().meta
             var runningMaxEnd = Long.MIN_VALUE
             var runningMaxEndKey: String? = null
-            for ((key, obj) in chain) {
+            for (e in chain) {
+                val key = e.key
+                val obj = e.meta
                 if (runningMaxEnd != Long.MIN_VALUE && obj.start - runningMaxEnd > 1L) {
                     throw IllegalStateException(
                         "backup chain has a gap: object $runningMaxEndKey ends at " +
@@ -319,7 +340,10 @@ class DbRestoreManager(
                     runningMaxEndKey = key
                 }
             }
-            val keys = chain.map { it.first }
+            val keys = chain.map { it.key }
+            // Compressed sizes aligned with [keys]: what the disk-space guard
+            // sums over the objects that are still to be imported.
+            val sizes = chain.map { it.sizeBytes }
 
             // The import target: a temp DB next to the live one (same name the
             // native replay used), so the final swap is a rename in one dir.
@@ -345,6 +369,16 @@ class DbRestoreManager(
             else
                 "resuming at chunk ${startIndex + 1}/${keys.size} (marker $resumeAt, " +
                     "rewound ${resumeAt - startIndex} chunk(s) for WAL-durability safety)")
+
+            // Disk budget BEFORE anything is downloaded or written (plan 3,
+            // Stage 11): the import needs a whole second copy of the database on
+            // a volume shared with transmission and FTP, and running out halfway
+            // through a ~22 h replay would surface as SQLITE_FULL deep inside a
+            // chunk. Estimated from the LIST's compressed sizes, from the
+            // REWOUND start index (conservative: it counts the replayed chunks
+            // again). Failing here keeps the temp DB and the marker, so a retry
+            // after freeing space resumes instead of starting over.
+            requireFreeSpace(sizes, startIndex)
 
             val opened = sinkFactory(tmpDb).also { sink = it }
             if (resumeAt != null) {
@@ -409,6 +443,21 @@ class DbRestoreManager(
                         // executor thread), like pushLine below.
                         status = status.copy(objectsDone = i + 1)
                         Log.i(TAG, "chunk ${i + 1}/${keys.size} imported")
+                        // Bounded WAL (plan 3, Stage 11): fold it back once it
+                        // reaches 1 GiB. Strictly AFTER the commit and AFTER the
+                        // marker write — a kill mid-checkpoint loses nothing
+                        // (WAL frames persist and SQLite replays them; the
+                        // marker never points past committed data). Only a
+                        // non-null line means a checkpoint ran, and only then is
+                        // the disk budget re-decided: the run lasts hours, so
+                        // other writers on the volume can eat the headroom the
+                        // pre-flight check saw.
+                        val checkpointLine = opened.maybeCheckpoint()
+                        if (checkpointLine != null) {
+                            pushLine(lines, checkpointLine)
+                            Log.i(TAG, checkpointLine)
+                            requireFreeSpace(sizes, i + 1)
+                        }
                     }
                     is S3GetResult.ClientError ->
                         throw IllegalStateException("R2 rejected the download of $key " +
@@ -511,6 +560,30 @@ class DbRestoreManager(
     private fun tempDb(workDir: File): File =
         File(File(workDir, "data"), "torrents.db.restore.tmp")
 
+    /**
+     * Enforces the disk-space budget ([RestoreDiskGuard]) for the objects from
+     * [fromIndex] on: logs the budget when the rest of the chain fits and throws
+     * a status-message exception when it does not. The caller's `catch` turns
+     * that into a clean [DbRestoreState.FAILED] that keeps the temp DB and the
+     * resume marker, so freeing space and retrying continues the import.
+     */
+    private fun requireFreeSpace(sizes: List<Long?>, fromIndex: Int) {
+        val decision = RestoreDiskGuard.check(
+            remainingCompressedBytes = RestoreDiskGuard.remainingCompressedBytes(sizes, fromIndex),
+            freeSpaceBytes = freeSpaceBytes(),
+        )
+        if (decision.sufficient) {
+            Log.i(TAG, "disk budget: need ~" +
+                "${RestoreDiskGuard.gigabytes(decision.requiredBytes)}, have " +
+                "${RestoreDiskGuard.gigabytes(decision.freeBytes)} free for " +
+                "${maxOf(0, sizes.size - fromIndex)} remaining object(s)")
+            return
+        }
+        val message = RestoreDiskGuard.failureMessage(decision)
+        Log.i(TAG, message)
+        throw IllegalStateException(message)
+    }
+
     private fun pushLine(lines: ArrayDeque<String>, line: String) {
         synchronized(lines) {
             if (lines.size >= MAX_LINES) lines.removeFirst()
@@ -544,6 +617,18 @@ class DbRestoreManager(
         status = st
         return st
     }
+
+    /**
+     * One object of the restore chain: its key, the parsed key metadata and the
+     * compressed size the LIST reported. `null` (R2 omitted Content-Length)
+     * counts as 0 for the disk-space guard, the same way the zero-size filter
+     * above already treats it.
+     */
+    private data class ChainEntry(
+        val key: String,
+        val meta: DbObjectKey,
+        val sizeBytes: Long?,
+    )
 
     companion object {
         /** Ring-buffer cap for the one-shot output tail. */

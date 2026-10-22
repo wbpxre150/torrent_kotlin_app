@@ -4,6 +4,7 @@ import android.database.sqlite.SQLiteDatabase
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -149,5 +150,60 @@ class SqliteRestoreSinkRobolectricTest {
         sink.suspendImport()
         assertTrue(dbFile.isFile)
         assertFalse(dbFile.length() == 0L)
+    }
+
+    @Test fun maybeCheckpointIsANoOpWhileTheWalIsBelowTheTrigger() {
+        // Production trigger (1 GiB): a real import chunk is nowhere near it, so
+        // the hook must cost one stat() and return null.
+        val dbFile = tempDb()
+        val sink = SqliteRestoreSink(dbFile)
+        sink.prepare(fresh = true)
+        sink.beginChunk()
+        sink.statement(insertTorrent(1))
+        sink.endChunk()
+
+        assertNull(sink.maybeCheckpoint())
+
+        sink.finishImport()
+    }
+
+    @Test fun maybeCheckpointFoldsTheWalOnARealDatabaseAndLeavesItSmall() {
+        // Plan 3, Stage 11: the bulk phase never autocheckpoints, so the manager
+        // asks the sink to fold the WAL after each chunk. The trigger is forced
+        // to 0 here so the REAL wal_checkpoint(TRUNCATE) path runs on a database
+        // far too small to reach 1 GiB.
+        val dbFile = tempDb()
+        val sink = SqliteRestoreSink(dbFile, checkpointTriggerBytes = 0)
+        sink.prepare(fresh = true)
+        sink.beginChunk()
+        sink.statement(insertTorrent(1))
+        sink.endChunk()
+
+        val line = sink.maybeCheckpoint()
+
+        assertTrue("maybeCheckpoint returned null", line != null)
+        assertTrue(
+            line!!,
+            line.startsWith("checkpoint: folded WAL") || line.contains("busy="))
+        // The fold happened: the WAL is truncated (or was never created).
+        assertTrue(
+            "wal length=${File(dbFile.path + "-wal").length()}",
+            File(dbFile.path + "-wal").length() < (1L shl 20))
+
+        // The committed chunk survived the checkpoint: the import continues and
+        // the final checkpoint still succeeds.
+        sink.beginChunk()
+        sink.statement(insertTorrent(2))
+        sink.endChunk()
+        val summary = sink.finishImport()
+        assertTrue(
+            summary.toString(),
+            summary.any { it.startsWith("wal_checkpoint(TRUNCATE): busy=0") })
+        SQLiteDatabase.openDatabase(dbFile.path, null, SQLiteDatabase.OPEN_READONLY).use { d ->
+            d.rawQuery("SELECT COUNT(*) FROM torrents", null).use { c ->
+                assertTrue(c.moveToFirst())
+                assertEquals(2, c.getInt(0))
+            }
+        }
     }
 }

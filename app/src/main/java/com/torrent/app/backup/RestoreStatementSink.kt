@@ -50,6 +50,32 @@ interface RestoreStatementSink {
     fun endChunk()
 
     /**
+     * Bounds the write-ahead log during the bulk phase (plan 3, Stage 11).
+     *
+     * The bulk phase runs with `wal_autocheckpoint=0` (see
+     * [RestorePragmas.bulkPhase]), so nothing folds the WAL back into the
+     * database file until [finishImport] — measured on-device, that let the
+     * `-wal` file reach 2.1 GB after only ~420 MB of imported SQL (~5× the SQL
+     * volume), which extrapolates to 100–180 GB for the full 36.7 GB chain.
+     * [DbRestoreManager] therefore calls this after every chunk's COMMIT **and**
+     * after that chunk's resume-marker write: the sink folds the WAL back with
+     * `PRAGMA wal_checkpoint(TRUNCATE)` once its `-wal` file has grown to
+     * [SqliteRestoreSink.CHECKPOINT_TRIGGER_BYTES] (1 GiB) and returns a
+     * human-readable summary line for the restore status and logcat, else
+     * `null`.
+     *
+     * Safety: a kill mid-checkpoint loses nothing — WAL frames persist until
+     * they are folded and SQLite's WAL recovery replays them to the last valid
+     * commit, so the marker never points past committed data and the resume
+     * rewind is unaffected. A checkpoint is NOT a failure point: an
+     * implementation must never throw from here (a transient busy just leaves
+     * the WAL for the next chunk, at the cost of one chunk of growth).
+     *
+     * Implementations that cannot checkpoint (test fakes) return `null`.
+     */
+    fun maybeCheckpoint(): String?
+
+    /**
      * Completes the import: checkpoints the write-ahead log into the database
      * file and closes the database. Returns human-readable summary lines
      * (`sqlite_version()`, checkpoint outcome, the FTS delegation note) for the

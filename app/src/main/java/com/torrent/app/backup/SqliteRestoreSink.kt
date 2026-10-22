@@ -30,7 +30,13 @@ import java.io.IOException
  * whole WAL back in ONE sequential pass at `synchronous=FULL`, so the DB is
  * fully durable before the swap. A RESUMED temp DB created by the
  * pre-deferred-index build has its `idx_*` dropped ([dropLegacyIndexes]) so the
- * remaining chunks get the same rate. The page size stays the platform default
+ * remaining chunks get the same rate. The WAL is also bounded DURING the bulk
+ * phase (plan 3, Stage 11): [maybeCheckpoint] folds it back with
+ * `wal_checkpoint(TRUNCATE)` whenever the `-wal` file reaches
+ * [CHECKPOINT_TRIGGER_BYTES] (1 GiB), so it stays at ~1.2 GB instead of growing
+ * to the measured 2.1 GB after only ~420 MB of imported SQL — under
+ * `synchronous=OFF` that is page-cache work, no fsync. The page size stays the
+ * platform default
  * (4096 on-device): `PRAGMA page_size` cannot change it, because
  * `openDatabase(CREATE_IF_NECESSARY)` has already initialised the header.
  *
@@ -48,7 +54,16 @@ import java.io.IOException
  * Android-touching (opened on-device by the restore flow); the surrounding
  * logic in [DbRestoreManager] is plain-JUnit testable against a fake sink.
  */
-class SqliteRestoreSink(private val dbFile: File) : RestoreStatementSink {
+class SqliteRestoreSink(
+    private val dbFile: File,
+    /**
+     * Fold the WAL back once its `-wal` file reaches this size. Production
+     * always uses [CHECKPOINT_TRIGGER_BYTES]; it is a constructor parameter only
+     * so a Robolectric test can force a real `wal_checkpoint(TRUNCATE)` on a
+     * database far too small to reach 1 GiB.
+     */
+    private val checkpointTriggerBytes: Long = CHECKPOINT_TRIGGER_BYTES,
+) : RestoreStatementSink {
 
     /** The open database, `null` before [prepare] and after close. */
     private var db: SQLiteDatabase? = null
@@ -180,6 +195,54 @@ class SqliteRestoreSink(private val dbFile: File) : RestoreStatementSink {
             chunkFailed = false
             Log.i(TAG, "chunk rolled back after a failed statement")
         }
+    }
+
+    /**
+     * Bounds the bulk-phase WAL: `PRAGMA wal_checkpoint(TRUNCATE)` once the
+     * `-wal` file has grown to [checkpointTriggerBytes] (1 GiB in production).
+     *
+     * `wal_autocheckpoint=0` keeps every per-chunk COMMIT a cheap page-cache
+     * append, but it also means nothing folds the WAL back until
+     * [finishImport] — measured on-device the WAL reached 2.1 GB after ~420 MB
+     * of imported SQL. Folding it here, after the chunk's COMMIT and its
+     * resume-marker write, bounds it at trigger + one chunk (~1.2 GB) and keeps
+     * the final checkpoint from having to fold the whole chain at peak
+     * `WAL + DB` occupancy. Under `synchronous=OFF` a checkpoint is pure
+     * page-cache work (no fsync), so the measured ~0.22 ms/statement rate is
+     * unchanged.
+     *
+     * Never throws: this is an optimisation, not a durability step (that is
+     * [finishImport]'s `synchronous=FULL` + checkpoint before the swap). A
+     * busy WAL is reported as a skipped line and simply retried by the next
+     * chunk, and any SQLite error is reported the same way instead of failing a
+     * multi-hour import.
+     */
+    override fun maybeCheckpoint(): String? {
+        val d = requireDb()
+        val walFile = File(dbFile.path + WAL_SUFFIX)
+        val walBytes = if (walFile.isFile) walFile.length() else 0L
+        if (!shouldCheckpoint(walBytes, checkpointTriggerBytes)) return null
+        val startedAt = System.nanoTime()
+        val busy = try {
+            var result = -1
+            d.rawQuery(RestorePragmas.FINAL_CHECKPOINT, null).use { c ->
+                if (c.moveToFirst()) result = c.getInt(0)
+            }
+            result
+        } catch (e: Exception) {
+            val line = "checkpoint: skipped, ${e.javaClass.simpleName} " +
+                "(WAL kept; retried next chunk)"
+            Log.i(TAG, line)
+            return line
+        }
+        val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
+        val line = if (busy == 0) {
+            "checkpoint: folded WAL (${walBytes / MIB} MB, $elapsedMs ms)"
+        } else {
+            "checkpoint: skipped, busy=$busy (WAL kept; retried next chunk)"
+        }
+        Log.i(TAG, line)
+        return line
     }
 
     override fun finishImport(): List<String> {
@@ -380,6 +443,33 @@ class SqliteRestoreSink(private val dbFile: File) : RestoreStatementSink {
 
         /** Placeholder when a PRAGMA/version query cannot be read. */
         private const val UNKNOWN_VERSION = "unknown"
+
+        /** SQLite's sidecar suffix for the write-ahead log of a database file. */
+        private const val WAL_SUFFIX = "-wal"
+
+        private const val MIB = 1024L * 1024
+
+        /**
+         * The bulk-phase checkpoint trigger (plan 3, Stage 11): fold the WAL
+         * back once its `-wal` file has grown to 1 GiB. That bounds the WAL at
+         * ~1.2 GB (trigger + one chunk's growth) instead of the measured 2.1 GB
+         * after ~420 MB of SQL, and leaves the final checkpoint a single small
+         * fold. At the measured ~5× SQL amplification a 36.7 GB chain triggers
+         * ~20–40 checkpoints — a few minutes in total, negligible against the
+         * ~22 h bulk phase.
+         */
+        internal const val CHECKPOINT_TRIGGER_BYTES: Long = 1L shl 30
+
+        /**
+         * The trigger rule as a pure predicate, so the boundary (1 GiB − 1 → no
+         * checkpoint, exactly 1 GiB → checkpoint) is pinned by a JVM test
+         * instead of needing a 1 GiB WAL. A missing `-wal` file reads as 0 and
+         * never triggers.
+         */
+        internal fun shouldCheckpoint(
+            walBytes: Long,
+            triggerBytes: Long = CHECKPOINT_TRIGGER_BYTES,
+        ): Boolean = walBytes >= triggerBytes
     }
 }
 

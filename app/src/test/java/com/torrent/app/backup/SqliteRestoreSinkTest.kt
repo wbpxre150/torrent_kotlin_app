@@ -60,4 +60,17 @@ class SqliteRestoreSinkTest {
         // The bulk phase keeps the crawler's 64 MiB page cache.
         assertEquals(-64000, RestorePragmas.CACHE_SIZE_KIB)
     }
+
+    @Test fun theBulkPhaseCheckpointTriggerIsOneGibAndInclusive() {
+        // Plan 3, Stage 11: the WAL is folded back once it reaches 1 GiB, which
+        // bounds it at ~1.2 GB (trigger + one chunk) instead of the measured
+        // 2.1 GB after ~420 MB of SQL.
+        val gib = 1L shl 30
+        assertEquals(gib, SqliteRestoreSink.CHECKPOINT_TRIGGER_BYTES)
+        // No `-wal` file yet reads as 0 and never triggers.
+        assertFalse(SqliteRestoreSink.shouldCheckpoint(0))
+        assertFalse(SqliteRestoreSink.shouldCheckpoint(gib - 1))
+        assertTrue(SqliteRestoreSink.shouldCheckpoint(gib))
+        assertTrue(SqliteRestoreSink.shouldCheckpoint(gib + 1))
+    }
 }

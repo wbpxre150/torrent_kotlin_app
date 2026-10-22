@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.net.wifi.WifiManager
+import android.os.StatFs
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -309,6 +310,11 @@ class DaemonService : Service() {
             // runs `--rebuild-fts` against that temp DB.
             sinkFactory = { SqliteRestoreSink(it) },
             progressFile = { File(filesDir, "backup/db_restore_progress.txt") },
+            // Plan 3, Stage 11: the disk-space guard's view of the volume that
+            // holds the temp DB (filesDir — the same volume as transmission's
+            // downloads and the FTP root). `availableBytes` is what an
+            // unprivileged writer can actually use, which is what the import is.
+            freeSpaceBytes = { StatFs(filesDir.absolutePath).availableBytes },
             // The temp DB lives at <workDir>/data/torrents.db.restore.tmp and
             // both the Kotlin import (sink prepare) and the `--rebuild-fts`
             // one-shot open it there; sqlite3_open does NOT create parent
