@@ -57,10 +57,31 @@ class SqliteRestoreSink(private val dbFile: File) : RestoreStatementSink {
     private var platformSqliteVersion: String = UNKNOWN_VERSION
 
     /** `journal_mode` the platform SQLite actually granted, for the summary. */
-    private var journalMode: String = UNKNOWN_VERSION
+    internal var journalMode: String = UNKNOWN_VERSION
+        private set
 
     /** `page_size` the temp DB actually has (the platform default), for the summary. */
-    private var pageSize: String = UNKNOWN_VERSION
+    internal var pageSize: String = UNKNOWN_VERSION
+        private set
+
+    /**
+     * `PRAGMA synchronous` read back after the bulk-phase pragmas (0 = OFF):
+     * the value SQLite actually granted, not the one we asked for. Exposed to
+     * tests and reported in the summary.
+     */
+    internal var bulkSynchronous: String = UNKNOWN_VERSION
+        private set
+
+    /** `PRAGMA wal_autocheckpoint` read back after the bulk-phase pragmas (0). */
+    internal var walAutocheckpoint: String = UNKNOWN_VERSION
+        private set
+
+    /**
+     * `PRAGMA synchronous` read back after [finishImport]'s `synchronous=FULL`,
+     * i.e. immediately before the single checkpoint (2 = FULL).
+     */
+    internal var checkpointSynchronous: String = UNKNOWN_VERSION
+        private set
 
     /**
      * Summary lines collected by [prepare] that must reach the restore status but
@@ -95,8 +116,13 @@ class SqliteRestoreSink(private val dbFile: File) : RestoreStatementSink {
         // file, so a resumed import must get exactly the same session as a
         // fresh one — otherwise a retry would fall back to the platform's
         // foreign_keys default, fsync every commit again (synchronous=NORMAL)
-        // and lose the bounded page cache. See [RestorePragmas.bulkPhase].
-        for (sql in RestorePragmas.bulkPhase) opened.execSQL(sql)
+        // and lose the bounded page cache. See [RestorePragmas.bulkPhase] and
+        // [applyPragma] (a row-returning pragma must never go through execSQL).
+        for (sql in RestorePragmas.bulkPhase) applyPragma(opened, sql)
+        // Read them back from the live connection: the log and the restore
+        // status then carry what SQLite granted, not what was requested.
+        bulkSynchronous = readPragma(opened, "PRAGMA synchronous")
+        walAutocheckpoint = readPragma(opened, "PRAGMA wal_autocheckpoint")
         if (fresh) {
             journalMode = readJournalMode(opened, "WAL")
             // ONLY the base tables: the six `idx_*` are created by
@@ -106,8 +132,9 @@ class SqliteRestoreSink(private val dbFile: File) : RestoreStatementSink {
             pageSize = readPageSize(opened)
             Log.i(TAG, "prepared ${dbFile.path}: journal_mode=$journalMode " +
                 "page_size=$pageSize (platform default; not settable via PRAGMA) " +
-                "cache_size=${RestorePragmas.CACHE_SIZE_KIB}KiB synchronous=OFF " +
-                "wal_autocheckpoint=0 sqlite=$platformSqliteVersion tables=" +
+                "cache_size=${RestorePragmas.CACHE_SIZE_KIB}KiB " +
+                "synchronous=$bulkSynchronous wal_autocheckpoint=$walAutocheckpoint " +
+                "sqlite=$platformSqliteVersion tables=" +
                 CrawlerDbSchema.tableStatements.size + " (deferred indexes=" +
                 CrawlerDbSchema.indexStatements.size + ")")
         } else {
@@ -119,7 +146,8 @@ class SqliteRestoreSink(private val dbFile: File) : RestoreStatementSink {
             pageSize = readPageSize(opened)
             Log.i(TAG, "resumed ${dbFile.path}: journal_mode=$journalMode " +
                 "page_size=$pageSize cache_size=${RestorePragmas.CACHE_SIZE_KIB}KiB " +
-                "synchronous=OFF wal_autocheckpoint=0 sqlite=$platformSqliteVersion")
+                "synchronous=$bulkSynchronous wal_autocheckpoint=$walAutocheckpoint " +
+                "sqlite=$platformSqliteVersion")
         }
     }
 
@@ -168,8 +196,10 @@ class SqliteRestoreSink(private val dbFile: File) : RestoreStatementSink {
             // switch to FULL for the ONE final checkpoint below, so the whole DB
             // — the WAL fold-back included — is on stable storage before the
             // temp DB is renamed over the live one. This one-time fsync is
-            // exactly the cost the bulk phase deferred.
-            d.execSQL(RestorePragmas.FINAL_DURABILITY)
+            // exactly the cost the bulk phase deferred. Read the granted value
+            // back (2 = FULL) so the summary proves it took effect.
+            applyPragma(d, RestorePragmas.FINAL_DURABILITY)
+            checkpointSynchronous = readPragma(d, "PRAGMA synchronous")
             d.rawQuery(RestorePragmas.FINAL_CHECKPOINT, null).use { c ->
                 if (c.moveToFirst()) {
                     val busy = c.getInt(0)
@@ -186,7 +216,8 @@ class SqliteRestoreSink(private val dbFile: File) : RestoreStatementSink {
             "sqlite_version=$platformSqliteVersion (platform SQLite)",
             "journal_mode=$journalMode",
             "page_size=$pageSize",
-            "synchronous=FULL for the final checkpoint (bulk phase ran at OFF)",
+            "synchronous=$checkpointSynchronous for the final checkpoint " +
+                "(bulk phase ran at $bulkSynchronous)",
             "wal_checkpoint(TRUNCATE): $checkpoint",
             "import complete; FTS5 tables, triggers and the torrent_search/" +
                 "file_search rebuild are delegated to the native --rebuild-fts",
@@ -267,6 +298,44 @@ class SqliteRestoreSink(private val dbFile: File) : RestoreStatementSink {
     private fun requireDb(): SQLiteDatabase =
         db ?: throw IllegalStateException("prepare() has not been called")
 
+    /**
+     * Applies one PRAGMA on [d], discarding any result row.
+     *
+     * A PRAGMA must NEVER go through [SQLiteDatabase.execSQL]: the framework
+     * rejects every statement that produces a result row with
+     * `SQLiteException: unknown error (code 0 SQLITE_OK): Queries can be
+     * performed using SQLiteDatabase query or rawQuery methods only.` — and the
+     * assignment form of several pragmas DOES return its new value. Audited
+     * against a real `SQLiteDatabase` (see
+     * [SqliteRestoreSinkRobolectricTest]): `wal_autocheckpoint=0` and
+     * `journal_mode=WAL` return a row (both used to fail — the Stage 10
+     * `wal_autocheckpoint=0` broke every restore, fresh and resumed, right
+     * after `prepare()` opened the temp DB), while `foreign_keys=OFF`,
+     * `synchronous=OFF|FULL` and `cache_size=-64000` return none on SQLite 3.5x.
+     * That split is not contractual across platform versions, so EVERY pragma is
+     * executed as a query: [SQLiteDatabase.rawQuery] works for both shapes (a
+     * row-less pragma just yields an empty cursor, `moveToFirst()` = false) and
+     * the setting takes effect either way — verified by the read-backs in
+     * [prepare] and [finishImport].
+     */
+    private fun applyPragma(d: SQLiteDatabase, sql: String) {
+        d.rawQuery(sql, null).use { it.moveToFirst() }
+    }
+
+    /**
+     * Reads a single-value PRAGMA (`PRAGMA synchronous`, `PRAGMA
+     * wal_autocheckpoint`, …) off the live connection — the value SQLite
+     * actually granted, for the log and the restore status.
+     */
+    private fun readPragma(d: SQLiteDatabase, sql: String): String = try {
+        d.rawQuery(sql, null).use { c ->
+            if (c.moveToFirst()) c.getString(0) ?: UNKNOWN_VERSION else UNKNOWN_VERSION
+        }
+    } catch (e: Exception) {
+        Log.i(TAG, "$sql failed: ${e.javaClass.simpleName}")
+        UNKNOWN_VERSION
+    }
+
     /** Closes the database, ignoring an already-closed/null connection. */
     private fun closeQuietly() {
         val d = db ?: return
@@ -288,14 +357,7 @@ class SqliteRestoreSink(private val dbFile: File) : RestoreStatementSink {
     }
 
     /** Reads `PRAGMA page_size` of the open temp DB, for the summary. */
-    private fun readPageSize(d: SQLiteDatabase): String = try {
-        d.rawQuery("PRAGMA page_size", null).use { c ->
-            if (c.moveToFirst()) c.getInt(0).toString() else UNKNOWN_VERSION
-        }
-    } catch (e: Exception) {
-        Log.i(TAG, "PRAGMA page_size failed: ${e.javaClass.simpleName}")
-        UNKNOWN_VERSION
-    }
+    private fun readPageSize(d: SQLiteDatabase): String = readPragma(d, "PRAGMA page_size")
 
     /**
      * Reads `PRAGMA journal_mode` and, when [want] is given, asks SQLite to
@@ -329,6 +391,14 @@ class SqliteRestoreSink(private val dbFile: File) : RestoreStatementSink {
  * [bulkPhase] is executed by [SqliteRestoreSink.prepare] for a FRESH and a
  * RESUMED import alike: every entry is a per-connection setting that is not
  * stored in the file, so a retry must re-apply it.
+ *
+ * How they are executed matters: the assignment form of some pragmas RETURNS A
+ * ROW (`wal_autocheckpoint`, `journal_mode`, `wal_checkpoint`) while others
+ * return nothing (`foreign_keys`, `synchronous`, `cache_size`), and
+ * `SQLiteDatabase.execSQL` refuses row-returning statements — so every pragma
+ * here goes through [SqliteRestoreSink]'s `applyPragma` (rawQuery, row
+ * discarded). Do not "simplify" that back to `execSQL`; a single row-returning
+ * pragma failing there aborts the whole restore.
  */
 internal object RestorePragmas {
 
