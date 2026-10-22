@@ -434,6 +434,10 @@ class DaemonService : Service() {
         fun startDbRestore(): com.torrent.app.backup.DbRestoreStatus = this@DaemonService.dbRestore.restoreNow()
         fun saveBackupForRestore(s: com.torrent.app.config.BackupSettings) =
             this@DaemonService.saveBackupForRestore(s)
+        // Stage 4: persist the wizard's in-session chip selection before the restore
+        // starts, so the restore's category filter sees exactly what the chips show.
+        fun saveCrawlerSaveCategoriesForRestore(categories: List<String>) =
+            this@DaemonService.saveCrawlerSaveCategoriesForRestore(categories)
     }
 
     override fun onBind(intent: Intent?): IBinder = LocalBinder()
@@ -1631,6 +1635,24 @@ class DaemonService : Service() {
             // Service shutting down: the store write above still lands and the
             // next apply renders it into config.ini.
         }
+    }
+
+    /**
+     * Persists the wizard's in-session `save_categories` chip selection on behalf of
+     * the restore section, BEFORE the restore starts: the DB restore's category filter
+     * reads the persisted selection, so the chips must reach the store first (otherwise
+     * wizard display, persisted config and the filter could disagree).
+     *
+     * Unlike [setCrawlerSaveCategories] this is a store write ONLY — no `config.ini`
+     * rewrite, no [CrawlerConfig.applySettings], no crawler restart — because the
+     * restore reads [ConfigStore], not the daemon's config file. An empty list
+     * persists the empty set, which is the documented "save all categories".
+     */
+    fun saveCrawlerSaveCategoriesForRestore(
+        categories: List<String>,
+    ): com.torrent.app.config.ApplyResult {
+        configStore.saveCrawler(configStore.load().crawler.copy(saveCategories = categories))
+        return com.torrent.app.config.ApplyResult(true, "save categories saved", false)
     }
 
     /**

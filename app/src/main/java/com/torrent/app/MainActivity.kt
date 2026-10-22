@@ -22,6 +22,7 @@ import androidx.compose.foundation.verticalScroll
 import com.torrent.app.config.ConfigDefaults
 import com.torrent.app.config.WizardSubmit
 import com.torrent.app.config.CrawlerTaxonomy
+import com.torrent.app.config.ApplyResult
 import androidx.compose.foundation.Image
 import androidx.compose.material3.*
 import androidx.compose.material3.Button
@@ -428,13 +429,26 @@ fun WizardScreen(
         )
     }
 
-    // Saves the section-5 R2 values (restore validation) and starts the one-shot.
+    // Persists the restore inputs, then starts the one-shot. The chip selection is
+    // saved FIRST: the restore's category filter reads the persisted selection, so the
+    // chips must reach the store before startDbRestore queues the restore — otherwise
+    // wizard display, persisted config and the filter could disagree.
     // A rejected save is a form error, not a restore attempt: it clears any previous
     // verdict so a stale SUCCESS can't keep "Finish setup" unlocked — but a restore
     // that is still RUNNING stays visible, or its polling effect would detach mid-restore.
     fun doRestoreNow() {
         val svc = boundService ?: return
-        val r = svc.saveBackupForRestore(WizardSubmit.backupSettings(buildForm()))
+        // The form only emits known names, so normalisation can only reorder/drop — the
+        // error branch is unreachable in practice and aborts rather than restoring from
+        // a store that disagrees with the chips.
+        val (categoryErrors, saveCategories) =
+            WizardSubmit.normalizeSaveCategories(buildForm().crawlerSaveCategories)
+        val r = if (categoryErrors.isNotEmpty()) {
+            ApplyResult(false, categoryErrors.joinToString("; "), false)
+        } else {
+            val saved = svc.saveCrawlerSaveCategoriesForRestore(saveCategories)
+            if (!saved.ok) saved else svc.saveBackupForRestore(WizardSubmit.backupSettings(buildForm()))
+        }
         if (!r.ok) {
             restoreError = r.message
             // Dropped verdict is remembered by the ViewModel, so the service-anchored

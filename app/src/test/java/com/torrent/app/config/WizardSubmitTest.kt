@@ -241,6 +241,15 @@ class WizardSubmitTest {
         assertEquals(listOf("anime", "music"), o.crawlerSaveCategories)
     }
 
+    @Test fun normalizeSaveCategories_dropsUnknownsAndReorders() {
+        val (errors, selected) = WizardSubmit.normalizeSaveCategories(
+            listOf(" TV", "music", "Nosuch", "Anime", "movie")
+        )
+        assertEquals(listOf("movie", "tv", "anime", "music"), selected)
+        assertEquals(1, errors.size)
+        assertTrue(errors.single().contains("nosuch"))
+    }
+
     @Test fun crawlerSaveCategoriesEmptyMeansSaveAll() {
         val o = WizardSubmit.submit(validForm().copy(crawlerSaveCategories = emptyList()))
         assertTrue(o.ok)
