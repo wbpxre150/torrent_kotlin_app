@@ -162,11 +162,13 @@ class DaemonService : Service() {
     // mirror the crawler lifecycle ops. The bookmark file (filesDir/backup)
     // advances only after a successful upload (upload-first ordering).
     private lateinit var dbBackup: DbBackupManager
-    // DB restore (plan 2, Stage 4): an explicit, dashboard-triggered one-shot
-    // that replays the R2 dump chain into a fresh torrents.db (stops the
-    // crawler, downloads + gunzips the chain, runs --restore-database, resets
-    // the bookmark only on success). Runs on the crawler-control executor;
-    // the busy predicates of maintenance/backup include its running state.
+    // DB restore (plan 2, Stage 4; plan 3, Stage 3): an explicit, dashboard/
+    // wizard-triggered one-shot that streams the R2 dump chain into a fresh
+    // torrents.db (stops the crawler, imports one dump object per chunk into a
+    // temp DB — one transaction per chunk, resumable), rebuilds the FTS indexes
+    // with the crawler's own SQLite via `--rebuild-fts`, swaps the temp DB in
+    // and resets the bookmark only on success. Runs on the crawler-control
+    // executor; the busy predicates of maintenance/backup include its state.
     private lateinit var dbRestore: DbRestoreManager
     // Stage 5: in-memory rate limit for failed BEP51 bootstrap attempts —
     // a failure is not retried (on a later start) for at least one hour.
@@ -307,10 +309,11 @@ class DaemonService : Service() {
             // runs `--rebuild-fts` against that temp DB.
             sinkFactory = { SqliteRestoreSink(it) },
             progressFile = { File(filesDir, "backup/db_restore_progress.txt") },
-            // The native --restore-database opens <workDir>/data/torrents.db with
-            // sqlite3_open, which does NOT create parent directories: on a fresh
-            // install (crawler never started) filesDir/crawler/data may not exist,
-            // so create it here before the one-shot runs.
+            // The temp DB lives at <workDir>/data/torrents.db.restore.tmp and
+            // both the Kotlin import (sink prepare) and the `--rebuild-fts`
+            // one-shot open it there; sqlite3_open does NOT create parent
+            // directories, so on a fresh install (crawler never started)
+            // filesDir/crawler/data may not exist — create it before either runs.
             workDir = { File(filesDir, "crawler").apply { File(this, "data").mkdirs() } },
             tmpDir = { File(filesDir, "tmp") },
             bookmarkFile = { File(filesDir, "backup/db_bookmark.txt") },

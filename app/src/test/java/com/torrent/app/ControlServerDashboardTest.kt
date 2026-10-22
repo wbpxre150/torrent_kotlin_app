@@ -516,20 +516,20 @@ class ControlServerDashboardTest {
     }
 
     /**
-     * The crawler panel's DB-restore poll renders the download progress the
+     * The crawler panel's DB-restore poll renders the import progress the
      * restore status carries: `objectsDone` of `objectCount` objects, so a
-     * 17k-object restore reads "(X of 17000 objects downloaded)" instead of a
+     * 17k-object restore reads "(X of 17000 objects imported)" instead of a
      * bare total. `objectsDone` is null before the count publishes, and the
-     * fragment degrades to "(N objects downloaded)" then.
+     * fragment degrades to "(N objects imported)" then.
      */
-    @Test fun crawlerPanel_dbRestorePoll_showsNofMObjectsDownloaded() {
+    @Test fun crawlerPanel_dbRestorePoll_showsNofMObjectsImported() {
         val page = newServer().buildCrawlerPanel(null, true, false)
         assertTrue(
             "the restore poll must read objectsDone",
             page.contains("st.objectsDone"))
         assertTrue(
-            "the restore poll must label the progress as downloaded",
-            page.contains("objects downloaded"))
+            "the restore poll must label the progress as imported",
+            page.contains("objects imported"))
         assertTrue(
             "the 5 s restore poll must stay wired",
             page.contains("setInterval(pollDbRestore, 5000)"))

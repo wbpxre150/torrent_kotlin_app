@@ -1,7 +1,7 @@
 package com.torrent.app.backup
 
 /**
- * Pure "N of M objects downloaded" label for the wizard's restore section (section 6).
+ * Pure "N of M objects imported" label for the wizard's restore section (section 6).
  *
  * Both counts are nullable in [DbRestoreStatus]: [DbRestoreStatus.objectsDone] stays
  * null until the object count is published, and [DbRestoreStatus.objectCount] stays
@@ -12,5 +12,5 @@ package com.torrent.app.backup
 object RestoreProgressText {
     fun format(objectsDone: Int?, objectCount: Int?): String? =
         if (objectsDone == null || objectCount == null) null
-        else "$objectsDone of $objectCount objects downloaded"
+        else "$objectsDone of $objectCount objects imported"
 }

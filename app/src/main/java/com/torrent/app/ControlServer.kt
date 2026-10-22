@@ -531,11 +531,14 @@ class ControlServer(
                         call.respondText(dbBackupStatusJson(crawlerBackupDbStatus()), ContentType.Application.Json)
                     }
 
-                    // DB restore (plan 2, Stage 4): queue an explicit restore
-                    // of the crawler DB from the R2 dump chain (stops the
-                    // crawler, downloads + gunzips the whole chain, runs
-                    // `--restore-database`, resets the bookmark on success);
-                    // the page polls /api/crawler/restore for the result.
+                    // DB restore (plan 2, Stage 4; plan 3, Stage 3): queue an
+                    // explicit restore of the crawler DB from the R2 dump chain.
+                    // Stops the crawler, streams every dump object from R2 and
+                    // imports it into a fresh temp database (one transaction per
+                    // chunk, resumable per chunk), rebuilds the FTS indexes with
+                    // the crawler's own SQLite (`--rebuild-fts`), swaps the
+                    // database in and resets the bookmark on success; the page
+                    // polls /api/crawler/restore for the result.
                     post("crawler/restore/db") {
                         val msg = crawlerRestoreDb()
                         val ok = !msg.startsWith("refused")
@@ -1375,7 +1378,7 @@ class ControlServer(
                 fetch('/api/crawler/restore').then(function (r) { return r.json(); }).then(function (st) {
                   var box = document.getElementById('db-restore-status');
                   var text = 'DB restore: ' + st.state + (st.message ? ' \u2014 ' + st.message : '');
-                  if (st.objectCount != null) text += ' (' + (st.objectsDone != null ? st.objectsDone + ' of ' : '') + st.objectCount + ' objects downloaded)';
+                  if (st.objectCount != null) text += ' (' + (st.objectsDone != null ? st.objectsDone + ' of ' : '') + st.objectCount + ' objects imported)';
                   if (st.lastSuccess != null) text += ' (last success ' + new Date(st.lastSuccess).toLocaleString() + ')';
                   box.textContent = text;
                 }).catch(function () {});
@@ -1478,12 +1481,14 @@ class ControlServer(
               <button type="submit" class="btn">Upload now</button></form>
               <div id="db-backup-status" class="meta">DB backup: ${st.state.name}</div>
             </fieldset>
-            <fieldset class="card"><legend>DB restore (replay the R2 dump chain into a fresh database)</legend>
-              <p class="meta">Stops the crawler, downloads + gunzips every dump object in the DB bucket
-              (in chain order), and runs <code>libdhtcrawler.so --restore-database</code> to replay them into a
-              fresh <code>torrents.db</code>, swapped in atomically. On success the upload bookmark resets to
-              first run. The crawler is restarted afterwards in all outcomes. Needs the R2 endpoint/keys
-              and the DB bucket configured (the upload toggle is not required).</p>
+            <fieldset class="card"><legend>DB restore (stream the R2 dump chain into a fresh database)</legend>
+              <p class="meta">Stops the crawler, then streams every dump object in the DB bucket
+              (in chain order) from R2 and imports it into a fresh <code>torrents.db</code> — one
+              transaction per chunk, so the import is resumable per chunk and memory stays flat
+              regardless of chain size. The FTS indexes are rebuilt with the crawler's own SQLite
+              (<code>--rebuild-fts</code>) before the database is swapped in atomically. On success the
+              upload bookmark resets to first run. The crawler is restarted afterwards in all outcomes.
+              Needs the R2 endpoint/keys and the DB bucket configured (the upload toggle is not required).</p>
               <form method="post" action="/crawler/restore/db"
                     onsubmit="return confirm('Restore the crawler DB from R2 now? This replaces torrents.db and the crawler is stopped while it runs.')">
               <button type="submit" class="btn">Restore now</button></form>

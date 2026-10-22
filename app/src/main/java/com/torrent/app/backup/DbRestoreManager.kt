@@ -1,5 +1,7 @@
 package com.torrent.app.backup
 
+import android.util.Log
+
 import com.torrent.app.config.BackupSettings
 import com.torrent.app.config.ConfigValidator
 import com.torrent.app.s3.S3GetResult
@@ -322,6 +324,12 @@ class DbRestoreManager(
                 RestoreFileOps.targetDbExists(tmpDb)
             ) progress.nextIndex else null
             val startIndex = resumeAt ?: 0
+            // Triage-visible phase lines: `logcat -s DbRestore` must show where a
+            // retry picks up without needing the dashboard or the marker file.
+            Log.i(TAG, if (resumeAt == null)
+                "fresh import of ${keys.size} chunk(s)"
+            else
+                "resuming at chunk ${startIndex + 1}/${keys.size} (${startIndex} imported)")
 
             val sink = sinkFactory(tmpDb)
             if (resumeAt != null) {
@@ -375,6 +383,7 @@ class DbRestoreManager(
                         // Copy-on-write progress: single writer (this
                         // executor thread), like pushLine below.
                         status = status.copy(objectsDone = i + 1)
+                        Log.i(TAG, "chunk ${i + 1}/${keys.size} imported")
                     }
                     is S3GetResult.ClientError ->
                         throw IllegalStateException("R2 rejected the download of $key " +
@@ -413,6 +422,7 @@ class DbRestoreManager(
                 )
             }
             RestoreFileOps.swapIn(tmpDb, liveDb(work))
+            Log.i(TAG, "swapped restored db into ${liveDb(work).path}")
             // Only a successful restore resets the cursor: the next
             // upload then re-dumps the whole (restored) database.
             DbBookmark.write(bookmarkFile(), DbBookmark.FIRST_RUN)
@@ -506,5 +516,7 @@ class DbRestoreManager(
     companion object {
         /** Ring-buffer cap for the one-shot output tail. */
         internal const val MAX_LINES = 2000
+        /** logcat tag of the restore flow — the sink logs under the same tag. */
+        private const val TAG = "DbRestore"
     }
 }
