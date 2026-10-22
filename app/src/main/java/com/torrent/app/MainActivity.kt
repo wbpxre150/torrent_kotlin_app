@@ -42,6 +42,9 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import com.torrent.app.backup.WizardRestorePollPolicy
+import com.torrent.app.ui.theme.TorrentPalette
+import com.torrent.app.ui.theme.torrentBackground
+import com.torrent.app.ui.theme.torrentColorScheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.isActive
@@ -128,8 +131,14 @@ class MainActivity : ComponentActivity() {
             ) { uri: Uri? ->
                 uri?.let { boundService?.setUsbTree(it) }
             }
-            MaterialTheme {
-                Surface(modifier = Modifier.fillMaxSize()) {
+            // App-wide blue scheme + WebUI gradient: the gradient lives behind a
+            // transparent Surface so the wizard and the QR main screen share it.
+            MaterialTheme(colorScheme = torrentColorScheme()) {
+                Surface(
+                    modifier = Modifier.fillMaxSize().torrentBackground(),
+                    color = Color.Transparent,
+                    contentColor = MaterialTheme.colorScheme.onBackground,
+                ) {
                     val wizardDone by wizardCompleted.collectAsState()
                     if (!wizardDone) {
                         WizardScreen(
@@ -613,7 +622,8 @@ fun WizardScreen(
                 style = MaterialTheme.typography.bodyMedium,
                 color = if (st.running) MaterialTheme.colorScheme.onSurface
                 else when (st.state) {
-                    com.torrent.app.backup.DbRestoreState.SUCCESS -> Color(0xFF2E7D32)
+                    com.torrent.app.backup.DbRestoreState.SUCCESS ->
+                        TorrentPalette.color(TorrentPalette.OK)
                     com.torrent.app.backup.DbRestoreState.FAILED,
                     com.torrent.app.backup.DbRestoreState.NOT_CONFIGURED,
                     com.torrent.app.backup.DbRestoreState.REFUSED_BUSY,
