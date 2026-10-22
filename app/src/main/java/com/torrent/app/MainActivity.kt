@@ -36,7 +36,11 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Color
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import com.torrent.app.backup.WizardRestorePollPolicy
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.isActive
@@ -384,9 +388,10 @@ fun WizardScreen(
 
     // Editing any field the restore consumes invalidates a stale verdict (a SUCCESS would
     // otherwise keep "Finish setup" unlocked for values that were never restored from).
-    // A live RUNNING status is never hidden: the polling effect below stays attached.
+    // A live RUNNING status is never hidden: the polling effect below stays attached, and the
+    // service-anchored re-attach below must not resurrect the dropped verdict.
     fun invalidateRestore() {
-        restoreStatus = restoreStatus?.takeIf { it.running }
+        restoreVm.invalidate()
     }
 
     // One form builder shared by "Restore now" and "Finish setup" so both see
@@ -432,24 +437,48 @@ fun WizardScreen(
         val r = svc.saveBackupForRestore(WizardSubmit.backupSettings(buildForm()))
         if (!r.ok) {
             restoreError = r.message
-            restoreStatus = svc.dbRestoreStatus().takeIf { it.running }
+            // Dropped verdict is remembered by the ViewModel, so the service-anchored
+            // re-attach below cannot resurrect it on the next resume.
+            restoreVm.invalidate()
+            svc.dbRestoreStatus().takeIf { it.running }?.let { restoreVm.adopt(it) }
         } else {
             restoreError = null
             restoreStatus = svc.startDbRestore()
         }
     }
 
+    // The restore lives in the service, so the card is SERVICE-anchored: the local copy is
+    // only a cache. An activity the OS recreates mid-restore (guaranteed with a multi-hour
+    // restore) comes back with a fresh ViewModel and restoreStatus == null, which used to
+    // leave the card blank, the section switch OFF and "Finish setup" locked even on SUCCESS.
+    val svcState = rememberUpdatedState(boundService)
+    fun adoptServiceStatus() {
+        val svc = svcState.value ?: return
+        restoreVm.adopt(svc.dbRestoreStatus())
+    }
+
+    // One snapshot on every restore-card composition, on each resume, and whenever the binder
+    // (re)appears — a recreated activity composes before the async onServiceConnected callback.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var resumeTick by remember { mutableStateOf(0) }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) resumeTick++
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    LaunchedEffect(boundService, resumeTick) { adoptServiceStatus() }
+
     // Follows RUNNING → SUCCESS/FAILED without blocking the main thread: the
     // restore itself runs on the service's crawlerControlExecutor, and these
-    // status reads are cheap volatile/isBusy snapshots.
-    // Rotation-safe: a recreated activity's first composition can run before the async
-    // onServiceConnected callback, so the loop must read the latest binder (and never
-    // write a null status) or polling would detach mid-restore and the gate re-lock.
-    val svcState = rememberUpdatedState(boundService)
+    // status reads are cheap volatile/isBusy snapshots. Keyed on the ADOPTED snapshot,
+    // so the re-attach above is what starts the loop; every tick adopts through the same
+    // policy and always reads the latest binder.
     LaunchedEffect(restoreStatus?.running) {
-        while (isActive && restoreStatus?.running == true) {
+        while (isActive && WizardRestorePollPolicy.shouldPoll(restoreStatus)) {
             delay(1000)
-            svcState.value?.let { restoreStatus = it.dbRestoreStatus() }
+            adoptServiceStatus()
         }
     }
 
@@ -536,13 +565,21 @@ fun WizardScreen(
 
         Text("6. Restore crawler DB from R2 (optional)", style = MaterialTheme.typography.titleMedium)
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Switch(checked = restoreEnabled, onCheckedChange = { restoreEnabled = it })
+            Switch(
+                checked = restoreEnabled,
+                onCheckedChange = { restoreEnabled = it },
+                // A restore in flight owns the flag: it is re-attached ON from the service
+                // snapshot and must not be switched off (that would unlock "Finish setup"
+                // mid-restore). FAILED/IDLE leave it editable again.
+                enabled = WizardRestorePollPolicy.restoreSwitchEnabled(restoreStatus),
+            )
             Spacer(Modifier.width(8.dp))
             Text("Restore the crawler DB from the R2 dump chain (uses the R2 credentials above)")
         }
         Button(
             onClick = { doRestoreNow() },
-            enabled = boundService != null && restoreEnabled,
+            enabled = WizardRestorePollPolicy.restoreNowEnabled(
+                boundService != null, restoreEnabled, restoreStatus),
         ) { Text("Restore now") }
         // Prefix by state so a refused/not-configured attempt can never read as success.
         // A RUNNING status is checked first: a mid-restore double-tap answers
