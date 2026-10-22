@@ -12,17 +12,29 @@ package com.torrent.app.backup
  * (`BEGIN … END;`) intact as single statements. Every statement therefore ends
  * with `;`.
  *
- * The three groups are also the natural execution phases of the Kotlin-side
- * import: create the base tables/indices, replay the row `INSERT`s, then create
- * the FTS5 tables and triggers and rebuild the indexes ([ftsStatements],
- * [triggerStatements]) once the rows are in.
+ * The groups are also the natural execution phases of the Kotlin-side import:
+ * create the base tables ([tableStatements]), replay the row `INSERT`s, then
+ * create the secondary indexes ([indexStatements]) in one pass over the finished
+ * rows, then create the FTS5 tables and triggers ([ftsStatements],
+ * [triggerStatements]).
+ *
+ * Why the indexes are NOT created up front: every one of the ~190 M replayed
+ * statements is `INSERT OR IGNORE`, and with the six `idx_*` present each insert
+ * has to maintain 5+ B-trees on a 1.5 GB+ database — measured at ~3 ms per row,
+ * i.e. ~46-52 s of CPU per chunk and ~9-10 days for the full chain. Deferring
+ * the six `CREATE INDEX` statements to one single-pass build after the last
+ * chunk turns that into a bulk insert into index-free tables.
  *
  * No Android imports — plain JUnit4 testable.
  */
 object CrawlerDbSchema {
 
-    /** `CREATE TABLE` / `CREATE INDEX` for the non-FTS tables (`database.c:11-64`). */
-    val baseStatements: List<String> = listOf(
+    /**
+     * The five `CREATE TABLE`s of the non-FTS schema (`database.c:11-64`), in
+     * source order. These are the ONLY DDL statements the bulk import runs
+     * before the rows are in.
+     */
+    val tableStatements: List<String> = listOf(
         // torrents
         "CREATE TABLE IF NOT EXISTS torrents (" +
             "    id INTEGER PRIMARY KEY AUTOINCREMENT," +
@@ -32,8 +44,6 @@ object CrawlerDbSchema {
             "    total_peers INTEGER DEFAULT 0," +
             "    added_timestamp INTEGER NOT NULL" +
             ");",
-        "CREATE INDEX IF NOT EXISTS idx_torrents_added ON torrents(added_timestamp DESC);",
-        "CREATE INDEX IF NOT EXISTS idx_torrents_total_peers ON torrents(total_peers DESC);",
         // path_prefixes
         "CREATE TABLE IF NOT EXISTS path_prefixes (" +
             "    id INTEGER PRIMARY KEY AUTOINCREMENT," +
@@ -50,8 +60,6 @@ object CrawlerDbSchema {
             "    FOREIGN KEY (torrent_id) REFERENCES torrents(id) ON DELETE CASCADE," +
             "    FOREIGN KEY (prefix_id) REFERENCES path_prefixes(id)" +
             ");",
-        "CREATE INDEX IF NOT EXISTS idx_files_torrent ON torrent_files(torrent_id);",
-        "CREATE INDEX IF NOT EXISTS idx_files_prefix ON torrent_files(prefix_id);",
         // torrent_class
         "CREATE TABLE IF NOT EXISTS torrent_class (" +
             "    torrent_id INTEGER PRIMARY KEY REFERENCES torrents(id) ON DELETE CASCADE," +
@@ -67,12 +75,28 @@ object CrawlerDbSchema {
             "    confidence REAL," +
             "    clf_ver INTEGER NOT NULL" +
             ");",
-        "CREATE INDEX IF NOT EXISTS idx_class_cat ON torrent_class(category, tv_kind, " +
-            "torrent_id) WHERE adult = 0;",
-        "CREATE INDEX IF NOT EXISTS idx_class_ver ON torrent_class(clf_ver);",
         // classifier_meta
         "CREATE TABLE IF NOT EXISTS classifier_meta (key TEXT PRIMARY KEY, value TEXT);",
     )
+
+    /**
+     * The six `idx_*` secondary indexes (`database.c:11-64`). Created ONCE, by
+     * the Kotlin sink's `finishImport()`, after every chunk has been replayed —
+     * never during the bulk phase (see the class KDoc). All `IF NOT EXISTS`, so
+     * a resume that re-enters `finishImport()` completes a partial build.
+     */
+    val indexStatements: List<String> = listOf(
+        "CREATE INDEX IF NOT EXISTS idx_torrents_added ON torrents(added_timestamp DESC);",
+        "CREATE INDEX IF NOT EXISTS idx_torrents_total_peers ON torrents(total_peers DESC);",
+        "CREATE INDEX IF NOT EXISTS idx_files_torrent ON torrent_files(torrent_id);",
+        "CREATE INDEX IF NOT EXISTS idx_files_prefix ON torrent_files(prefix_id);",
+        "CREATE INDEX IF NOT EXISTS idx_class_cat ON torrent_class(category, tv_kind, " +
+            "torrent_id) WHERE adult = 0;",
+        "CREATE INDEX IF NOT EXISTS idx_class_ver ON torrent_class(clf_ver);",
+    )
+
+    /** The whole non-FTS schema: [tableStatements] + [indexStatements] (11). */
+    val baseStatements: List<String> = tableStatements + indexStatements
 
     /** The two FTS5 external-content virtual tables (`database.c:66-79`). */
     val ftsStatements: List<String> = listOf(
@@ -108,6 +132,10 @@ object CrawlerDbSchema {
             "END;",
     )
 
-    /** Every schema statement, in the order the crawler creates them. */
+    /**
+     * Every schema statement (17), grouped: tables, their secondary indexes,
+     * the FTS5 tables, the triggers. The DDL text is the C source's verbatim;
+     * only the grouping differs from the C literals' interleaved order.
+     */
     val statements: List<String> = baseStatements + ftsStatements + triggerStatements
 }

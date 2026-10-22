@@ -14,8 +14,19 @@ import java.io.IOException
  *
  * What bounds memory: the dump is streamed (one statement in heap at a time,
  * guarded at 8 MB by [SqlStatementSplitter]), the write-ahead log is used, and
- * `cache_size` is pinned to 8 MiB so SQLite's page cache cannot grow with the
+ * `cache_size` is pinned to 64 MiB so SQLite's page cache cannot grow with the
  * ~36 GB replay.
+ *
+ * What makes it fast (measured: ~3 ms per replayed statement, i.e. ~46-52 s of
+ * CPU per chunk, with the secondary indexes present): [prepare] with
+ * `fresh = true` creates ONLY the five base tables
+ * ([CrawlerDbSchema.tableStatements]), so each of the ~190 M
+ * `INSERT OR IGNORE` statements appends to one rowid B-tree instead of
+ * maintaining 5+ secondary ones, and [finishImport] builds the six `idx_*` in
+ * one single pass over the finished rows. A fresh temp DB also gets a 32 KiB
+ * page size (the crawler's own) and the 64 MiB cache. A RESUMED temp DB created
+ * by the pre-deferred-index build keeps its page size but has its `idx_*`
+ * dropped ([dropLegacyIndexes]) so the remaining chunks get the same rate.
  *
  * What makes the import resumable: one chunk = one transaction
  * ([beginChunk]/[endChunk]). A chunk that commits survives a process kill; the
@@ -42,6 +53,16 @@ class SqliteRestoreSink(private val dbFile: File) : RestoreStatementSink {
     /** `journal_mode` the platform SQLite actually granted, for the summary. */
     private var journalMode: String = UNKNOWN_VERSION
 
+    /** `page_size` the temp DB actually has, for the summary (fresh 32768, legacy 4096). */
+    private var pageSize: String = UNKNOWN_VERSION
+
+    /**
+     * Summary lines collected by [prepare] that must reach the restore status but
+     * have no earlier channel than [finishImport]'s return value (the sink
+     * interface is deliberately one-way). Currently the legacy-index drop.
+     */
+    private val prepareLines = mutableListOf<String>()
+
     /** Set when a statement of the current chunk threw, so [endChunk] rolls back. */
     private var chunkFailed = false
 
@@ -63,6 +84,17 @@ class SqliteRestoreSink(private val dbFile: File) : RestoreStatementSink {
         )
         db = opened
         platformSqliteVersion = readSqliteVersion(opened)
+        if (fresh) {
+            // A page size can only be chosen while the database holds no object
+            // at all: this must precede BOTH the table DDL below and the WAL
+            // conversion (a journal-mode change writes the header). 32 KiB is
+            // the crawler's own page size, so the swapped-in DB needs no
+            // conversion on its side. A RESUMED (legacy) temp DB keeps whatever
+            // page size it was created with: page_size cannot change on a
+            // non-empty DB without a full VACUUM rewrite, and with the 64 MiB
+            // cache below it is not the dominant cost.
+            opened.execSQL("PRAGMA page_size=$PAGE_SIZE_BYTES")
+        }
         // Session pragmas apply to a RESUMED import exactly as to a fresh one.
         // They are per-connection (not persisted in the file), so re-applying
         // them here is what keeps a retry on the same footing as the first
@@ -76,18 +108,31 @@ class SqliteRestoreSink(private val dbFile: File) : RestoreStatementSink {
         // synchronous=NORMAL is the WAL-appropriate setting (a kill can
         // lose at most the in-flight chunk, which a retry replays).
         opened.execSQL("PRAGMA synchronous=NORMAL")
-        // 8 MiB page cache: the bound on SQLite's own heap use.
-        opened.execSQL("PRAGMA cache_size=-8000")
+        // 64 MiB page cache (the crawler's own tuning): still a hard bound on
+        // SQLite's heap use, but big enough that the index-free bulk insert and
+        // the deferred index build are not thrashing the page cache.
+        opened.execSQL("PRAGMA cache_size=$CACHE_SIZE_KIB")
         if (fresh) {
             journalMode = readJournalMode(opened, "WAL")
-            for (sql in CrawlerDbSchema.baseStatements) opened.execSQL(sql)
+            // ONLY the base tables: the six `idx_*` are created by
+            // [finishImport] once every chunk is in, so the ~190 M replayed
+            // inserts do not maintain 5+ secondary B-trees each.
+            for (sql in CrawlerDbSchema.tableStatements) opened.execSQL(sql)
+            pageSize = readPageSize(opened)
             Log.i(TAG, "prepared ${dbFile.path}: journal_mode=$journalMode " +
-                "sqlite=$platformSqliteVersion baseStatements=" +
-                CrawlerDbSchema.baseStatements.size)
+                "page_size=$pageSize cache_size=${CACHE_SIZE_KIB}KiB " +
+                "sqlite=$platformSqliteVersion tables=" +
+                CrawlerDbSchema.tableStatements.size + " (deferred indexes=" +
+                CrawlerDbSchema.indexStatements.size + ")")
         } else {
             journalMode = readJournalMode(opened, null)
+            // A temp DB created by the pre-deferred-index build carries all six
+            // `idx_*`: drop them so this attempt gets the fast index-free rate
+            // too (they are recreated by [finishImport] in one pass).
+            dropLegacyIndexes(opened)
+            pageSize = readPageSize(opened)
             Log.i(TAG, "resumed ${dbFile.path}: journal_mode=$journalMode " +
-                "sqlite=$platformSqliteVersion")
+                "page_size=$pageSize sqlite=$platformSqliteVersion")
         }
     }
 
@@ -124,8 +169,14 @@ class SqliteRestoreSink(private val dbFile: File) : RestoreStatementSink {
 
     override fun finishImport(): List<String> {
         val d = requireDb()
+        val lines = prepareLines.toMutableList()
         var checkpoint = "not run"
         try {
+            // One single pass over the finished rows per index, with the 64 MiB
+            // cache still warm — the whole reason the bulk phase ran without
+            // them. Idempotent (`IF NOT EXISTS`), so a retry that re-enters
+            // finishImport after a kill completes a partial build.
+            lines += createDeferredIndexes(d)
             d.rawQuery("PRAGMA wal_checkpoint(TRUNCATE)", null).use { c ->
                 if (c.moveToFirst()) {
                     val busy = c.getInt(0)
@@ -138,15 +189,63 @@ class SqliteRestoreSink(private val dbFile: File) : RestoreStatementSink {
         } finally {
             closeQuietly()
         }
-        val lines = listOf(
+        lines += listOf(
             "sqlite_version=$platformSqliteVersion (platform SQLite)",
             "journal_mode=$journalMode",
+            "page_size=$pageSize",
             "wal_checkpoint(TRUNCATE): $checkpoint",
             "import complete; FTS5 tables, triggers and the torrent_search/" +
                 "file_search rebuild are delegated to the native --rebuild-fts",
         )
         for (line in lines) Log.i(TAG, line)
         return lines
+    }
+
+    /**
+     * Creates the six deferred `idx_*` indexes ([CrawlerDbSchema.indexStatements]),
+     * timing each one into the summary. Runs before the WAL checkpoint and before
+     * the native `--rebuild-fts` one-shot, so the two heavy single-pass steps
+     * never interleave with the per-row insert path.
+     */
+    private fun createDeferredIndexes(d: SQLiteDatabase): List<String> {
+        val lines = mutableListOf<String>()
+        for (sql in CrawlerDbSchema.indexStatements) {
+            val name = sql.removePrefix("CREATE INDEX IF NOT EXISTS ").substringBefore(' ')
+            val startedAt = System.nanoTime()
+            d.execSQL(sql)
+            val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
+            lines += "created index $name in ${elapsedMs}ms (deferred past the bulk import)"
+        }
+        return lines
+    }
+
+    /**
+     * Drops every `idx_*` index a RESUMED temp DB already carries. Only the
+     * pre-deferred-index build created them up front, so this is the legacy-resume
+     * path (the device's in-flight temp DB came from that build); the indexes come
+     * back from [finishImport] once the remaining chunks are in. Surfaced as one
+     * summary line, and never fatal: the probe/drop is an optimisation, not a
+     * correctness requirement (the DDL is `IF NOT EXISTS`).
+     */
+    private fun dropLegacyIndexes(d: SQLiteDatabase) {
+        val names = mutableListOf<String>()
+        try {
+            d.rawQuery(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'",
+                null,
+            ).use { c ->
+                while (c.moveToNext()) c.getString(0)?.let { names += it }
+            }
+            for (name in names) d.execSQL("DROP INDEX IF EXISTS $name")
+        } catch (e: Exception) {
+            Log.i(TAG, "legacy index drop failed: ${e.javaClass.simpleName}")
+            return
+        }
+        if (names.isEmpty()) return
+        val line = "legacy temp DB: dropped ${names.size} idx_* secondary indexes " +
+            "(recreated after the import)"
+        prepareLines += line
+        Log.i(TAG, line)
     }
 
     override fun abandon() {
@@ -194,6 +293,16 @@ class SqliteRestoreSink(private val dbFile: File) : RestoreStatementSink {
         UNKNOWN_VERSION
     }
 
+    /** Reads `PRAGMA page_size` of the open temp DB, for the summary. */
+    private fun readPageSize(d: SQLiteDatabase): String = try {
+        d.rawQuery("PRAGMA page_size", null).use { c ->
+            if (c.moveToFirst()) c.getInt(0).toString() else UNKNOWN_VERSION
+        }
+    } catch (e: Exception) {
+        Log.i(TAG, "PRAGMA page_size failed: ${e.javaClass.simpleName}")
+        UNKNOWN_VERSION
+    }
+
     /**
      * Reads `PRAGMA journal_mode` and, when [want] is given, asks SQLite to
      * switch to it first (a journal-mode change returns the mode in effect).
@@ -215,5 +324,11 @@ class SqliteRestoreSink(private val dbFile: File) : RestoreStatementSink {
 
         /** Placeholder when a PRAGMA/version query cannot be read. */
         private const val UNKNOWN_VERSION = "unknown"
+
+        /** Page size of a freshly created temp DB (the crawler's own, 32 KiB). */
+        private const val PAGE_SIZE_BYTES = 32768
+
+        /** Negative = KiB: 64 MiB of page cache, matching the crawler's tuning. */
+        private const val CACHE_SIZE_KIB = -64000
     }
 }

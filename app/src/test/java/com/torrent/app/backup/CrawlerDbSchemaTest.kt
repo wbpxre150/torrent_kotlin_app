@@ -21,15 +21,40 @@ class CrawlerDbSchemaTest {
 
     @Test fun statementCountMatchesTheCConstants() {
         // 11 base (5 tables + 6 indices) + 2 FTS5 virtual tables + 4 triggers.
+        assertEquals(5, CrawlerDbSchema.tableStatements.size)
+        assertEquals(6, CrawlerDbSchema.indexStatements.size)
         assertEquals(11, CrawlerDbSchema.baseStatements.size)
         assertEquals(2, CrawlerDbSchema.ftsStatements.size)
         assertEquals(4, CrawlerDbSchema.triggerStatements.size)
         assertEquals(17, CrawlerDbSchema.statements.size)
         assertEquals(
-            CrawlerDbSchema.baseStatements +
+            CrawlerDbSchema.tableStatements +
+                CrawlerDbSchema.indexStatements +
                 CrawlerDbSchema.ftsStatements +
                 CrawlerDbSchema.triggerStatements,
             CrawlerDbSchema.statements,
+        )
+    }
+
+    @Test fun theBulkPhaseGroupHoldsOnlyTablesAndTheDeferredGroupOnlyIndices() {
+        // The import creates `tableStatements` up front and `indexStatements` in
+        // finishImport(); that split is what makes the bulk phase index-free, so
+        // neither group may leak the other's DDL.
+        for (statement in CrawlerDbSchema.tableStatements) {
+            assertTrue(
+                "not a CREATE TABLE: $statement",
+                statement.startsWith("CREATE TABLE IF NOT EXISTS "),
+            )
+        }
+        for (statement in CrawlerDbSchema.indexStatements) {
+            assertTrue(
+                "not a CREATE INDEX: $statement",
+                statement.startsWith("CREATE INDEX IF NOT EXISTS idx_"),
+            )
+        }
+        assertEquals(
+            CrawlerDbSchema.tableStatements + CrawlerDbSchema.indexStatements,
+            CrawlerDbSchema.baseStatements,
         )
     }
 
@@ -38,7 +63,7 @@ class CrawlerDbSchemaTest {
     }
 
     @Test fun baseTablesAreDeclared() {
-        val ddl = CrawlerDbSchema.baseStatements.joinToString("\n")
+        val ddl = CrawlerDbSchema.tableStatements.joinToString("\n")
         for (table in listOf(
             "torrents",
             "path_prefixes",
@@ -51,7 +76,7 @@ class CrawlerDbSchemaTest {
     }
 
     @Test fun indicesAreDeclared() {
-        val ddl = CrawlerDbSchema.baseStatements.joinToString("\n")
+        val ddl = CrawlerDbSchema.indexStatements.joinToString("\n")
         for (index in listOf(
             "idx_torrents_added",
             "idx_torrents_total_peers",
@@ -66,7 +91,7 @@ class CrawlerDbSchemaTest {
 
     @Test fun partialIndexOnAdultIsPreserved() {
         assertTrue(
-            CrawlerDbSchema.baseStatements.any {
+            CrawlerDbSchema.indexStatements.any {
                 it.contains("idx_class_cat ON torrent_class(category, tv_kind, torrent_id)") &&
                     it.contains("WHERE adult = 0;")
             },
@@ -123,11 +148,11 @@ class CrawlerDbSchemaTest {
                 "    info_hash BLOB(20) NOT NULL UNIQUE,    name TEXT NOT NULL," +
                 "    size_bytes INTEGER NOT NULL,    total_peers INTEGER DEFAULT 0," +
                 "    added_timestamp INTEGER NOT NULL);",
-            CrawlerDbSchema.baseStatements[0],
+            CrawlerDbSchema.tableStatements[0],
         )
         assertEquals(
             "CREATE TABLE IF NOT EXISTS classifier_meta (key TEXT PRIMARY KEY, value TEXT);",
-            CrawlerDbSchema.baseStatements[10],
+            CrawlerDbSchema.tableStatements[4],
         )
     }
 
