@@ -4,9 +4,12 @@ import com.torrent.app.config.BackupSettings
 import com.torrent.app.config.ConfigValidator
 import com.torrent.app.s3.S3GetResult
 import com.torrent.app.s3.S3ListResult
+import java.io.ByteArrayInputStream
 import java.io.File
+import java.io.IOException
 import java.util.concurrent.Executor
 import java.util.concurrent.RejectedExecutionException
+import java.util.zip.GZIPInputStream
 
 /**
  * One listing + download of the incremental DB-dump chain (plan 2,
@@ -34,9 +37,10 @@ enum class DbRestoreState {
  * Thread-safe snapshot of the DB restore manager for the dashboard
  * (`GET /api/crawler/restore`). [objectCount]/[objectKeys] describe
  * the last restore's chain (kept visible after later failures);
- * [lines] is the tail of the one-shot's output (a ring buffer capped
- * at [DbRestoreManager.MAX_LINES]); [exitCode] is the one-shot's
- * exit code (-1 when it never ran).
+ * [lines] is the tail of the sink's summary plus the `--rebuild-fts`
+ * one-shot's output (a ring buffer capped at
+ * [DbRestoreManager.MAX_LINES]); [exitCode] is the one-shot's exit code
+ * (-1 when it never ran).
  */
 data class DbRestoreStatus(
     val state: DbRestoreState = DbRestoreState.IDLE,
@@ -45,7 +49,7 @@ data class DbRestoreStatus(
     val lastAttempt: Long? = null,
     val lastSuccess: Long? = null,
     val objectCount: Int? = null,
-    /** Objects of [objectKeys] downloaded so far (null before the count
+    /** Objects of [objectKeys] imported so far (null before the count
      *  is published; monotonic 0..objectCount while RUNNING). */
     val objectsDone: Int? = null,
     val objectKeys: List<String> = emptyList(),
@@ -58,8 +62,9 @@ data class DbRestoreStatus(
 
 /**
  * Restores the dht_crawler's database from the incremental SQL-dump
- * chain in the R2 DB bucket (plan 2, Stage 4). An explicit,
- * dashboard-triggered one-shot — there is no schedule.
+ * chain in the R2 DB bucket (plan 2, Stage 4; rewritten by plan 3,
+ * Stage 3 into a resumable, chunk-by-chunk Kotlin importer). An
+ * explicit, dashboard-triggered one-shot — there is no schedule.
  *
  * Flow of [restoreNow] (stop-first, on [executor], never a request
  * thread): load settings (R2 endpoint + creds + DB bucket + prefix
@@ -68,21 +73,47 @@ data class DbRestoreStatus(
  * [DbRestoreState.NOT_CONFIGURED]; [busy] (an apply/maintenance/
  * backup job is in flight) → [DbRestoreState.REFUSED_BUSY]; a
  * restore already in flight →
- * [DbRestoreState.REFUSED_RUNNING]; otherwise stop the crawler,
- * LIST the `db/` prefix, download + gunzip every parseable object in
- * chain order (sorted by start id, then date; malformed keys are
- * skipped), concatenate them into ONE temp `.sql`, and run
- * `libdhtcrawler.so --restore-database <abs path>` as a one-shot in
- * the crawler work dir (the C side replays the dump into a FRESH db
- * and swaps it in atomically).
+ * [DbRestoreState.REFUSED_RUNNING]; otherwise stop the crawler, reap
+ * the stale `restore-*.sql` dumps the old concat-then-replay flow left
+ * behind ([RestoreFileOps.reapStaleSqlDumps]), LIST the `db/` prefix,
+ * build the chain in id-major order (sorted by start id, then date;
+ * malformed keys are skipped; a gap fails), and then stream every object
+ * into a FRESH temp DB (`<workDir>/data/torrents.db.restore.tmp`) ONE
+ * CHUNK AT A TIME: each object's gzip body is decompressed on the fly
+ * through [SqlStatementSplitter] into a [RestoreStatementSink] and
+ * committed as its own transaction, with the resume marker
+ * ([RestoreProgress] in [progressFile]) advanced after every commit.
+ * Nothing is ever concatenated into a dump file and no whole chunk is
+ * ever gunzipped into heap — those unbounded steps are what got the app
+ * process killed (kernel-OOM) during the 36.7 GB replay.
  *
- * Bookmark ordering (the critical invariant): the app-side
- * [DbBookmark] is reset to [DbBookmark.FIRST_RUN] ONLY after the
- * one-shot exits 0 — a failed restore leaves the bookmark alone so
- * the next upload continues the chain. The crawler is restarted
- * (when enabled) after EVERY outcome that attempted to stop it, so a
- * failed restore — even a throwing stopCrawler — never leaves it
- * dead. The temp file is deleted in a `finally` on every path.
+ * After the last chunk, `finishImport()` checkpoints and closes the temp
+ * DB, and the FTS5 tables, the triggers and the index `rebuild` for both
+ * search indexes run in the crawler's OWN native one-shot
+ * (`--rebuild-fts <temp db>`, bundled SQLite 3.49.1) on the TEMP DB.
+ * Only when that exits 0 is the temp DB swapped over the live one
+ * ([RestoreFileOps.swapIn]). The native dump-replay tool is never
+ * executed by the app any more; it stays in the binary as a manual
+ * recovery tool.
+ *
+ * Resume: a FAILED restore keeps the temp DB and the marker, so the retry
+ * imports only the missing chunks (a kill mid-chunk re-replays that one
+ * chunk, which is safe and deterministic: every dump statement is
+ * `INSERT OR IGNORE` and the replay is id-major first-writer-wins). A
+ * marker whose chain is not a prefix of the freshly listed chain is
+ * discarded and the import starts over.
+ *
+ * Bookmark ordering (the critical invariant): the app-side [DbBookmark] is
+ * reset to [DbBookmark.FIRST_RUN] ONLY after the swap succeeded — a failed
+ * restore leaves the bookmark alone so the next upload continues the chain.
+ * The crawler is restarted (when enabled) after EVERY outcome that attempted
+ * to stop it, so a failed restore — even a throwing stopCrawler — never
+ * leaves it dead.
+ *
+ * Both [restoreNow] and [runRestore] catch [Throwable], not just
+ * [Exception]: an [OutOfMemoryError] must land in a FAILED status with
+ * `running = false`, otherwise the wedged RUNNING flag blocks every crawler
+ * job and the wizard's restore gate.
  *
  * All collaborators are constructor-injected (plain-JUnit
  * testable); [runRestore] is package-internal so tests can run it
@@ -92,10 +123,18 @@ class DbRestoreManager(
     private val loadSettings: () -> BackupSettings,
     private val isBusy: () -> Boolean,
     private val clientFactory: (BackupSettings) -> S3DbRestorer,
+    /**
+     * Runs one native one-shot in the crawler work dir. The restore uses it
+     * solely for `--rebuild-fts <temp db>`; the dump replay itself is Kotlin.
+     */
     private val oneShot: (List<String>, File, (String) -> Unit) -> Int,
+    /** Creates the statement sink for the temp DB (production: [SqliteRestoreSink]). */
+    private val sinkFactory: (File) -> RestoreStatementSink,
     private val workDir: () -> File,
     private val tmpDir: () -> File,
     private val bookmarkFile: () -> File,
+    /** The per-chunk resume marker (production: `filesDir/backup/db_restore_progress.txt`). */
+    private val progressFile: () -> File,
     private val stopCrawler: () -> Unit,
     private val startCrawlerIfEnabled: () -> Unit,
     private val executor: Executor,
@@ -145,11 +184,13 @@ class DbRestoreManager(
             executor.execute {
                 try {
                     runRestore()
-                } catch (e: Exception) {
-                    // A restore must never take the control executor down.
+                } catch (t: Throwable) {
+                    // A restore must never take the control executor down, and
+                    // an OutOfMemoryError must not wedge running = true: that
+                    // flag blocks every crawler job and the wizard's gate.
                     finish(
                         DbRestoreState.FAILED,
-                        "restore failed: ${e.message ?: e.javaClass.simpleName}",
+                        "restore failed: ${t.message ?: t.javaClass.simpleName}",
                         exitCode = -1,
                     )
                 } finally {
@@ -165,10 +206,10 @@ class DbRestoreManager(
     }
 
     /**
-     * Runs one full restore synchronously (settings → stop → list →
-     * download/gunzip/concat → one-shot → bookmark → restart).
-     * Called on [executor] by [restoreNow]; package-internal so unit
-     * tests can run it on the test thread.
+     * Runs one full restore synchronously (settings → stop → reap →
+     * list → per-chunk import into the temp DB → native `--rebuild-fts`
+     * → swap → bookmark → restart). Called on [executor] by [restoreNow];
+     * package-internal so unit tests can run it on the test thread.
      */
     internal fun runRestore(): DbRestoreStatus {
         val lines = ArrayDeque<String>()
@@ -189,11 +230,14 @@ class DbRestoreManager(
                 "not configured: " + errors.joinToString("; "),
                 configured = false)
         }
-        val tmpFile = File(tmpDir(), "restore-${clock()}.sql")
-        tmpDir().mkdirs()
         try {
             status = status.copy(message = "stopping crawler (up to 60 s)")
             stopCrawler()
+
+            // Housekeeping before anything else: the previous flow concatenated
+            // the whole chain into restore-*.sql files in tmpDir and never
+            // reaped them (two ~33 GB files on-device). Nothing reads them now.
+            RestoreFileOps.reapStaleSqlDumps(tmpDir())
 
             status = status.copy(message = "listing ${prefixDir(settings)} objects")
             val listed = when (val r = clientFactory(settings).list(prefixDir(settings))) {
@@ -261,58 +305,132 @@ class DbRestoreManager(
             }
             val keys = chain.map { it.first }
 
+            // The import target: a temp DB next to the live one (same name the
+            // native replay used), so the final swap is a rename in one dir.
+            val work = workDir()
+            val tmpDb = tempDb(work)
+            // Resume only when the marker, the temp DB and the freshly listed
+            // chain all agree: the marker's chain must be an exact PREFIX of the
+            // new chain (a longer chain — backups appended since — is fine).
+            // The marker must describe a PREFIX of the freshly listed chain: an
+            // equal chain (a retry) and a longer chain (backups appended since)
+            // both resume; anything else starts over.
+            val progress = RestoreProgress.read(progressFile())
+            val resumeAt = if (progress != null &&
+                progress.keys.size <= keys.size &&
+                keys.subList(0, progress.keys.size) == progress.keys &&
+                RestoreFileOps.targetDbExists(tmpDb)
+            ) progress.nextIndex else null
+            val startIndex = resumeAt ?: 0
+
+            val sink = sinkFactory(tmpDb)
+            if (resumeAt != null) {
+                sink.prepare(fresh = false)
+            } else {
+                // A fresh import must not inherit a half-imported DB or its
+                // WAL, and a stale marker must not outlive the DB it described.
+                tmpDb.delete()
+                RestoreFileOps.deleteDbSidecars(tmpDb)
+                progressFile().delete()
+                sink.prepare(fresh = true)
+            }
             status = status.copy(objectCount = keys.size, objectKeys = keys,
-                objectsDone = 0,
-                message = "downloading ${keys.size} object(s)")
-            tmpFile.outputStream().use { out ->
-                val client = clientFactory(settings)
-                for ((i, key) in keys.withIndex()) {
-                    when (val g = client.get(key)) {
-                        is S3GetResult.Success -> {
-                            out.write(gunzipBytes(g.body))
-                            // Copy-on-write progress: single writer (this
-                            // executor thread), like pushLine below.
-                            status = status.copy(objectsDone = i + 1)
+                objectsDone = startIndex,
+                message = when {
+                    resumeAt == null -> "importing 1 of ${keys.size} object(s)"
+                    resumeAt >= keys.size ->
+                        "all ${keys.size} object(s) imported; resuming at the FTS rebuild"
+                    else -> "resuming at chunk ${startIndex + 1} of ${keys.size}"
+                })
+
+            val client = clientFactory(settings)
+            for (i in startIndex until keys.size) {
+                val key = keys[i]
+                status = status.copy(message = "importing ${i + 1} of ${keys.size} object(s)")
+                when (val g = client.get(key)) {
+                    is S3GetResult.Success -> {
+                        // Stream this chunk: decompress on the fly and hand one
+                        // statement at a time to the sink, inside ONE transaction
+                        // per chunk. endChunk() commits (or rolls the chunk back
+                        // when a statement threw) — it must run on every path, so
+                        // the connection is never left mid-transaction.
+                        sink.beginChunk()
+                        try {
+                            try {
+                                SqlStatementSplitter.split(
+                                    GZIPInputStream(ByteArrayInputStream(g.body))) { sql ->
+                                    sink.statement(sql)
+                                }
+                            } catch (e: IOException) {
+                                throw IllegalStateException("corrupt gzip in chunk $key: " +
+                                    (e.message ?: e.javaClass.simpleName))
+                            }
+                        } finally {
+                            sink.endChunk()
                         }
-                        is S3GetResult.ClientError ->
-                            throw IllegalStateException("R2 rejected the download of $key " +
-                                "(HTTP ${g.statusCode})")
-                        is S3GetResult.ServerError ->
-                            throw IllegalStateException("R2 server error downloading $key " +
-                                "(HTTP ${g.statusCode} after ${g.attempts} attempts)")
-                        is S3GetResult.Failure ->
-                            throw IllegalStateException("download of $key failed: " +
-                                "${g.cause.message ?: g.cause.javaClass.simpleName}")
+                        // The chunk is committed: advance the resume marker
+                        // BEFORE the next download, so a kill here re-imports at
+                        // most this chunk's successor.
+                        RestoreProgress.write(progressFile(), RestoreProgress(keys, i + 1))
+                        // Copy-on-write progress: single writer (this
+                        // executor thread), like pushLine below.
+                        status = status.copy(objectsDone = i + 1)
                     }
+                    is S3GetResult.ClientError ->
+                        throw IllegalStateException("R2 rejected the download of $key " +
+                            "(HTTP ${g.statusCode})")
+                    is S3GetResult.ServerError ->
+                        throw IllegalStateException("R2 server error downloading $key " +
+                            "(HTTP ${g.statusCode} after ${g.attempts} attempts)")
+                    is S3GetResult.Failure ->
+                        throw IllegalStateException("download of $key failed: " +
+                            "${g.cause.message ?: g.cause.javaClass.simpleName}")
                 }
             }
 
-            status = status.copy(message = "running --restore-database")
-            val exitCode = oneShot(
-                listOf("--restore-database", tmpFile.absolutePath), workDir()) { line ->
+            // Checkpoint + close the temp DB; its summary lines are part of the
+            // restore status (the sink logs them under the DbRestore tag too).
+            val summary = sink.finishImport()
+            for (line in summary) pushLine(lines, line)
+
+            // FTS5 tables, triggers and both index rebuilds run in the crawler's
+            // own SQLite, on the TEMP DB, before it is swapped in.
+            status = status.copy(message = "running --rebuild-fts")
+            val ftsExit = oneShot(
+                listOf("--rebuild-fts", tmpDb.absolutePath), work) { line ->
                 pushLine(lines, line)
             }
-            return if (exitCode == 0) {
-                // Only a successful restore resets the cursor: the next
-                // upload then re-dumps the whole (restored) database.
-                DbBookmark.write(bookmarkFile(), DbBookmark.FIRST_RUN)
-                finish(
-                    DbRestoreState.SUCCESS,
-                    "restored ${keys.size} object(s); chain starts at torrent id " +
-                        "${first.start} (pre-baseline history is not in the " +
-                        "bucket); bookmark reset to first run",
-                    exitCode = exitCode,
-                    lastSuccess = clock(),
-                )
-            } else {
-                finish(
+            if (ftsExit != 0) {
+                // No silent degradation: the FTS indexes are part of a usable
+                // database. Everything is imported and marked, so a retry re-runs
+                // only the rebuild; repeated identical failures mean the temp DB
+                // is corrupt (manual recovery: clear app storage, or the
+                // crawler's own dump-replay tool).
+                return finish(
                     DbRestoreState.FAILED,
-                    "restore exited with code $exitCode (bookmark unchanged)",
-                    exitCode = exitCode,
+                    "FTS rebuild exited with code $ftsExit (bookmark unchanged)",
+                    exitCode = ftsExit,
                 )
             }
-        } catch (e: Exception) {
-            return finish(DbRestoreState.FAILED, "restore failed: ${e.message ?: e.javaClass.simpleName}")
+            RestoreFileOps.swapIn(tmpDb, liveDb(work))
+            // Only a successful restore resets the cursor: the next
+            // upload then re-dumps the whole (restored) database.
+            DbBookmark.write(bookmarkFile(), DbBookmark.FIRST_RUN)
+            progressFile().delete()
+            return finish(
+                DbRestoreState.SUCCESS,
+                "imported ${keys.size} object(s); chain starts at torrent id " +
+                    "${first.start} (pre-baseline history is not in the " +
+                    "bucket); FTS rebuilt; bookmark reset to first run",
+                exitCode = ftsExit,
+                lastSuccess = clock(),
+            )
+        } catch (t: Throwable) {
+            // Throwable, not Exception: an OutOfMemoryError must still leave a
+            // FAILED status (the temp DB + progress marker are kept so the retry
+            // resumes; nothing is deleted here).
+            return finish(DbRestoreState.FAILED,
+                "restore failed: ${t.message ?: t.javaClass.simpleName}")
         } finally {
             // Restart the crawler if it is enabled (and the wifi gate
             // allows) regardless of the outcome — the same ceremony as
@@ -322,8 +440,6 @@ class DbRestoreManager(
             // back; the supervisor's start() is idempotent, so a redundant
             // call is harmless.
             startCrawlerIfEnabled()
-            // The temp dump is always deleted, on success and failure.
-            tmpFile.delete()
         }
     }
 
@@ -345,6 +461,13 @@ class DbRestoreManager(
     fun start() { synchronized(lock) { stopped = false } }
 
     private fun prefixDir(settings: BackupSettings): String = settings.r2DbObjectPrefix + "/"
+
+    /** The database the crawler serves from: `<workDir>/data/torrents.db`. */
+    private fun liveDb(workDir: File): File = File(File(workDir, "data"), "torrents.db")
+
+    /** The import target, mirroring the native path (`restore-database.patch:45`). */
+    private fun tempDb(workDir: File): File =
+        File(File(workDir, "data"), "torrents.db.restore.tmp")
 
     private fun pushLine(lines: ArrayDeque<String>, line: String) {
         synchronized(lines) {

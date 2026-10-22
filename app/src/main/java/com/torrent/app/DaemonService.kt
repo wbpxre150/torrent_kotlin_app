@@ -46,6 +46,7 @@ import com.torrent.app.backup.CrawlerDbDumper
 import com.torrent.app.backup.DbBackupManager
 import com.torrent.app.backup.DbRestoreManager
 import com.torrent.app.backup.S3DbRestorer
+import com.torrent.app.backup.SqliteRestoreSink
 
 sealed class ServiceState {
     data object Starting : ServiceState()
@@ -301,6 +302,11 @@ class DaemonService : Service() {
                 }
             },
             oneShot = { args, dir, onLine -> oneShotRunner.run(args, dir, onLine) },
+            // Plan 3, Stage 3: the dump replay itself is Kotlin (streamed into a
+            // temp DB, one transaction per chunk); the oneShot above now only
+            // runs `--rebuild-fts` against that temp DB.
+            sinkFactory = { SqliteRestoreSink(it) },
+            progressFile = { File(filesDir, "backup/db_restore_progress.txt") },
             // The native --restore-database opens <workDir>/data/torrents.db with
             // sqlite3_open, which does NOT create parent directories: on a fresh
             // install (crawler never started) filesDir/crawler/data may not exist,
