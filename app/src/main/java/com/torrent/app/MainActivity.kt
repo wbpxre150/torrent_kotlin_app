@@ -14,6 +14,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import android.net.Uri
+import com.torrent.app.config.ConfigStore
 import com.torrent.app.storage.SafStatus
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.clickable
@@ -42,7 +43,16 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
     private var wifiIp = MutableStateFlow("")
     private val safStatus = MutableStateFlow<SafStatus?>(null)
-    private val wizardCompleted = MutableStateFlow(true)
+    // Read synchronously from the store on first use so the FIRST frame is already right: a
+    // first-run install shows step 1 immediately and a returning user the QR main screen, with
+    // no flash of the other screen while the binder connects (the binder callback and the 3 s
+    // poll below then keep it in sync). ConfigStore is a plain SharedPreferences wrapper, so
+    // this needs no service. `by lazy` rather than a plain initialiser: property initialisers
+    // run before the activity is attached, and ConfigStore needs the context. The first read
+    // is the `collectAsState` inside `setContent`, i.e. after `onCreate`.
+    private val wizardCompleted by lazy {
+        MutableStateFlow(ConfigStore(this).load().wizardCompleted)
+    }
     private val serviceState = MutableStateFlow<ServiceState>(ServiceState.Stopped)
     private var authToken = MutableStateFlow("")
 

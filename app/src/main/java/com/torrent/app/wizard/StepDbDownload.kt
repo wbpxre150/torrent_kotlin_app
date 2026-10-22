@@ -110,9 +110,14 @@ fun StepDbDownload(
             Text(
                 text = RestoreProgressUi.statusText(st),
                 style = MaterialTheme.typography.bodyMedium,
-                color = when (RestoreProgressUi.statusKind(st)) {
-                    RestoreStatusKind.SUCCESS -> TorrentPalette.color(TorrentPalette.OK)
-                    RestoreStatusKind.ERROR -> MaterialTheme.colorScheme.error
+                color = when {
+                    RestoreProgressUi.statusKind(st) == RestoreStatusKind.SUCCESS ->
+                        TorrentPalette.color(TorrentPalette.OK)
+                    // A refusal is not a failure: amber, not the error red (same rule as the
+                    // dedicated progress screen).
+                    restoreStatusIsWarning(st) -> TorrentPalette.color(TorrentPalette.WARN)
+                    RestoreProgressUi.statusKind(st) == RestoreStatusKind.ERROR ->
+                        MaterialTheme.colorScheme.error
                     else -> MaterialTheme.colorScheme.onSurfaceVariant
                 },
             )

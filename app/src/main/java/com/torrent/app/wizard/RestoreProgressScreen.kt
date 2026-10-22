@@ -1,5 +1,6 @@
 package com.torrent.app.wizard
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -24,6 +25,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import com.torrent.app.DaemonService
 import com.torrent.app.WizardRestoreViewModel
 import com.torrent.app.backup.DbRestoreState
+import com.torrent.app.backup.DbRestoreStatus
 import com.torrent.app.backup.RestoreProgressText
 import com.torrent.app.backup.WizardRestorePollPolicy
 import com.torrent.app.ui.theme.TorrentPalette
@@ -54,10 +56,19 @@ fun RestoreProgressScreen(
     onRetry: () -> Unit,
     onFinishWithoutDownload: () -> Unit,
     onSucceeded: () -> Unit,
+    onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var restoreStatus by restoreVm.restoreStatus
     var restoreError by restoreVm.restoreError
+
+    // System Back must not detach a running restore: the job itself survives in the service,
+    // but the user would be dropped on the download step while a swap is in flight. While it
+    // runs the press is consumed; otherwise Back returns to that step to edit the inputs.
+    val restoreRunning = restoreStatus?.running == true
+    BackHandler(enabled = true) {
+        if (!restoreRunning) onBack()
+    }
 
     // Always read the LATEST binder: a recreated activity composes before the async
     // onServiceConnected callback, so the first adopt is a no-op and the next one lands.
@@ -100,6 +111,19 @@ fun RestoreProgressScreen(
     val kind = status?.let { RestoreProgressUi.statusKind(it) } ?: RestoreStatusKind.IDLE
     val done = status?.objectsDone
     val total = status?.objectCount
+    // A refusal or a not-configured attempt is not a failure of the restore itself — nothing
+    // was attempted — so it reads in the palette's amber rather than the error red.
+    val statusColor = when (kind) {
+        RestoreStatusKind.RUNNING -> MaterialTheme.colorScheme.onSurface
+        RestoreStatusKind.SUCCESS -> TorrentPalette.color(TorrentPalette.OK)
+        RestoreStatusKind.ERROR ->
+            if (status != null && restoreStatusIsWarning(status)) {
+                TorrentPalette.color(TorrentPalette.WARN)
+            } else {
+                MaterialTheme.colorScheme.error
+            }
+        RestoreStatusKind.IDLE -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
 
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Downloading crawler database", style = MaterialTheme.typography.headlineMedium)
@@ -107,12 +131,7 @@ fun RestoreProgressScreen(
             text = status?.let { RestoreProgressUi.statusText(it) }
                 ?: "Restore not started — tap Retry to try again.",
             style = MaterialTheme.typography.bodyLarge,
-            color = when (kind) {
-                RestoreStatusKind.RUNNING -> MaterialTheme.colorScheme.onSurface
-                RestoreStatusKind.SUCCESS -> TorrentPalette.color(TorrentPalette.OK)
-                RestoreStatusKind.ERROR -> MaterialTheme.colorScheme.error
-                RestoreStatusKind.IDLE -> MaterialTheme.colorScheme.onSurfaceVariant
-            },
+            color = statusColor,
         )
         // The per-object counter is all the progress math needed — no ETA/rate logic. Both
         // counts must be known: a RUNNING restore that is still listing has no total yet.
@@ -149,4 +168,20 @@ fun RestoreProgressScreen(
             RestoreStatusKind.RUNNING, RestoreStatusKind.SUCCESS -> Unit
         }
     }
+}
+
+/**
+ * Whether [status] is a refusal / not-configured answer rather than a restore that failed.
+ *
+ * Neither case attempted anything — the manager was never configured, or it was busy or
+ * already running — so they are shown in the palette's warning amber instead of the error red
+ * used for an attempt that really failed. A RUNNING snapshot is never a warning: a mid-restore
+ * double tap answers REFUSED_RUNNING with `running = true` and must read as running.
+ */
+internal fun restoreStatusIsWarning(status: DbRestoreStatus): Boolean = when {
+    status.running -> false
+    status.state == DbRestoreState.NOT_CONFIGURED -> true
+    status.state == DbRestoreState.REFUSED_BUSY -> true
+    status.state == DbRestoreState.REFUSED_RUNNING -> true
+    else -> false
 }

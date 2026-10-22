@@ -1,5 +1,6 @@
 package com.torrent.app.wizard
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -19,6 +20,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -59,10 +61,13 @@ fun WizardFlow(
     onGrantUsb: () -> Unit,
     onFinished: () -> Unit,
 ) {
-    // The ViewModel seeds itself from the stored config once (the binder is connected before
-    // the wizard can be shown: `wizardCompleted` only flips false after a service load) and
-    // then owns every field for the activity's lifetime.
+    // The ViewModel seeds itself from the stored config once and then owns every field for
+    // the activity's lifetime. It can now be created BEFORE the binder connects: the activity
+    // reads `wizardCompleted` synchronously from the store, so a first-run wizard is on screen
+    // from the very first frame. The effect below therefore seeds the form the moment a config
+    // exists — once, and only into fields the user has not touched (WizardFormViewModel).
     val form = viewModel<WizardFormViewModel> { WizardFormViewModel(boundService?.loadConfig()) }
+    LaunchedEffect(boundService) { form.seedIfNeeded(boundService?.loadConfig()) }
     val restoreVm = viewModel<WizardRestoreViewModel>()
 
     var screen by form.screen
@@ -234,6 +239,15 @@ fun WizardFlow(
         screen = WizardNav.next(current)
     }
 
+    // System Back steps back through the wizard exactly like the in-row Back button instead
+    // of leaving the activity. On the first step there is no previous step, so the handler is
+    // not registered there and Back keeps its usual meaning (leave the app). The progress
+    // screen installs its own handler: a running restore must not be detached.
+    val backTarget = WizardNav.back(screen)
+    BackHandler(enabled = screen is WizardScreenKind.Step && backTarget != screen) {
+        screen = backTarget
+    }
+
     // --- Shell ---------------------------------------------------------------------------
 
     Column(
@@ -250,9 +264,11 @@ fun WizardFlow(
                 onRetry = { startDownload() },
                 onFinishWithoutDownload = { completeSetup() },
                 onSucceeded = { completeSetup() },
+                onBack = { screen = WizardNav.back(screen) },
             )
             is WizardScreenKind.Step -> {
                 val step = current.step
+                val canAdvance = WizardNav.canProceed(step, usbGranted)
                 Text(
                     text = WizardNav.stepIndicator(current),
                     style = MaterialTheme.typography.bodyMedium,
@@ -307,8 +323,19 @@ fun WizardFlow(
                     if (step != WizardStep.DB_DOWNLOAD) {
                         Button(
                             onClick = { proceed() },
-                            enabled = WizardNav.canProceed(step, usbGranted),
+                            enabled = canAdvance,
                         ) { Text("Next") }
+                    }
+                }
+                // Only the USB step can block Next (its grant is required); the other steps
+                // validate on the tap and show their own messages, so they have no hint.
+                if (step != WizardStep.DB_DOWNLOAD) {
+                    nextDisabledHint(step, usbGranted)?.let {
+                        Text(
+                            text = it,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                 }
             }
@@ -363,6 +390,17 @@ internal fun ftpFrom(form: WizardFormViewModel, stored: FtpSettings): FtpSetting
 /** The chip selection as `save_categories` names, in the crawler's own order. */
 internal fun selectedCategories(form: WizardFormViewModel): List<String> =
     CrawlerTaxonomy.CATEGORIES.filter { it in form.saveCategories.value }
+
+/**
+ * The line shown under a step whose Next is disabled, so a greyed-out button always says
+ * why. Only the USB step can block Next (its grant is required before anything can be
+ * written); every other step validates on the tap and renders its own messages instead.
+ */
+internal fun nextDisabledHint(step: WizardStep, usbGranted: Boolean): String? = when {
+    WizardNav.canProceed(step, usbGranted) -> null
+    step == WizardStep.USB -> "Grant the USB drive to continue."
+    else -> "Fix the highlighted fields to continue."
+}
 
 /**
  * The whole form as [WizardSubmit.Form]. [storedSecret] is the persisted R2 secret: a blank

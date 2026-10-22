@@ -207,4 +207,89 @@ class WizardFormViewModelTest {
         assertTrue(vm.errorsFor(WizardStep.TRANSMISSION).isEmpty())
         assertTrue(vm.errorsFor(WizardStep.DB_DOWNLOAD).isEmpty())
     }
+
+    // --- Late seeding: the binder connects after the wizard is already on screen ----------
+
+    @Test fun lateSeed_fillsUntouchedFieldsFromTheStore() {
+        // The activity now reads `wizardCompleted` synchronously, so a first-run wizard is
+        // composed before the service binder delivers a config: the form starts from the
+        // fallbacks and is seeded once the store arrives.
+        val vm = WizardFormViewModel()
+
+        assertTrue(vm.seedIfNeeded(lateSeedConfig))
+
+        assertEquals("wtest", vm.txUser.value)
+        assertEquals("secret1", vm.txPass.value)
+        assertEquals("51999", vm.peerPort.value)
+        assertEquals("media", vm.dlSubpath.value)
+        assertEquals("ftest", vm.ftpUser.value)
+        assertTrue(vm.ftpWifiOnly.value)
+        assertTrue(vm.crawlerEnabled.value)
+        assertTrue(vm.crawlerAdultDrop.value)
+        assertEquals(setOf("anime"), vm.saveCategories.value)
+        assertEquals("db-bucket", vm.r2DbBucket.value)
+        assertEquals("dbtest-1", vm.r2DbObjectPrefix.value)
+        // Never seeded, early or late: only a secret the user typed is ever written.
+        assertEquals("", vm.r2SecretAccessKey.value)
+    }
+
+    @Test fun lateSeed_keepsWhatTheUserAlreadyTyped() {
+        val vm = WizardFormViewModel()
+        vm.txUser.value = "typed-user"
+        vm.peerPort.value = "51000"
+
+        vm.seedIfNeeded(lateSeedConfig)
+
+        // Fields the user moved off their fallback are left exactly as typed.
+        assertEquals("typed-user", vm.txUser.value)
+        assertEquals("51000", vm.peerPort.value)
+        // Everything untouched is still seeded from the store.
+        assertEquals("secret1", vm.txPass.value)
+        assertEquals("ftest", vm.ftpUser.value)
+        assertEquals(setOf("anime"), vm.saveCategories.value)
+    }
+
+    @Test fun lateSeed_happensOnlyOnce() {
+        val vm = WizardFormViewModel()
+
+        assertTrue(vm.seedIfNeeded(lateSeedConfig))
+        assertFalse(vm.seedIfNeeded(ConfigDefaults.INITIAL))
+
+        assertEquals("wtest", vm.txUser.value)
+    }
+
+    @Test fun lateSeed_waitsForAConfigAndThenStillSeeds() {
+        val vm = WizardFormViewModel()
+
+        assertFalse(vm.seedIfNeeded(null))
+        assertEquals(ConfigDefaults.TRANSMISSION_USERNAME, vm.txUser.value)
+
+        assertTrue(vm.seedIfNeeded(lateSeedConfig))
+        assertEquals("wtest", vm.txUser.value)
+    }
+
+    @Test fun constructorSeed_wins_andALateSeedIsANoOp() {
+        val vm = WizardFormViewModel(lateSeedConfig)
+
+        assertFalse(vm.seedIfNeeded(ConfigDefaults.INITIAL))
+
+        assertEquals("wtest", vm.txUser.value)
+    }
+
+    /** A store whose every section differs from the fallbacks (used by the late-seed tests). */
+    private val lateSeedConfig: AppConfig = ConfigDefaults.INITIAL.copy(
+        transmission = TransmissionSettings(
+            username = "wtest", password = "secret1", peerPort = 51999,
+            speedLimitDown = 0, speedLimitUp = 0, altSpeedDown = 0, altSpeedUp = 0,
+        ),
+        ftp = FtpSettings(username = "ftest", password = "secret2", port = 2323, wifiOnly = true),
+        crawler = CrawlerSettings(enabled = true, adultMode = "drop", saveCategories = listOf("anime")),
+        backup = BackupSettings(
+            r2Endpoint = "https://r2.example", r2Bucket = "bucket", r2ObjectKey = "obj",
+            r2AccessKeyId = "AKIA", r2SecretAccessKey = "stored-secret", uploadEnabled = true,
+            dbBackupEnabled = true, r2DbBucket = "db-bucket", r2DbObjectPrefix = "dbtest-1",
+            bootstrapEnabled = true, bootstrapUrl = "https://example/cache.gz",
+        ),
+        dataSubpath = "media",
+    )
 }
