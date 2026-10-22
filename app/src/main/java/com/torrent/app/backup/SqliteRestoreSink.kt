@@ -63,17 +63,23 @@ class SqliteRestoreSink(private val dbFile: File) : RestoreStatementSink {
         )
         db = opened
         platformSqliteVersion = readSqliteVersion(opened)
+        // Session pragmas apply to a RESUMED import exactly as to a fresh one.
+        // They are per-connection (not persisted in the file), so re-applying
+        // them here is what keeps a retry on the same footing as the first
+        // attempt: without it a resume would fall back to the platform's
+        // foreign_keys default and lose the bounded page cache.
+        //
+        // foreign_keys stays OFF for the whole import: the dump inserts
+        // torrents, prefixes and files in chain order, so a row can
+        // reference an id that a LATER object adds.
+        opened.execSQL("PRAGMA foreign_keys=OFF")
+        // synchronous=NORMAL is the WAL-appropriate setting (a kill can
+        // lose at most the in-flight chunk, which a retry replays).
+        opened.execSQL("PRAGMA synchronous=NORMAL")
+        // 8 MiB page cache: the bound on SQLite's own heap use.
+        opened.execSQL("PRAGMA cache_size=-8000")
         if (fresh) {
             journalMode = readJournalMode(opened, "WAL")
-            // foreign_keys stays OFF for the whole import: the dump inserts
-            // torrents, prefixes and files in chain order, so a row can
-            // reference an id that a LATER object adds.
-            opened.execSQL("PRAGMA foreign_keys=OFF")
-            // synchronous=NORMAL is the WAL-appropriate setting (a kill can
-            // lose at most the in-flight chunk, which a retry replays).
-            opened.execSQL("PRAGMA synchronous=NORMAL")
-            // 8 MiB page cache: the bound on SQLite's own heap use.
-            opened.execSQL("PRAGMA cache_size=-8000")
             for (sql in CrawlerDbSchema.baseStatements) opened.execSQL(sql)
             Log.i(TAG, "prepared ${dbFile.path}: journal_mode=$journalMode " +
                 "sqlite=$platformSqliteVersion baseStatements=" +
@@ -148,6 +154,20 @@ class SqliteRestoreSink(private val dbFile: File) : RestoreStatementSink {
         dbFile.delete()
         RestoreFileOps.deleteDbSidecars(dbFile)
         Log.i(TAG, "abandoned import: ${dbFile.path} and its sidecars deleted")
+    }
+
+    /**
+     * Closes the database WITHOUT deleting the temp DB (the difference from
+     * [abandon]): a failed import keeps its temp DB and resume marker, so the
+     * retry continues where it stopped — but no handle may stay open on that
+     * file, or the retry opens a second one and a handle left mid-transaction
+     * can hold a write lock (SQLITE_BUSY) until GC finalizes it. Idempotent:
+     * a no-op when nothing is open.
+     */
+    override fun suspendImport() {
+        if (db == null) return
+        closeQuietly()
+        Log.i(TAG, "import suspended: ${dbFile.path} closed, kept for the resume")
     }
 
     /** The open database, or an [IllegalStateException] when [prepare] was skipped. */

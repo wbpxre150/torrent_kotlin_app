@@ -103,7 +103,9 @@ data class DbRestoreStatus(
  * chunk, which is safe and deterministic: every dump statement is
  * `INSERT OR IGNORE` and the replay is id-major first-writer-wins). A
  * marker whose chain is not a prefix of the freshly listed chain is
- * discarded and the import starts over.
+ * discarded and the import starts over. A FAILED import closes the sink's
+ * handle without deleting anything ([RestoreStatementSink.suspendImport]),
+ * so the retry never races a stale handle left by the failed attempt.
  *
  * Bookmark ordering (the critical invariant): the app-side [DbBookmark] is
  * reset to [DbBookmark.FIRST_RUN] ONLY after the swap succeeded — a failed
@@ -232,6 +234,10 @@ class DbRestoreManager(
                 "not configured: " + errors.joinToString("; "),
                 configured = false)
         }
+        // The sink is hoisted out of the try so a failed import can close its
+        // handle: the temp DB and the resume marker stay (a retry continues),
+        // but a stale handle must not survive into that retry.
+        var sink: RestoreStatementSink? = null
         try {
             status = status.copy(message = "stopping crawler (up to 60 s)")
             stopCrawler()
@@ -331,16 +337,16 @@ class DbRestoreManager(
             else
                 "resuming at chunk ${startIndex + 1}/${keys.size} (${startIndex} imported)")
 
-            val sink = sinkFactory(tmpDb)
+            val opened = sinkFactory(tmpDb).also { sink = it }
             if (resumeAt != null) {
-                sink.prepare(fresh = false)
+                opened.prepare(fresh = false)
             } else {
                 // A fresh import must not inherit a half-imported DB or its
                 // WAL, and a stale marker must not outlive the DB it described.
                 tmpDb.delete()
                 RestoreFileOps.deleteDbSidecars(tmpDb)
                 progressFile().delete()
-                sink.prepare(fresh = true)
+                opened.prepare(fresh = true)
             }
             status = status.copy(objectCount = keys.size, objectKeys = keys,
                 objectsDone = startIndex,
@@ -362,19 +368,19 @@ class DbRestoreManager(
                         // per chunk. endChunk() commits (or rolls the chunk back
                         // when a statement threw) — it must run on every path, so
                         // the connection is never left mid-transaction.
-                        sink.beginChunk()
+                        opened.beginChunk()
                         try {
                             try {
                                 SqlStatementSplitter.split(
                                     GZIPInputStream(ByteArrayInputStream(g.body))) { sql ->
-                                    sink.statement(sql)
+                                    opened.statement(sql)
                                 }
                             } catch (e: IOException) {
                                 throw IllegalStateException("corrupt gzip in chunk $key: " +
                                     (e.message ?: e.javaClass.simpleName))
                             }
                         } finally {
-                            sink.endChunk()
+                            opened.endChunk()
                         }
                         // The chunk is committed: advance the resume marker
                         // BEFORE the next download, so a kill here re-imports at
@@ -399,7 +405,7 @@ class DbRestoreManager(
 
             // Checkpoint + close the temp DB; its summary lines are part of the
             // restore status (the sink logs them under the DbRestore tag too).
-            val summary = sink.finishImport()
+            val summary = opened.finishImport()
             for (line in summary) pushLine(lines, line)
 
             // FTS5 tables, triggers and both index rebuilds run in the crawler's
@@ -439,6 +445,13 @@ class DbRestoreManager(
             // Throwable, not Exception: an OutOfMemoryError must still leave a
             // FAILED status (the temp DB + progress marker are kept so the retry
             // resumes; nothing is deleted here).
+            //
+            // Closing the handle is NOT deleting anything: suspendImport() leaves
+            // the temp DB and the marker intact, so the retry resumes — it only
+            // guarantees the retry never opens a second handle on the same file
+            // while a stale one (possibly still inside a transaction, if
+            // endChunk() threw) holds a write lock.
+            sink?.suspendImport()
             return finish(DbRestoreState.FAILED,
                 "restore failed: ${t.message ?: t.javaClass.simpleName}")
         } finally {

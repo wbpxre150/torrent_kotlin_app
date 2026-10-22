@@ -62,4 +62,17 @@ interface RestoreStatementSink {
      * `-wal`/`-shm` sidecars. Safe to call when [prepare] never ran.
      */
     fun abandon()
+
+    /**
+     * Suspends the import: closes the destination database but deletes NOTHING
+     * — unlike [abandon], which destroys the temp DB and therefore must never
+     * run on a failure the resume is supposed to survive. [DbRestoreManager]
+     * calls this on every failed import so no handle stays open on the temp DB:
+     * a same-process retry would otherwise open a second handle on the same
+     * file, and a handle left mid-transaction (a throwing [endChunk]) can hold
+     * a write lock (SQLITE_BUSY) until GC finalizes it.
+     *
+     * Idempotent and safe to call when [prepare] never ran.
+     */
+    fun suspendImport()
 }

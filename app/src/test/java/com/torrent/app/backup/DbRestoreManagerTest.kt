@@ -89,6 +89,8 @@ class DbRestoreManagerTest {
         val chunks = mutableListOf<List<String>>()
         var finishCalls = 0
         var abandonCalls = 0
+        /** How often the manager closed the handle on a FAILED import. */
+        var suspendImportCalls = 0
         /** Lines [finishImport] returns (they land in the restore status). */
         var summary: List<String> =
             listOf("sqlite_version=fake (platform SQLite)", "wal_checkpoint(TRUNCATE): busy=0")
@@ -141,6 +143,10 @@ class DbRestoreManagerTest {
 
         override fun abandon() {
             abandonCalls++
+        }
+
+        override fun suspendImport() {
+            suspendImportCalls++
         }
     }
 
@@ -318,6 +324,8 @@ class DbRestoreManagerTest {
             sink.chunks)
         assertEquals(1, sink.finishCalls)
         assertEquals(0, sink.abandonCalls)
+        // The success path never suspends: finishImport() already closed it.
+        assertEquals(0, sink.suspendImportCalls)
         // The only native call is the FTS rebuild, on the TEMP DB, in the work dir.
         assertEquals(1, runner.calls)
         assertEquals(
@@ -417,6 +425,10 @@ class DbRestoreManagerTest {
             RestoreProgress.read(progressFile()))
         assertEquals("fake-db-1", tempDbFile().readText())
         assertEquals(0, runner.calls)
+        // The failed import closed its handle but deleted nothing: the temp DB
+        // and the marker survive for the retry.
+        assertEquals(1, sinks.single().suspendImportCalls)
+        assertEquals(0, sinks.single().abandonCalls)
         assertEquals(DbBookmark(5, 1), DbBookmark.read(bookmarkFile))
         assertEquals(2, st.objectsDone)
         assertEquals(1, flags.startCount)
@@ -441,6 +453,10 @@ class DbRestoreManagerTest {
         val first = m.runRestore()
         assertEquals(DbRestoreState.FAILED, first.state)
         assertEquals(listOf(0, 1, 2), restorer.getSnapshots.map { it.objectsDone })
+        // The failed run released the SQLite handle exactly once (so the retry
+        // cannot race a stale one) and kept the temp DB for the resume.
+        assertEquals(1, sinks[0].suspendImportCalls)
+        assertEquals("fake-db-1", tempDbFile().readText())
 
         // Retry: the bucket is unchanged, so the marker's chain is a prefix.
         restorer.failGetCall = null
@@ -611,6 +627,9 @@ class DbRestoreManagerTest {
         assertEquals(1, flags.stopCount)
         assertEquals(1, flags.startCount)
         assertEquals(0, runner.calls)
+        // The OOM path also closes the sink handle, without deleting the temp DB.
+        assertEquals(1, sinks.single().suspendImportCalls)
+        assertEquals("fake-db-1", tempDbFile().readText())
         // The wedged-RUNNING bug: a new restore must be accepted again.
         assertEquals(DbRestoreState.RUNNING, m.restoreNow().state)
     }

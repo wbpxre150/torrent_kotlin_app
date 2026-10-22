@@ -9,6 +9,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
+import java.io.IOException
 
 /**
  * Pure tests for [RestoreFileOps]: the temp-DB swap (content replaced, sidecars
@@ -158,5 +159,75 @@ class RestoreFileOpsTest {
         assertFalse(RestoreFileOps.targetDbExists(file("empty.db", "")))
         assertTrue(RestoreFileOps.targetDbExists(file("real.db", "x")))
         assertFalse(RestoreFileOps.targetDbExists(tmp.newFolder("a-directory")))
+    }
+
+    @Test fun swapInRenamesStraightOverTheExistingTarget() {
+        // The target must never be deleted before the rename: a crash in that
+        // window would leave the live path with NO database. The injected
+        // renameOp proves the target still existed when the rename was issued
+        // and that exactly one rename happened.
+        val tmpDb = file("torrents.db.restore.tmp", "new database bytes")
+        val target = file("torrents.db", "old database bytes")
+        val calls = mutableListOf<Pair<File, File>>()
+        var targetExistedAtRename: Boolean? = null
+
+        RestoreFileOps.swapIn(tmpDb, target) { from, to ->
+            calls.add(from to to)
+            targetExistedAtRename = to.exists()
+            from.renameTo(to)
+        }
+
+        assertEquals(1, calls.size)
+        assertEquals(listOf(tmpDb to target), calls)
+        assertEquals(true, targetExistedAtRename)
+        assertEquals("new database bytes", target.readText())
+        assertFalse(tmpDb.exists())
+    }
+
+    @Test fun swapInFallsBackToDeleteThenRenameWhenTheRenameIsRefused() {
+        val tmpDb = file("torrents.db.restore.tmp", "new")
+        val target = file("torrents.db", "old")
+        val calls = mutableListOf<Pair<File, File>>()
+        // Whether the target existed at the moment of each rename attempt.
+        val targetExisted = mutableListOf<Boolean>()
+        var attempts = 0
+
+        RestoreFileOps.swapIn(tmpDb, target) { from, to ->
+            calls.add(from to to)
+            targetExisted.add(to.exists())
+            attempts++
+            // The first attempt refuses (the target is still there); the
+            // fallback deletes the target and the second attempt succeeds.
+            if (attempts > 1) from.renameTo(to) else false
+        }
+
+        assertEquals(2, calls.size)
+        assertEquals(listOf(tmpDb to target, tmpDb to target), calls)
+        // No pre-emptive delete: the first rename saw the target in place, the
+        // second ran after the fallback delete.
+        assertEquals(listOf(true, false), targetExisted)
+        assertEquals("new", target.readText())
+        assertFalse(tmpDb.exists())
+    }
+
+    @Test fun swapInThrowsWhenBothRenameAttemptsFail() {
+        val tmpDb = file("torrents.db.restore.tmp", "new")
+        val target = file("torrents.db", "old")
+        var attempts = 0
+
+        try {
+            RestoreFileOps.swapIn(tmpDb, target) { _, _ ->
+                attempts++
+                false
+            }
+            fail("expected IOException")
+        } catch (expected: IOException) {
+            assertTrue(expected.message!!, expected.message!!.contains("rename failed"))
+        }
+
+        assertEquals(2, attempts)
+        // The temp DB stays for the next attempt.
+        assertTrue(tmpDb.isFile)
+        assertEquals("new", tmpDb.readText())
     }
 }

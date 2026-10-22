@@ -57,29 +57,48 @@ object RestoreFileOps {
     }
 
     /**
-     * Replaces [targetDb] with [tmpDb], mirroring the native order
+     * Replaces [targetDb] with [tmpDb] the way the native tool does
      * (`restore-database.patch:73-92`): remove the target's stale `-wal`/`-shm`
-     * first (they belong to the DB being replaced), delete the target, rename
-     * the temp DB into place, then delete the temp DB's own leftover
-     * `-wal`/`-shm` defensively.
+     * first (they belong to the DB being replaced), rename the temp DB
+     * straight over the target — an atomic POSIX replace, so the target path
+     * holds either the old DB or the new one and never nothing — then delete
+     * the temp DB's own leftover `-wal`/`-shm` defensively.
+     *
+     * The rename goes over the target directly on purpose: deleting the target
+     * first would open a crash window in which the live path holds NO database,
+     * on exactly the crash-prone device this restore targets. Only when
+     * [renameOp] reports failure (a filesystem/JVM that refuses to replace an
+     * existing file) does the swap fall back to delete-then-rename once, and
+     * throw when that fails too.
      *
      * The temp DB must already be checkpointed and closed
      * ([RestoreStatementSink.finishImport] does both), otherwise data still in
      * its `-wal` would be dropped by the sidecar cleanup.
      *
+     * @param renameOp the rename primitive, injectable so the fallback branch is
+     *   unit-testable; production always uses [File.renameTo].
      * @throws IllegalArgumentException when [tmpDb] is not a regular file.
-     * @throws IOException when the target cannot be deleted or the rename fails
-     *   — the caller must then treat the restore as failed (the temp DB is left
-     *   in place for the next attempt).
+     * @throws IOException when the target cannot be deleted (fallback path) or
+     *   the rename fails — the caller must then treat the restore as failed (the
+     *   temp DB is left in place for the next attempt).
      */
-    fun swapIn(tmpDb: File, targetDb: File) {
+    fun swapIn(
+        tmpDb: File,
+        targetDb: File,
+        renameOp: (File, File) -> Boolean = { from, to -> from.renameTo(to) },
+    ) {
         require(tmpDb.isFile) { "temp db missing: ${tmpDb.path}" }
         deleteDbSidecars(targetDb)
-        if (targetDb.exists() && !targetDb.delete()) {
-            throw IOException("failed to delete target db: ${targetDb.path}")
-        }
-        if (!tmpDb.renameTo(targetDb)) {
-            throw IOException("temp db rename failed: ${tmpDb.path} -> ${targetDb.path}")
+        if (!renameOp(tmpDb, targetDb)) {
+            // Fallback for a filesystem that refuses to replace an existing
+            // file: delete the target and retry the rename once. This is the
+            // only path that ever leaves the target missing.
+            if (targetDb.exists() && !targetDb.delete()) {
+                throw IOException("failed to delete target db: ${targetDb.path}")
+            }
+            if (!renameOp(tmpDb, targetDb)) {
+                throw IOException("temp db rename failed: ${tmpDb.path} -> ${targetDb.path}")
+            }
         }
         deleteDbSidecars(tmpDb)
     }
