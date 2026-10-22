@@ -238,11 +238,25 @@ class DbRestoreManagerTest {
         stopThrows: Boolean = false,
         sinkTemplate: (FakeSink) -> Unit = {},
         freeSpaceBytes: () -> Long = { Long.MAX_VALUE },
+        /**
+         * The PERSISTED "categories to save" selection the manager reads once
+         * per run. Empty (the default) = "save everything" = the unfiltered
+         * import, no class-index downloads.
+         */
+        saveCategories: List<String> = emptyList(),
+        /**
+         * The class-index sidecars served by [restorer]: sidecar key → the
+         * DECOMPRESSED index text ("<torrent_id> <category>" lines). Each is
+         * registered as a body and appended to the derived listing, so a
+         * sidecar's presence is decided by key exactly as in production.
+         */
+        sidecarIndexes: Map<String, String> = emptyMap(),
     ): Triple<DbRestoreManager, FakeFlags, File> {
         val flags = FakeFlags()
         sinks.clear()
         manager = DbRestoreManager(
             loadSettings = { settings },
+            loadSaveCategories = { saveCategories },
             isBusy = { busy },
             clientFactory = { restorer },
             oneShot = { args, dir, onLine -> runner.run(args, dir, onLine) },
@@ -276,6 +290,19 @@ class DbRestoreManagerTest {
                 200, objects.map { (key, sql) ->
                     S3ListedObject(key, gzipBytes(sql.encodeToByteArray()).size.toLong())
                 })
+        }
+        // Sidecar bodies are served like any other object, and each one joins
+        // the listing with its real gzip size: presence is decided by KEY
+        // (a zero-entry index is a valid tiny gzip), never by size.
+        for ((sidecarKey, indexText) in sidecarIndexes) {
+            val gz = gzipBytes(indexText.encodeToByteArray())
+            restorer.bodies[sidecarKey] = gz
+            val success = restorer.listResult as? S3ListResult.Success
+            if (success != null) {
+                restorer.listResult = S3ListResult.Success(
+                    success.statusCode,
+                    success.objects + S3ListedObject(sidecarKey, gz.size.toLong()))
+            }
         }
         return Triple(manager, flags, bookmarkFile)
     }
@@ -1435,5 +1462,192 @@ class DbRestoreManagerTest {
         assertEquals(1, RestoreProgress.read(progressFile())?.nextIndex)
         assertEquals("fake-db-1", tempDbFile().readText())
         assertTrue(st.lines.toString(), st.lines.any { it.startsWith("checkpoint: folded WAL") })
+    }
+
+    // ---- category filter (the wizard's "categories to save") ----
+
+    /** The class-index sidecar key of the dump object [sqlKey]. */
+    private fun sidecarKeyFor(sqlKey: String): String =
+        requireNotNull(DbObjectKey.parse(sqlKey)).sidecarKey
+
+    /**
+     * One chunk's dump statements: a shared lookup table plus two torrents —
+     * id 1 (category 2 = tv) and id 2 (category 1 = movie). With the selection
+     * `["tv"]` the id-2 rows of `torrents`/`torrent_files`/`torrent_class` are
+     * dropped (3 of the 7 statements) and everything else is kept.
+     */
+    private fun chunkBody(): String = listOf(
+        "INSERT OR IGNORE INTO path_prefixes VALUES(7);",
+        "INSERT OR IGNORE INTO torrents VALUES(1, 'kept');",
+        "INSERT OR IGNORE INTO torrent_files VALUES(1, 1, 'a.mkv');",
+        "INSERT OR IGNORE INTO torrent_class VALUES(1, 2);",
+        "INSERT OR IGNORE INTO torrents VALUES(2, 'dropped');",
+        "INSERT OR IGNORE INTO torrent_files VALUES(2, 2, 'b.mkv');",
+        "INSERT OR IGNORE INTO torrent_class VALUES(2, 1);",
+    ).joinToString("\n")
+
+    /** What [chunkBody] leaves behind when only category `tv` (code 2) is selected. */
+    private val keptStatements = listOf(
+        "INSERT OR IGNORE INTO path_prefixes VALUES(7)",
+        "INSERT OR IGNORE INTO torrents VALUES(1, 'kept')",
+        "INSERT OR IGNORE INTO torrent_files VALUES(1, 1, 'a.mkv')",
+        "INSERT OR IGNORE INTO torrent_class VALUES(1, 2)",
+    )
+
+    private val filterKeys = listOf(
+        "db/incremental_20231114_0-10.sql.gz",
+        "db/incremental_20231115_11-20.sql.gz",
+        "db/incremental_20231116_21-30.sql.gz",
+    )
+
+    /** id 1 → tv (2, selected), id 2 → movie (1, unselected). */
+    private val filterIndex = "1 2\n2 1\n"
+
+    @Test fun selectedCategories_keepOnlyTheStatementsOfSelectedTorrents() {
+        val restorer = FakeRestorer()
+        val runner = FakeRunner()
+        val keys = filterKeys.subList(0, 2)
+        val (m, _, _) = newManager(
+            restorer, runner,
+            objects = keys.map { it to chunkBody() },
+            saveCategories = listOf("tv"),
+            sidecarIndexes = keys.associate { sidecarKeyFor(it) to filterIndex },
+        )
+
+        val st = m.runRestore()
+
+        assertEquals(DbRestoreState.SUCCESS, st.state)
+        // Each sidecar is fetched BEFORE its own chunk (never interleaved).
+        assertEquals(
+            listOf(keys[0], sidecarKeyFor(keys[0]), keys[1], sidecarKeyFor(keys[1])),
+            restorer.getOrder)
+        // Only the selected torrent survives; path_prefixes is always kept.
+        assertEquals(listOf(keptStatements, keptStatements), sinks.single().chunks)
+        assertTrue(st.lines.toString(),
+            st.lines.contains("category filter active: importing only tv"))
+        assertTrue(st.lines.toString(),
+            st.lines.contains("category filter: skipped 6 statement(s) for unselected categories"))
+        assertFalse(st.lines.toString(), st.lines.any { it.startsWith("class index: missing") })
+        // A skipped statement never reaches the sink, so the chunk still
+        // committed as one transaction.
+        assertEquals(2, sinks.single().chunks.size)
+    }
+
+    @Test fun emptySelection_importsEverythingAndFetchesNoSidecar() {
+        val restorer = FakeRestorer()
+        val runner = FakeRunner()
+        val keys = filterKeys.subList(0, 2)
+        val (m, _, _) = newManager(
+            restorer, runner,
+            objects = keys.map { it to chunkBody() },
+            // Sidecars exist in the bucket but the selection is empty ("save
+            // everything"): they must not be downloaded and nothing is parsed.
+            sidecarIndexes = keys.associate { sidecarKeyFor(it) to filterIndex },
+        )
+
+        val st = m.runRestore()
+
+        assertEquals(DbRestoreState.SUCCESS, st.state)
+        assertEquals(keys, restorer.getOrder)
+        assertEquals(14, sinks.single().statements.size)
+        assertEquals(7, sinks.single().chunks[0].size)
+        assertEquals(7, sinks.single().chunks[1].size)
+        assertFalse(st.lines.toString(), st.lines.any { it.contains("category filter") })
+    }
+
+    @Test fun selectionWithoutSidecars_importsUnfilteredAndReportsItOnce() {
+        val restorer = FakeRestorer()
+        val runner = FakeRunner()
+        val keys = filterKeys.subList(0, 2)
+        val (m, _, _) = newManager(
+            restorer, runner,
+            objects = keys.map { it to chunkBody() },
+            saveCategories = listOf("tv"),
+            // No sidecars in the bucket at all: the chain is older than the
+            // class index. That is informational, never a failure.
+        )
+
+        val st = m.runRestore()
+
+        assertEquals(DbRestoreState.SUCCESS, st.state)
+        assertEquals(keys, restorer.getOrder)
+        assertEquals(14, sinks.single().statements.size)
+        assertEquals(
+            listOf("class index: missing for 2 of 2 object(s); imported unfiltered"),
+            st.lines.filter { it.startsWith("class index: missing") })
+        assertTrue(st.lines.toString(),
+            st.lines.contains("category filter: skipped 0 statement(s) for unselected categories"))
+    }
+
+    @Test fun malformedSidecar_failsTheRestoreAndKeepsTheResumeState() {
+        val restorer = FakeRestorer()
+        val runner = FakeRunner()
+        val keys = filterKeys
+        val (m, _, _) = newManager(
+            restorer, runner,
+            objects = keys.map { it to chunkBody() },
+            saveCategories = listOf("tv"),
+            sidecarIndexes = mapOf(
+                sidecarKeyFor(keys[0]) to filterIndex,
+                // Chunk 2's index is corrupt: the run must stop there, before
+                // that chunk's transaction opens.
+                sidecarKeyFor(keys[1]) to "1 notanumber\n",
+            ),
+        )
+
+        val st = m.runRestore()
+
+        assertEquals(DbRestoreState.FAILED, st.state)
+        assertTrue(st.message,
+            st.message.contains("malformed class index in " + sidecarKeyFor(keys[1])))
+        // Chunk 1 committed and was marked; chunk 2 never opened.
+        assertEquals(1, sinks.single().chunks.size)
+        assertEquals(keptStatements, sinks.single().chunks.single())
+        assertEquals(1, RestoreProgress.read(progressFile())?.nextIndex)
+        assertEquals("fake-db-1", tempDbFile().readText())
+        assertEquals(1, sinks.single().suspendImportCalls)
+        assertEquals(0, runner.calls)
+    }
+
+    @Test fun resumeWithTheSameSelection_reproducesTheUninterruptedFilteredImport() {
+        val restorer = FakeRestorer()
+        val runner = FakeRunner()
+        val keys = filterKeys
+        var failOnChunk2 = false
+        val (m, _, _) = newManager(
+            restorer, runner,
+            objects = keys.map { it to chunkBody() },
+            saveCategories = listOf("tv"),
+            sidecarIndexes = keys.associate { sidecarKeyFor(it) to filterIndex },
+            sinkTemplate = { sink ->
+                // 4 kept statements of chunk 1 come first, so the 5th is
+                // chunk 2's first: the fake sink dies mid-chunk-2.
+                if (failOnChunk2) sink.oomAtStatement = 5
+            },
+        )
+
+        // Reference: one uninterrupted filtered run.
+        val uninterrupted = m.runRestore()
+        assertEquals(DbRestoreState.SUCCESS, uninterrupted.state)
+        val expected = sinks[0].statements
+        assertEquals(12, expected.size)
+        assertFalse(progressFile().exists())
+
+        failOnChunk2 = true
+        restorer.getOrder.clear()
+        val failed = m.runRestore()
+        assertEquals(DbRestoreState.FAILED, failed.state)
+        assertEquals(1, RestoreProgress.read(progressFile())?.nextIndex)
+        assertEquals(1, sinks[1].suspendImportCalls)
+
+        // Same selection, same sidecars: every chunk re-decides identically, so
+        // the rewound replay reproduces the uninterrupted content exactly.
+        failOnChunk2 = false
+        val resumed = m.runRestore()
+
+        assertEquals(DbRestoreState.SUCCESS, resumed.state)
+        assertEquals(3, sinks.size)
+        assertEquals(expected, sinks[2].statements)
+        assertEquals(12, sinks[2].statements.size)
     }
 }

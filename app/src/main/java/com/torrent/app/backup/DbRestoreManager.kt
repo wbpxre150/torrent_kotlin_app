@@ -4,6 +4,7 @@ import android.util.Log
 
 import com.torrent.app.config.BackupSettings
 import com.torrent.app.config.ConfigValidator
+import com.torrent.app.config.CrawlerTaxonomy
 import com.torrent.app.s3.S3GetResult
 import com.torrent.app.s3.S3ListResult
 import java.io.ByteArrayInputStream
@@ -124,6 +125,24 @@ data class DbRestoreStatus(
  * handle without deleting anything ([RestoreStatementSink.suspendImport]),
  * so the retry never races a stale handle left by the failed attempt.
  *
+ * Category filter (the wizard's "categories to save"): the selection is read
+ * ONCE per run from the PERSISTED config ([loadSaveCategories]). An EMPTY
+ * selection means "save everything" and is the unfiltered import, byte for
+ * byte — no class-index downloads and no statement inspection at all. When it
+ * is non-empty, every dump object that has a `.idx.gz` class-index sidecar in
+ * the listing gets that sidecar downloaded BEFORE its chunk's transaction
+ * opens, parsed ([parseClassIndex]) and applied statement by statement
+ * ([RestoreCategoryFilter]): a `torrents`/`torrent_files`/`torrent_class` row
+ * whose torrent's category is not selected never reaches the sink, while
+ * `path_prefixes` and anything unrecognised is always kept. A chain WITHOUT
+ * sidecars (dumps older than the sidecar) simply imports unfiltered — one
+ * informational status line, never a refusal. A sidecar that IS listed but
+ * fails to download or parse fails the restore like a corrupt chunk (temp DB
+ * and marker kept, so the retry resumes). The per-chunk decision depends only
+ * on the selection read at the start of the run plus that chunk's sidecar, so
+ * a kill/replay re-decides identically and the `INSERT OR IGNORE` rewind
+ * replay stays idempotent.
+ *
  * Bookmark ordering (the critical invariant): the app-side [DbBookmark] is
  * reset to [DbBookmark.FIRST_RUN] ONLY after the swap succeeded — a failed
  * restore leaves the bookmark alone so the next upload continues the chain.
@@ -142,6 +161,16 @@ data class DbRestoreStatus(
  */
 class DbRestoreManager(
     private val loadSettings: () -> BackupSettings,
+    /**
+     * The PERSISTED wizard "categories to save" selection
+     * (`config.crawler.saveCategories`), read ONCE per run right after the
+     * settings validation. An empty list means "save everything" and turns the
+     * whole filter off: no class-index downloads, no statement parsing, exactly
+     * the unfiltered import. Injected so the decision is plain-JUnit testable
+     * and so the restore always honours what the crawler is configured to keep
+     * (not an in-session wizard draft, not the last-known-good copy).
+     */
+    private val loadSaveCategories: () -> List<String>,
     private val isBusy: () -> Boolean,
     private val clientFactory: (BackupSettings) -> S3DbRestorer,
     /**
@@ -258,6 +287,32 @@ class DbRestoreManager(
                 "not configured: " + errors.joinToString("; "),
                 configured = false)
         }
+        // The category selection of this run (the plan's D2/D4): read once,
+        // here, from the PERSISTED config. A failure to read it is a real
+        // failure — importing unfiltered on a transient store error would
+        // resurrect torrents the operator chose not to keep.
+        val selectedNames = try {
+            loadSaveCategories()
+        } catch (e: Exception) {
+            return finish(DbRestoreState.FAILED,
+                "failed to load save categories: ${e.message ?: e.javaClass.simpleName}")
+        }
+        // Names map 1:1 onto the crawler's category codes by INDEX (no offset:
+        // `taxonomy.h:13-25` is the same order as [CrawlerTaxonomy.CATEGORIES]).
+        val selectedCodes = CrawlerTaxonomy.CATEGORIES.withIndex()
+            .filter { it.value in selectedNames }
+            .map { it.index }
+            .toSet()
+        // D4: an empty selection is the crawler's own "save everything" and
+        // must behave byte-for-byte like the unfiltered import — nothing below
+        // runs (no sidecar GET, no statement parsing).
+        val filterActive = selectedNames.isNotEmpty()
+        if (filterActive) {
+            val note = "category filter active: importing only " +
+                selectedNames.joinToString(", ")
+            pushLine(lines, note)
+            Log.i(TAG, note)
+        }
         // The sink is hoisted out of the try so a failed import can close its
         // handle: the temp DB and the resume marker stay (a retry continues),
         // but a stale handle must not survive into that retry.
@@ -286,6 +341,11 @@ class DbRestoreManager(
                     throw IllegalStateException("listing failed: " +
                         "${r.cause.message ?: r.cause.javaClass.simpleName}")
             }
+            // The raw listing keyed by object key: a range's class-index
+            // sidecar PRESENCE is decided by key existence (a zero-entry index
+            // is a valid tiny gzip, so size is never the signal), and the
+            // sidecar's listed size feeds the disk-space guard below.
+            val listedByKey: Map<String, Long?> = listed.associate { it.key to it.size }
             // Chain order: ID-MAJOR — sort by (start id, then date) so an
             // overlapping re-dump of the same range replays oldest-first;
             // skip keys that do not match the dump convention exactly, keys
@@ -298,7 +358,7 @@ class DbRestoreManager(
                 // Carry the listed compressed size: the disk-space guard
                 // estimates the remaining SQL volume from it (plan 3,
                 // Stage 11) and the LIST has already paid for it.
-                ChainEntry(o.key, k, o.size)
+                ChainEntry(o.key, k, o.size, k.sidecarKey, listedByKey[k.sidecarKey])
             }.sortedWith(compareBy({ it.meta.start }, { it.meta.date }))
             if (chain.isEmpty()) {
                 throw IllegalStateException("nothing to restore: no parseable dump objects " +
@@ -343,7 +403,12 @@ class DbRestoreManager(
             val keys = chain.map { it.key }
             // Compressed sizes aligned with [keys]: what the disk-space guard
             // sums over the objects that are still to be imported.
-            val sizes = chain.map { it.sizeBytes }
+            // Sidecars are tiny, but they are downloaded too: counting them
+            // keeps the estimate on the safe side ([RestoreDiskGuard] only
+            // consumes this aligned list).
+            val sizes = chain.map { entry ->
+                entry.sizeBytes?.let { it + (entry.sidecarSizeBytes ?: 0L) }
+            }
 
             // The import target: a temp DB next to the live one (same name the
             // native replay used), so the final swap is a rename in one dir.
@@ -401,8 +466,12 @@ class DbRestoreManager(
                 })
 
             val client = clientFactory(settings)
+            // Category-filter accounting for the two post-loop status lines.
+            var skippedStatements = 0
+            var missingIndexObjects = 0
             for (i in startIndex until keys.size) {
                 val key = keys[i]
+                val entry = chain[i]
                 status = status.copy(message = "importing ${i + 1} of ${keys.size} object(s)")
                 when (val g = client.get(key)) {
                     is S3GetResult.Success -> {
@@ -411,13 +480,36 @@ class DbRestoreManager(
                         // per chunk. endChunk() commits (or rolls the chunk back
                         // when a statement threw) — it must run on every path, so
                         // the connection is never left mid-transaction.
+                        // Category filter: the range's class index is fetched
+                        // BEFORE the chunk's transaction opens, so a sidecar
+                        // download/parse failure never leaves a chunk
+                        // half-applied (FAILED keeps the temp DB + marker, and
+                        // the retry resumes).
+                        val filter = if (filterActive && entry.sidecarKey in listedByKey) {
+                            RestoreCategoryFilter(
+                                selectedCodes,
+                                parseSidecar(downloadSidecar(client, entry.sidecarKey),
+                                    entry.sidecarKey))
+                        } else {
+                            // D5: a chain without sidecars imports unfiltered —
+                            // informational only, never a refusal state.
+                            if (filterActive) missingIndexObjects++
+                            null
+                        }
                         opened.beginChunk()
                         var nulDropped = 0
                         try {
                             try {
                                 nulDropped = SqlStatementSplitter.split(
                                     GZIPInputStream(ByteArrayInputStream(g.body))) { sql ->
-                                    opened.statement(sql)
+                                    // A skipped statement never reaches the sink,
+                                    // so the chunk still commits as one
+                                    // transaction (chunkFailed stays false).
+                                    if (filter == null || filter.keep(sql)) {
+                                        opened.statement(sql)
+                                    } else {
+                                        skippedStatements++
+                                    }
                                 }.nulDropped
                             } catch (e: IOException) {
                                 throw IllegalStateException("corrupt gzip in chunk $key: " +
@@ -469,6 +561,21 @@ class DbRestoreManager(
                         throw IllegalStateException("download of $key failed: " +
                             "${g.cause.message ?: g.cause.javaClass.simpleName}")
                 }
+            }
+
+            if (filterActive) {
+                // D5: exactly ONE informational line when some object had no
+                // sidecar — no refusal state, no change to the outcome.
+                if (missingIndexObjects > 0) {
+                    val note = "class index: missing for $missingIndexObjects of " +
+                        "${keys.size} object(s); imported unfiltered"
+                    pushLine(lines, note)
+                    Log.i(TAG, note)
+                }
+                val summary = "category filter: skipped $skippedStatements " +
+                    "statement(s) for unselected categories"
+                pushLine(lines, summary)
+                Log.i(TAG, summary)
             }
 
             // Checkpoint + close the temp DB; its summary lines are part of the
@@ -561,6 +668,43 @@ class DbRestoreManager(
         File(File(workDir, "data"), "torrents.db.restore.tmp")
 
     /**
+     * Downloads one range's class-index sidecar with the same `S3GetResult`
+     * handling (and therefore the same FAILED semantics) as the SQL object
+     * itself: a transport or R2 error here is a real restore failure, never a
+     * silent "import unfiltered".
+     */
+    private fun downloadSidecar(client: S3DbRestorer, sidecarKey: String): ByteArray =
+        when (val g = client.get(sidecarKey)) {
+            is S3GetResult.Success -> g.body
+            is S3GetResult.ClientError ->
+                throw IllegalStateException("R2 rejected the download of $sidecarKey " +
+                    "(HTTP ${g.statusCode})")
+            is S3GetResult.ServerError ->
+                throw IllegalStateException("R2 server error downloading $sidecarKey " +
+                    "(HTTP ${g.statusCode} after ${g.attempts} attempts)")
+            is S3GetResult.Failure ->
+                throw IllegalStateException("download of $sidecarKey failed: " +
+                    "${g.cause.message ?: g.cause.javaClass.simpleName}")
+        }
+
+    /**
+     * Parses a downloaded class index, mapping the parser's two failure modes
+     * onto the restore's existing `IllegalStateException` → FAILED path: a
+     * malformed line and a corrupt gzip are both transport/corruption
+     * failures, not new refusal states.
+     */
+    private fun parseSidecar(gzBytes: ByteArray, sidecarKey: String): Map<Long, Int> =
+        try {
+            parseClassIndex(gzBytes)
+        } catch (e: IllegalArgumentException) {
+            throw IllegalStateException("malformed class index in $sidecarKey: " +
+                (e.message ?: e.javaClass.simpleName))
+        } catch (e: IOException) {
+            throw IllegalStateException("corrupt gzip in class index $sidecarKey: " +
+                (e.message ?: e.javaClass.simpleName))
+        }
+
+    /**
      * Enforces the disk-space budget ([RestoreDiskGuard]) for the objects from
      * [fromIndex] on: logs the budget when the rest of the chain fits and throws
      * a status-message exception when it does not. The caller's `catch` turns
@@ -624,10 +768,23 @@ class DbRestoreManager(
      * counts as 0 for the disk-space guard, the same way the zero-size filter
      * above already treats it.
      */
+    /**
+     * One object of the restore chain: its key, the parsed key metadata, the
+     * compressed size the LIST reported and the class-index sidecar of the same
+     * range. `null` (R2 omitted Content-Length) counts as 0 for the disk-space
+     * guard, the same way the zero-size filter above already treats it.
+     *
+     * [sidecarKey] is always derived from the key metadata (never parsed out of
+     * the listing), and [sidecarSizeBytes] is `null` when the sidecar is absent
+     * from the listing — absence is decided by KEY, never by size (a zero-entry
+     * index is a valid tiny gzip).
+     */
     private data class ChainEntry(
         val key: String,
         val meta: DbObjectKey,
         val sizeBytes: Long?,
+        val sidecarKey: String,
+        val sidecarSizeBytes: Long?,
     )
 
     companion object {

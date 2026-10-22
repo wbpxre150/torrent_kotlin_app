@@ -286,6 +286,11 @@ class DaemonService : Service() {
         // on a request thread) and the same bookmark file as the backup.
         dbRestore = DbRestoreManager(
             loadSettings = { configStore.load().backup },
+            // Plan 3, Stage 3: the category filter reads the PERSISTED wizard
+            // selection (not the in-session draft, not the last-known-good
+            // copy) once per restore run; an empty list means "save everything"
+            // and restores byte-for-byte as before.
+            loadSaveCategories = { configStore.load().crawler.saveCategories },
             isBusy = {
                 crawlerApplyStatus.phase.isActive ||
                     crawlerMaintenance.status.running ||
