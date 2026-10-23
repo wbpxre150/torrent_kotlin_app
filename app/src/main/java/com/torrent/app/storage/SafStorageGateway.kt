@@ -437,6 +437,10 @@ class SafStorageGateway(
         val parentUri = resolveUriReadOnlyWalk(parent.first, fresh) ?: return null
         if (!fresh) roCache[n]?.let { return it }
         val leaf = parent.second
+        // The provider transliterates FAT-illegal characters on create (SafNames), so a
+        // child matching the sanitized leaf is this file. Cache keys are the requested
+        // path, so record the alias under [n] too — the FTP cache is walk-rebuilt.
+        val onDiskLeaf = SafNames.sanitize(leaf)
         val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
             treeUri, DocumentsContract.getDocumentId(parentUri))
         return try {
@@ -448,8 +452,12 @@ class SafStorageGateway(
                     val docId = c.getString(0)
                     val name = c.getString(1) ?: continue
                     val childPath = if (parent.first.isEmpty()) name else "${parent.first}/$name"
-                    roCache[childPath] = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
-                    if (name == leaf) return DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
+                    val childUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
+                    roCache[childPath] = childUri
+                    if (name == onDiskLeaf) {
+                        roCache[n] = childUri   // requested path -> transliterated doc
+                        return childUri
+                    }
                 }
                 null
             }
@@ -552,6 +560,9 @@ class SafStorageGateway(
         val parent = SafPaths.splitParent(n) ?: return null
         val parentUri = resolveUri(parent.first) ?: return null
         val leaf = parent.second
+        // A FAT-illegal leaf is stored under the provider's transliteration (SafNames),
+        // so match either form; cache[n] then aliases the requested path to it.
+        val onDiskLeaf = SafNames.sanitize(leaf)
         // double-checked: another thread may have populated cache while we waited
         cache[n]?.let { return it }
         val lock = lockFor(n)
@@ -571,7 +582,7 @@ class SafStorageGateway(
                         val childPath = if (parent.first.isEmpty()) name else "${parent.first}/$name"
                         val childUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
                         cache[childPath] = childUri
-                        if (name == leaf) return childUri
+                        if (name == onDiskLeaf) return childUri.also { cache[n] = it }
                     }
                 }
             } catch (e: Exception) { Log.e(TAG, "resolveUri walk: ${e.message}"); return null }
@@ -601,21 +612,37 @@ class SafStorageGateway(
             val mimeType = "application/octet-stream"
             val created = DocumentsContract.createDocument(resolver, parentUri, mimeType, leaf)
                 ?: return null
-            // SAF providers deduplicate colliding names by appending " (1)" etc.
-            // (Bug 4). Transmission's resume file references the exact requested
-            // name, so a renamed file is unrecoverable. Detect the collision, delete
-            // the duplicate, and fail loudly so the caller sees a clean error rather
-            // than a phantom file.
+            // SAF providers can answer a create with a different name. Two cases:
+            //
+            //  1. Transliteration (SafNames): the volume is exFAT served by
+            //     ExternalStorageProvider, which rewrites FAT-illegal characters
+            //     ('|', ':', '?', ...) to '_' on create. Torrent metadata may contain
+            //     them (e.g. 'Subs/Canadian | SDH.eng.HI.srt'). The document is the one
+            //     we asked for, just under the storable spelling — accept it and alias
+            //     the requested path to it. Rejecting this makes the file permanently
+            //     unopenable and the torrent unsaveable.
+            //  2. Deduplication: a colliding name gets a " (1)" suffix (Bug 4).
+            //     Transmission's resume file references the exact requested name, so a
+            //     deduped file is unrecoverable. Delete the duplicate and fail loudly so
+            //     the caller sees a clean error rather than a phantom file.
             val actualName = resolver.query(
                 created,
                 arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
                 null, null, null)?.use { c -> if (c.moveToFirst() && !c.isNull(0)) c.getString(0) else null }
             if (actualName != null && actualName != leaf) {
-                Log.e(TAG, "ensureDocument: name collision; requested '$leaf' got '$actualName' (path '$n')")
-                try { DocumentsContract.deleteDocument(resolver, created) } catch (_: Exception) {}
-                cache.remove(n)
-                return null
+                if (SafNames.isAliasFor(leaf, actualName)) {
+                    Log.w(TAG, "ensureDocument: '$leaf' stored as '$actualName' (FAT-illegal char transliterated; path '$n')")
+                } else {
+                    Log.e(TAG, "ensureDocument: name collision; requested '$leaf' got '$actualName' (path '$n')")
+                    try { DocumentsContract.deleteDocument(resolver, created) } catch (_: Exception) {}
+                    cache.remove(n)
+                    return null
+                }
             }
+            // Aliased or exact: cache under the *requested* path so the daemon's view of
+            // the tree stays in its own namespace. The on-disk name may differ; the walks
+            // in resolveUri/resolveUriReadOnlyWalk match the sanitized leaf too, so the
+            // alias survives a cache reset or process restart.
             cache[n] = created
             result = created
         } catch (e: Exception) { Log.e(TAG, "ensureDocument create: ${e.message}") }

@@ -84,7 +84,9 @@ torrent_kotlin_app/
 - `storage/` — SAF/USB layer: `SafStorageGateway` (643; the single choke point: path→URI cache,
   per-path locks, read-only FTP cache, free-space executor), `UsbPermissionManager` (persisted tree
   URI), `SafIpcServer` (Unix-socket bridge, fds via `SCM_RIGHTS`), `SafIpcRequestHandler` /
-  `FtpSafIpcRequestHandler`, `SafIpcCodec` (little-endian wire codec), `UsbFdBridge`, `SafModels`, `SafPaths` (pure).
+  `FtpSafIpcRequestHandler`, `SafIpcCodec` (little-endian wire codec), `UsbFdBridge`, `SafModels`,
+  `SafNames` (pure: FAT-illegal filename transliteration). `SafPaths`, `SafNames` and `SafIpcCodec`
+  are pure (no Android deps) and unit-testable as plain JUnit.
 - `ftp/` — `FtpCredentials` (user from store, password from settings), `FtpStatus`.
 - `transmission/` — `TransmissionRpcClient` (narrow RPC surface on 127.0.0.1:9091, Basic auth + 409
   session-id handling, `TorrentAdder` interface) + summary/result models.
@@ -162,6 +164,13 @@ See the vendored repo's `CLAUDE.md` for its architecture (thread trees, bloom fi
     commit, or copy its values; the sanitized template is
     `app/src/main/assets/dht_crawler/config.ini.default` (loopback bind, backups disabled).
 12. **New servers/executors are wired in `DaemonService`** — it is the single composition point.
+13. **FAT-illegal filenames are aliases, not collisions.** The USB volume is exFAT behind
+    `ExternalStorageProvider`, which rewrites `" * / : < > ? \ |` and control chars to `_` on
+    create. `SafNames.sanitize` mirrors that rewrite; `ensureDocument` accepts a created document
+    whose name equals the sanitized leaf and caches it under the *requested* path, and both resolve
+    walks match the sanitized leaf so the alias survives cache loss. Only a provider `" (1)"` dedup
+    suffix is a real collision (deleted + loud failure). Rejecting transliteration makes torrents
+    with such files unsaveable (torrent pauses with `I/O error (5)` forever).
 
 ## tools/ scripts
 
