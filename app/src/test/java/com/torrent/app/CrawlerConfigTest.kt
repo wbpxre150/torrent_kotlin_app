@@ -160,9 +160,9 @@ class CrawlerConfigTest {
         assertEquals("60000", ini["tree_metadata_timeout_ms"])
         // Stage 6 adult handling: classifier + calibrated thresholds + hard-block list
         assertEquals("1", ini["classifier_enabled"])
-        assertEquals("models/v2", ini["classifier_model_dir"])
+        assertEquals("models/v3", ini["classifier_model_dir"])
         assertEquals("tag", ini["adult_mode"])
-        assertEquals("0.897417", ini["adult_hide_threshold"])
+        assertEquals("0.653381", ini["adult_hide_threshold"])
         // The drop threshold is gone with drop-all-adult-tagged semantics: the key
         // must not be rendered at all (the crawler ignores it as unknown).
         assertNull(ini["adult_drop_threshold"])
@@ -244,7 +244,7 @@ class CrawlerConfigTest {
             assertTrue(cfg.configFile.exists())
         }
 
-        // --- Stage 5: classifier model staging into workDir/models/v2 ---
+        // --- Stage 5: classifier model staging into workDir/models/v3 ---
 
         @Test fun ensureLayout_stagesClassifierModelsByteIdenticalToAssets() {
             val cfg = configWithRealDefaultAsset()
@@ -311,21 +311,21 @@ class CrawlerConfigTest {
             )
         }
 
-        @Test fun ensureAssets_v1ToV2UpgradeDeletesTheStaleModelDirAndRestages() {
+        @Test fun ensureAssets_v2ToV3UpgradeDeletesTheStaleModelDirAndRestages() {
             val cfg = configWithRealDefaultAsset()
             cfg.ensureLayout()
-            // Simulate an install staged by the v1 build: stale sibling model dir plus a
+            // Simulate an install staged by the v2 build: stale sibling model dir plus a
             // stamp from before the model dir was part of it.
-            val staleV1 = File(cfg.workDir, "models/v1").apply { mkdirs() }
-            File(staleV1, "adult.ftz").writeBytes(byteArrayOf(9, 9, 9))
+            val staleV2 = File(cfg.workDir, "models/v2").apply { mkdirs() }
+            File(staleV2, "adult.ftz").writeBytes(byteArrayOf(9, 9, 9))
             val stamp = File(cfg.workDir, CrawlerConfig.STAMP_FILE)
             stamp.writeText(crawlerVersionCode().toString())
             cfg.modelsDir.deleteRecursively() // force a real re-stage
 
             cfg.ensureAssets()
 
-            assertFalse("the v1 model dir must be reclaimed", staleV1.exists())
-            assertFalse("no v1 models may ship", File(cfg.workDir, "models/v1").exists())
+            assertFalse("the v2 model dir must be reclaimed", staleV2.exists())
+            assertFalse("no v2 models may ship", File(cfg.workDir, "models/v2").exists())
             assertTrue("the current model dir must survive", cfg.modelsDir.isDirectory)
             for (name in CrawlerConfig.MODEL_FILES) {
                 val staged = File(cfg.modelsDir, name)
@@ -347,10 +347,10 @@ class CrawlerConfigTest {
             cfg.ensureLayout()
             val current = File(cfg.modelsDir, "adult.ftz")
             assertTrue(current.isFile)
-            val stale = File(cfg.workDir, "models/v1").apply { mkdirs() }
+            val stale = File(cfg.workDir, "models/v2").apply { mkdirs() }
             File(stale, "adult.ftz").writeBytes(byteArrayOf(1, 2, 3))
             val unrelated = File(cfg.workDir, "models/notes.txt").apply { writeText("keep me") }
-            File(cfg.workDir, CrawlerConfig.STAMP_FILE).writeText("0|models/v1")
+            File(cfg.workDir, CrawlerConfig.STAMP_FILE).writeText("0|models/v2")
 
             cfg.ensureAssets()
 
@@ -394,7 +394,7 @@ class CrawlerConfigTest {
         }
 
         /** Checked-in model assets (read-only source of truth for the staging tests). */
-        private val MODEL_SRC_DIR = File("src/main/cpp/dht_crawler-android/models/v2")
+        private val MODEL_SRC_DIR = File("src/main/cpp/dht_crawler-android/models/v3")
 
         /** Mirrors `CrawlerConfig.currentVersionCode()`, which is private to the class. */
         private fun crawlerVersionCode(): Long {
@@ -409,7 +409,7 @@ class CrawlerConfigTest {
         }
 
         /**
-         * Mirrors `assets/dht_crawler/models/v2/` into the asset fixture with the real
+         * Mirrors `assets/dht_crawler/models/v3/` into the asset fixture with the real
          * checked-in model files, so byte fidelity is asserted against real binaries.
          */
         private fun copyClassifierModelAssets(assetDir: File) {
@@ -583,7 +583,7 @@ class CrawlerConfigTest {
             assertEquals("1", ini["classifier_enabled"])
             assertEquals(CrawlerConfig.MODELS_SUBDIR, ini["classifier_model_dir"])
             assertEquals("tag", ini["adult_mode"])
-            assertEquals("0.897417", ini["adult_hide_threshold"])
+            assertEquals("0.653381", ini["adult_hide_threshold"])
             assertNull(ini["adult_drop_threshold"])
             assertEquals(CrawlerConfig.HARD_BLOCK_FILE, ini["hard_block_file"])
         }

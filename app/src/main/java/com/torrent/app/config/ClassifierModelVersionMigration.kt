@@ -3,12 +3,12 @@ package com.torrent.app.config
 /**
  * Stage 12: the crawler's adult thresholds are probabilities calibrated against one
  * specific classifier model generation, so they are meaningless after a model dir bump
- * (`models/v1` -> `models/v2`). This migration resets them to the new generation's
+ * (`models/v2` -> `models/v3`). This migration resets them to the new generation's
  * defaults exactly once, using the last-seen model dir as its sentinel.
  *
  * The reset is deliberately unconditional — a user-tuned value was tuned against the
  * old model's score distribution and is therefore invalid, not merely stale — and it
- * must happen before the crawler is (re)started so v2 never runs with v1 thresholds.
+ * must happen before the crawler is (re)started so v3 never runs with v2 thresholds.
  *
  * Pure: all state access is injected, so the decision is unit-testable without Android.
  */

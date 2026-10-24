@@ -937,7 +937,7 @@ class DaemonService : Service() {
         crawlerConfig.ensureLayout()
         // Stage 12: a classifier model-dir bump invalidates every stored threshold, so
         // migrate BEFORE the previous-settings snapshot (a later rollback must not
-        // resurrect v1 thresholds) and before anything can start the crawler.
+        // resurrect v2 thresholds) and before anything can start the crawler.
         val migrated = migrateClassifierVersion(crawlerConfig)
         // The reset is unconditional: it wins over the thresholds the user submitted.
         val effective = if (migrated) {
@@ -1449,8 +1449,8 @@ class DaemonService : Service() {
      * [CrawlerConfig.MODELS_SUBDIR], then re-renders `config.ini` so the pinned
      * `classifier_model_dir` and the new thresholds reach the daemon before it runs.
      *
-     * The reset is unconditional (a value tuned against `models/v1` score distributions
-     * is invalid under `models/v2`, not merely stale) and idempotent via the persisted
+     * The reset is unconditional (a value tuned against `models/v2` score distributions
+     * is invalid under `models/v3`, not merely stale) and idempotent via the persisted
      * model-dir sentinel. Runs on the crawler-control executor inside the calling
      * block's try/catch (both crawler start paths: [runCrawlerApply] and
      * [startCrawlerSupervisor]); a migration failure aborts that start/apply attempt

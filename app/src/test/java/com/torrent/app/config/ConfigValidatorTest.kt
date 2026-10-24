@@ -186,7 +186,7 @@ class ConfigValidatorTest {
     @Test fun crawlerDefaults_includeAdultHandling() {
         assertTrue(validCrawler().classifierEnabled)
         assertEquals("tag", validCrawler().adultMode)
-        assertEquals(0.897417, validCrawler().adultHideThreshold, 0.0)
+        assertEquals(0.653381, validCrawler().adultHideThreshold, 0.0)
     }
 
     @Test fun crawlerAdvancedWithBackupKey_fails() {

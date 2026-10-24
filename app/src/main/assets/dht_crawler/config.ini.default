@@ -64,16 +64,16 @@ rclone_bookmark_path=data/rclone_backup_ids.txt
 #   save_tv_kinds = none,episode,multi_episode,season_pack,multi_season,complete_series,daily
 
 # ==== Ingest-Time Classifier & Adult Handling ====
-# Ingest-time fastText classifier (models/v2). The app stages the model files and
+# Ingest-time fastText classifier (models/v3). The app stages the model files and
 # the hard-block list next to this file; both path keys below are app-managed.
 classifier_enabled=1
-classifier_model_dir=models/v2
+classifier_model_dir=models/v3
 # adult_mode: tag (store adult rows; hidden at or above adult_hide_threshold) or
 # drop (discard every adult-tagged row, i.e. anything at or above
 # adult_hide_threshold). The hard-block list always drops.
 adult_mode=tag
-# 0 = take the threshold from models/v2/manifest.json (the app always writes a value).
-adult_hide_threshold=0.897417
+# 0 = take the threshold from models/v3/manifest.json (the app always writes a value).
+adult_hide_threshold=0.653381
 # Always-on name-substring block list (app-managed path key).
 hard_block_file=hard_block.txt
 
