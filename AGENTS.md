@@ -181,3 +181,74 @@ See the vendored repo's `CLAUDE.md` for its architecture (thread trees, bloom fi
   `adb forward tcp:9091` (p50/p99/max).
 - `tools/usb-io/sample_threads.sh [SECONDS]` — samples `/proc/<pid>/task/*` for the daemon's
   `tr-*` threads via `run-as com.torrent.app` (D-state, pread/pwrite stalls).
+- `tools/rebuild-db-v2.sh --source <v1.db> --target <v2.db>` — rebuilds a crawler database into
+  schema v2 (drops the v1 trigram `file_search*`, re-derives the contentless `torrent_docs`) and
+  verifies it; `--check-schema` diffs the crawler DDL against `tools/schema-v2.sql`, `--verify-only`
+  re-runs the checks on an existing target. See *Rebuilding the search database* below.
+- `tools/push-torrents-db.sh [SOURCE_DB]` — streams a crawler database into the phone's
+  `files/crawler/data/torrents.db` in resumable, size-verified 1 GiB chunks (aborts if the crawler
+  is running; `ANDROID_SERIAL` picks a device).
+
+## Rebuilding the search database
+
+The v1 database carried a 51.2 GB trigram `file_search*` index. Schema v2 drops it and keeps the base
++ `torrent_docs` FTS tables: the phone snapshot `~/torrents-phone.db` (82,977,325,056 B, ~83 GB, WAL
+checkpointed) rebuilds to **28.57 GiB** — 30,675,599,360 B on disk, 30,670,880,768 B by `dbstat`,
+with the `torrent_docs*` shadows at 4,325,539,840 B (4.03 GiB; the design README's 6.4 GB was a
+sample-based estimate). Preserved: `torrents` 6,098,645 · `torrent_files` 286,750,070 ·
+`path_prefixes` 11,210,522 · `torrent_class` 6,098,645 · `classifier_meta` 6, `torrent_docs` = the
+torrents count, `file_search%` = 0, `sqlite_sequence` high-water marks (34,776,141 / 1,424,727,769 /
+11,210,522). A four-term `torrent_docs` match-set INSERT is **16–19 ms** (627 rows) where the v1
+trigram+GLOB candidate scan took **16.5–21.7 s**.
+
+**Rebuild (host, `sqlite3` ≥ 3.43).** ~44 min full (26 copy + ~20 `torrent_docs` chunks + 5.5 VACUUM
++ ~10 integrity check); a `--verify-only` re-check is ~17 min.
+
+```bash
+./gradlew :app:prepareDhtCrawlerSrc && make -j"$(nproc)" -C app/build/native/src/dht_crawler
+tools/rebuild-db-v2.sh --check-schema
+tools/rebuild-db-v2.sh --source ~/torrents-phone.db --target ~/torrents-v2.db
+tools/rebuild-db-v2.sh --verify-only --source ~/torrents-phone.db --target ~/torrents-v2.db
+```
+
+The first line is optional — the script builds a missing/stale crawler binary itself (it needs the
+JDK 21 env above). It reads the source `mode=ro`, builds the target schema from the crawler's own
+`--print-schema` output (never from the committed baseline; `--check-schema` only diffs the two), and
+refuses an existing target or a non-empty source `-wal`. One result looks like a failure but is
+intentional: 72,866 pre-existing `torrent_files` orphans (1,212 missing parents) are copied verbatim,
+so the FK check compares the target's violation set against the source's instead of demanding zero.
+
+**Upload (manual — never unattended, and only after the PC-side checks pass).** The phone has ~115 GB
+free against an 83 GB old DB plus a 28.6 GiB new one, so free space first: deleting the phone DB is
+safe because `~/torrents-phone.db` is the rollback copy.
+
+```bash
+adb -s 51404fe4 shell am force-stop com.torrent.app
+adb -s 51404fe4 exec-out run-as com.torrent.app sh -c 'cd files/crawler/data && rm -f torrents.db torrents.db-wal torrents.db-shm torrents.db.incoming torrents.db.incoming.meta'
+ANDROID_SERIAL=51404fe4 tools/push-torrents-db.sh /home/adam/torrents-v2.db   # ~40+ min, app stopped
+adb -s 51404fe4 shell am start -n com.torrent.app/.MainActivity
+```
+
+Keep the app force-stopped through the push: the script assembles `torrents.db.incoming` and swaps it
+in only after the full byte count verifies.
+
+**Verify on the phone** (there is no `sqlite3` binary on the device):
+
+```bash
+adb -s 51404fe4 exec-out run-as com.torrent.app du -h files/crawler/data/torrents.db   # ≤ 40 GiB
+adb forward tcp:8081 tcp:8081
+curl -s http://127.0.0.1:8081/stats        # torrents_indexed ≈ 6,098,645 within ~15 s
+adb -s 51404fe4 exec-out run-as com.torrent.app grep -cE 'SQLITE_CORRUPT|database disk image is malformed' files/logs/dht_crawler.log   # 0
+```
+
+**Rollback** — keep `~/torrents-phone.db` until the phone-side criteria pass:
+
+```bash
+adb -s 51404fe4 shell am force-stop com.torrent.app
+adb -s 51404fe4 exec-out run-as com.torrent.app sh -c 'cd files/crawler/data && rm -f torrents.db torrents.db-wal torrents.db-shm torrents.db.incoming torrents.db.incoming.meta'
+ANDROID_SERIAL=51404fe4 tools/push-torrents-db.sh /home/adam/torrents-phone.db
+adb -s 51404fe4 shell am start -n com.torrent.app/.MainActivity
+```
+
+The swap keeps the replaced file as `torrents.db.bak`; delete it once the new database is confirmed
+good: `adb -s 51404fe4 exec-out run-as com.torrent.app sh -c 'rm files/crawler/data/torrents.db.bak'`.
