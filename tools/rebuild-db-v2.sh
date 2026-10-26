@@ -377,7 +377,7 @@ verify() {
   if [ -s "$TMP/fk-tgt-only.txt" ]; then
     fail "foreign_key_check: $(wc -l < "$TMP/fk-tgt-only.txt") violation(s) in the target that the source does not have (target $n_fk_tgt / source $n_fk_src); first: $(head -n 1 "$TMP/fk-tgt-only.txt")"
   else
-    pass "foreign_key_check: target violations identical to source ($n_fk_tgt/$n_fk_src rows, all pre-existing orphans)"
+    pass "foreign_key_check: target has no foreign-key violations beyond the source's ($n_fk_tgt/$n_fk_src rows, all pre-existing orphans)"
   fi
   chk "sqlite_sequence (vs source)" "$(q "$src_ro" 'SELECT name||'"'"'='"'"'||seq FROM sqlite_sequence ORDER BY name;')" \
                                     "$(q "$tgt_ro" 'SELECT name||'"'"'='"'"'||seq FROM sqlite_sequence ORDER BY name;')"
@@ -515,8 +515,6 @@ fi
 
 resolve_schema_bin
 check_schema
-
-[ -n "$SOURCE" ] || { usage >&2; die "--source is required for a rebuild"; }
 
 [ -n "$SOURCE" ] || { usage >&2; die "--source is required for a rebuild"; }
 [ -n "$TARGET" ] || { usage >&2; die "--target is required for a rebuild"; }

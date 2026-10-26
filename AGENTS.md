@@ -192,7 +192,7 @@ See the vendored repo's `CLAUDE.md` for its architecture (thread trees, bloom fi
 ## Rebuilding the search database
 
 The v1 database carried a 51.2 GB trigram `file_search*` index. Schema v2 drops it and keeps the base
-+ `torrent_docs` FTS tables: the phone snapshot `~/torrents-phone.db` (82,977,325,056 B, ~83 GB, WAL
+and `torrent_docs` FTS tables: the phone snapshot `~/torrents-phone.db` (82,977,325,056 B, ~83 GB, WAL
 checkpointed) rebuilds to **28.57 GiB** — 30,675,599,360 B on disk, 30,670,880,768 B by `dbstat`,
 with the `torrent_docs*` shadows at 4,325,539,840 B (4.03 GiB; the design README's 6.4 GB was a
 sample-based estimate). Preserved: `torrents` 6,098,645 · `torrent_files` 286,750,070 ·
@@ -202,7 +202,7 @@ torrents count, `file_search%` = 0, `sqlite_sequence` high-water marks (34,776,1
 trigram+GLOB candidate scan took **16.5–21.7 s**.
 
 **Rebuild (host, `sqlite3` ≥ 3.43).** ~44 min full (26 copy + ~20 `torrent_docs` chunks + 5.5 VACUUM
-+ ~10 integrity check); a `--verify-only` re-check is ~17 min.
+plus ~10 integrity check); a `--verify-only` re-check is ~17 min.
 
 ```bash
 ./gradlew :app:prepareDhtCrawlerSrc && make -j"$(nproc)" -C app/build/native/src/dht_crawler
