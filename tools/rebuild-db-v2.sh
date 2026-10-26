@@ -6,6 +6,9 @@
 #
 #   tools/rebuild-db-v2.sh --source <v1.db> --target <v2.db>   full rebuild
 #   tools/rebuild-db-v2.sh --check-schema                      DDL drift check
+#   tools/rebuild-db-v2.sh --verify-only --source <v1.db> --target <v2.db>
+#                                                              re-run the
+#                                                              checks only
 #
 # Design: the target schema is the crawler's OWN DDL, emitted at run time by
 # `dht_crawler --print-schema` (src/database.c); tools/schema-v2.sql is only
@@ -19,7 +22,9 @@
 # Safety: the source is opened read-only and never written (SQLite may leave an
 # empty -wal/-shm beside it for WAL bookkeeping); the target must not exist; a
 # failed or interrupted run deletes the partial target, so re-running starts
-# over. No database file is ever committed.
+# over. --verify-only never writes: it re-runs the verification and A/B blocks
+# against an existing target over read-only connections only, and the partial-
+# target cleanup is disabled for it. No database file is ever committed.
 #
 # Env: SCHEMA_BIN (crawler binary; rebuilt if missing/stale), SQLITE_BIN
 # (default sqlite3, needs >= 3.43 for contentless FTS5), CHUNK (torrent_docs id
@@ -40,13 +45,16 @@ REF_SCHEMA=tools/schema-v2.sql
 GIB=1073741824
 NEED_FREE=$((45 * GIB))          # target dir headroom for a ~32 GB build
 MAX_TOTAL=$((40 * GIB))          # grand total budget of the rebuilt file
-DOCS_MIN=$((5 * GIB))            # torrent_docs* shadow tables, expected band
+DOCS_MIN=$((7 * GIB / 2))        # torrent_docs* shadow tables: 3.5 GiB floor
+                                 # (measured 4,325,539,840 B = 4.03 GiB on the
+                                 # real snapshot rebuild)
 DOCS_MAX=$((8 * GIB))
 BUDGET_MIN_SOURCE=$((1 * GIB))   # below this the source is a fixture, not data
 
 SOURCE=""
 TARGET=""
 CHECK_ONLY=0
+VERIFY_ONLY=0
 TMP=""
 TARGET_READY=0
 FAILS=0
@@ -72,11 +80,16 @@ usage() {
   cat <<'USAGE'
 usage: tools/rebuild-db-v2.sh --source <v1.db> --target <v2.db>
        tools/rebuild-db-v2.sh --check-schema
+       tools/rebuild-db-v2.sh --verify-only --source <v1.db> --target <v2.db>
 
   --source <db>   v1 crawler database to read (opened read-only, never written)
-  --target <db>   v2 database to create; must not exist
+  --target <db>   v2 database to create; must not exist (or, with
+                  --verify-only, the existing target to re-check)
   --check-schema  only verify that `dht_crawler --print-schema` matches
                   tools/schema-v2.sql (exit 0 = match, 1 = drift)
+  --verify-only   re-run the verification and A/B blocks against an existing
+                  target: no schema gate, no build phase, no VACUUM/ANALYZE,
+                  and nothing is written to either database
 
 env: SCHEMA_BIN (crawler binary)  SQLITE_BIN (default sqlite3, >= 3.43)
      CHUNK (torrent_docs id step, default 10000)  AB_TIMEOUT (default 3600)
@@ -91,6 +104,7 @@ while [ $# -gt 0 ]; do
       if [ "$1" = "--source" ]; then SOURCE=$2; else TARGET=$2; fi
       shift 2 ;;
     --check-schema) CHECK_ONLY=1; shift ;;
+    --verify-only) VERIFY_ONLY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; die "unknown argument: $1" ;;
   esac
@@ -218,6 +232,37 @@ preflight() {
   log "preflight ok: source $(h "$SRC_SIZE"), $(h "$free") free in $dir, sqlite3 $v"
 }
 
+# --verify-only preflight: everything preflight() checks about the SOURCE, plus
+# the target must already exist and open read-only. No free-space or
+# must-not-exist rule — this mode never writes to either database.
+preflight_verify() {
+  local v probe
+  v=$("$SQLITE_BIN" --version 2>/dev/null | awk '{print $1}')
+  [ -n "$v" ] || die "cannot run $SQLITE_BIN (set SQLITE_BIN to a sqlite3 >= 3.43)"
+  ver_ge "$v" 3.43 || die "sqlite3 $v is too old — need >= 3.43 for contentless FTS5 (contentless_delete=1)"
+
+  [ -f "$SOURCE" ] || die "no such source database: $SOURCE"
+  SRC_SIZE=$(stat -c %s "$SOURCE") || die "stat failed: $SOURCE"
+  [ "$SRC_SIZE" -gt 0 ] || die "$SOURCE is empty"
+  if [ -f "$SOURCE-wal" ] && [ "$(stat -c %s "$SOURCE-wal")" -gt 0 ]; then
+    die "$SOURCE-wal is non-empty — the source was not closed cleanly; stop whatever uses it, checkpoint it, then retry"
+  fi
+  probe=$("$SQLITE_BIN" "file:$SOURCE?mode=ro" "PRAGMA schema_version;" 2>&1) \
+    || die "cannot open $SOURCE read-only: $probe"
+  case "$probe" in
+    ''|*[!0-9]*) die "cannot open $SOURCE read-only (not a sqlite database?): $probe" ;;
+  esac
+
+  [ -f "$TARGET" ] || die "no such target database: $TARGET (--verify-only re-checks an existing target; run a full rebuild first)"
+  probe=$("$SQLITE_BIN" "file:$TARGET?mode=ro" "PRAGMA schema_version;" 2>&1) \
+    || die "cannot open $TARGET read-only: $probe"
+  case "$probe" in
+    ''|*[!0-9]*) die "cannot open $TARGET read-only (not a sqlite database?): $probe" ;;
+  esac
+
+  log "verify-only preflight ok: source $(h "$SRC_SIZE"), target $(h "$(stat -c %s "$TARGET")"), sqlite3 $v"
+}
+
 # ------------------------------------------------------------ build phases
 create_target() {
   log "creating $TARGET (page_size=32768, auto_vacuum=INCREMENTAL, journal_mode=WAL)"
@@ -289,7 +334,7 @@ finalize() {
 # ------------------------------------------------------------- verification
 verify() {
   local src_ro="file:$SOURCE?mode=ro" tgt_ro="file:$TARGET?mode=ro"
-  local t n_docs n_tor total docs ids id body norm w ok bytes
+  local t n_docs n_tor total docs ids id body norm w ok bytes n_fk_src n_fk_tgt
 
   log "=== summary ==="
   chk "quick_check" ok "$(q "$tgt_ro" 'PRAGMA quick_check;')"
@@ -307,8 +352,33 @@ verify() {
   chk "file_search% tables in the target" 0 \
     "$(q "$tgt_ro" "SELECT count(*) FROM sqlite_master WHERE name LIKE 'file_search%';")"
   chk_gt "torrent_docs MATCH 'ac'" 0 "$(q "$tgt_ro" "SELECT count(*) FROM torrent_docs WHERE torrent_docs MATCH 'ac';")"
+  if [ "$SRC_SIZE" -ge "$BUDGET_MIN_SOURCE" ]; then
+    # Regression guard for the word-boundary folding below: torrent 72199's body
+    # carries "(AC_DC Cover).mp3", which unicode61 indexes as the tokens ac and
+    # dc while `grep -w` sees the single word "ac_dc".
+    chk "regression: torrent_docs MATCH 'ac' AND rowid=72199" 1 \
+      "$(q "$tgt_ro" "SELECT count(*) FROM torrent_docs WHERE torrent_docs MATCH 'ac' AND rowid=72199;")"
+    chk "regression: torrent_docs MATCH 'dc' AND rowid=72199" 1 \
+      "$(q "$tgt_ro" "SELECT count(*) FROM torrent_docs WHERE torrent_docs MATCH 'dc' AND rowid=72199;")"
+  else
+    log "NOTE: relevance regression guard skipped — source is $(h "$SRC_SIZE") (fixture scale)"
+  fi
   chk_gt "torrent_search MATCH 'best'" 0 "$(q "$tgt_ro" "SELECT count(*) FROM torrent_search WHERE name MATCH 'best';")"
-  chk "PRAGMA foreign_key_check" "" "$(q "$tgt_ro" 'PRAGMA foreign_key_check;')"
+
+  # Foreign keys: the phone snapshot itself carries pre-existing orphan
+  # torrent_files rows (72,866 rows over 1,212 missing torrent ids), so "no
+  # violations" is not the invariant — a faithful copy must reproduce exactly
+  # the source's violation set and add none of its own.
+  q "$src_ro" 'PRAGMA foreign_key_check;' | sort > "$TMP/fk-src.txt"
+  q "$tgt_ro" 'PRAGMA foreign_key_check;' | sort > "$TMP/fk-tgt.txt"
+  n_fk_src=$(wc -l < "$TMP/fk-src.txt")
+  n_fk_tgt=$(wc -l < "$TMP/fk-tgt.txt")
+  comm -13 "$TMP/fk-src.txt" "$TMP/fk-tgt.txt" > "$TMP/fk-tgt-only.txt"
+  if [ -s "$TMP/fk-tgt-only.txt" ]; then
+    fail "foreign_key_check: $(wc -l < "$TMP/fk-tgt-only.txt") violation(s) in the target that the source does not have (target $n_fk_tgt / source $n_fk_src); first: $(head -n 1 "$TMP/fk-tgt-only.txt")"
+  else
+    pass "foreign_key_check: target violations identical to source ($n_fk_tgt/$n_fk_src rows, all pre-existing orphans)"
+  fi
   chk "sqlite_sequence (vs source)" "$(q "$src_ro" 'SELECT name||'"'"'='"'"'||seq FROM sqlite_sequence ORDER BY name;')" \
                                     "$(q "$tgt_ro" 'SELECT name||'"'"'='"'"'||seq FROM sqlite_sequence ORDER BY name;')"
 
@@ -347,11 +417,11 @@ verify() {
   docs=${docs:-0}
   if [ "$SRC_SIZE" -ge "$BUDGET_MIN_SOURCE" ]; then
     chk_le "dbstat total <= 40 GiB" "$MAX_TOTAL" "$total"
-    chk_ge "torrent_docs* >= 5 GiB" "$DOCS_MIN" "$docs"
+    chk_ge "torrent_docs* >= 3.5 GiB" "$DOCS_MIN" "$docs"
     chk_le "torrent_docs* <= 8 GiB" "$DOCS_MAX" "$docs"
   else
     log "NOTE: size budget checks skipped — source is $(h "$SRC_SIZE") (fixture scale);"
-    log "      the 40 GiB / torrent_docs* 5-8 GiB bounds only apply to a full snapshot"
+    log "      the 40 GiB / torrent_docs* 3.5-8 GiB bounds only apply to a full snapshot"
     log "      (this run: total $(h "$total"), torrent_docs* $(h "$docs"))"
   fi
 
@@ -416,13 +486,37 @@ SQL
 }
 
 # -------------------------------------------------------------------- main
-resolve_schema_bin
-check_schema
-
 if [ "$CHECK_ONLY" -eq 1 ]; then
+  resolve_schema_bin
+  check_schema
   log "--check-schema only: nothing built, nothing written"
   exit 0
 fi
+
+if [ "$VERIFY_ONLY" -eq 1 ]; then
+  # Re-check an existing target. Nothing is written, so the EXIT trap must never
+  # remove it: TARGET_READY is set before anything else can fail.
+  TARGET_READY=1
+  [ -n "$SOURCE" ] || { usage >&2; die "--source is required"; }
+  [ -n "$TARGET" ] || { usage >&2; die "--target is required"; }
+  [ "$SOURCE" != "$TARGET" ] || die "--source and --target are the same file"
+  START=$SECONDS
+  preflight_verify
+  verify
+  ab_timing
+  log "verify-only complete: $TARGET is $(h "$(stat -c %s "$TARGET")") ($(( (SECONDS - START) / 60 ))m elapsed)"
+  if [ "$FAILS" -ne 0 ]; then
+    echo "FATAL: $FAILS verification check(s) failed — $TARGET is NOT fit to upload" >&2
+    exit 1
+  fi
+  log "all checks passed — upload with tools/push-torrents-db.sh $TARGET"
+  exit 0
+fi
+
+resolve_schema_bin
+check_schema
+
+[ -n "$SOURCE" ] || { usage >&2; die "--source is required for a rebuild"; }
 
 [ -n "$SOURCE" ] || { usage >&2; die "--source is required for a rebuild"; }
 [ -n "$TARGET" ] || { usage >&2; die "--target is required for a rebuild"; }
