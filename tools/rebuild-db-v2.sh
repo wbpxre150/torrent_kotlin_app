@@ -289,7 +289,7 @@ finalize() {
 # ------------------------------------------------------------- verification
 verify() {
   local src_ro="file:$SOURCE?mode=ro" tgt_ro="file:$TARGET?mode=ro"
-  local t n_docs n_tor total docs ids id body w ok bytes
+  local t n_docs n_tor total docs ids id body norm w ok bytes
 
   log "=== summary ==="
   chk "quick_check" ok "$(q "$tgt_ro" 'PRAGMA quick_check;')"
@@ -314,15 +314,24 @@ verify() {
 
   # Relevance: every id the four-term query returns must really carry all four
   # words in the source-computed body (word-bounded, so 'ac' is not 'ac3').
+  # The body is folded the way FTS5's unicode61 tokenizer folds it before the
+  # grep: unicode61 splits on '_' (so "AC_DC" indexes as ac+dc) and applies
+  # remove_diacritics=2 (so "aç" indexes as ac), while `grep -w` treats '_' as a
+  # word character and compares bytes — without this folding the check reports
+  # false failures on bodies that the index legitimately matched.
   ids=$(q "$tgt_ro" "SELECT rowid FROM torrent_docs WHERE torrent_docs MATCH 'best AND of AND ac AND dc' ORDER BY rowid LIMIT 5;")
   if [ -z "$ids" ]; then
     fail "relevance sample: 'best AND of AND ac AND dc' matched nothing"
   else
     for id in $ids; do
       body=$(q "$src_ro" "SELECT t.name || ' ' || COALESCE((SELECT group_concat(f.filename,' ') FROM torrent_files f WHERE f.torrent_id=t.id),'') FROM torrents t WHERE t.id=$id;")
+      if ! norm=$(printf '%s' "$body" | tr '_' ' ' | tr '[:upper:]' '[:lower:]' \
+                    | iconv -f utf-8 -t ascii//TRANSLIT 2>/dev/null); then
+        norm=$(printf '%s' "$body" | tr '_' ' ' | tr '[:upper:]' '[:lower:]')
+      fi
       ok=1
       for w in best of ac dc; do
-        printf '%s' "$body" | tr '[:upper:]' '[:lower:]' | grep -q -w -- "$w" \
+        printf '%s' "$norm" | grep -q -w -- "$w" \
           || { ok=0; fail "relevance: torrent $id lacks the word '$w' in its body"; }
       done
       [ "$ok" -eq 1 ] && pass "relevance: torrent $id has word-bounded best/of/ac/dc"
