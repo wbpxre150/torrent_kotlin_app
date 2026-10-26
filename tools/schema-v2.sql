@@ -1,0 +1,16 @@
+CREATE TABLE IF NOT EXISTS torrents (    id INTEGER PRIMARY KEY AUTOINCREMENT,    info_hash BLOB(20) NOT NULL UNIQUE,    name TEXT NOT NULL,    size_bytes INTEGER NOT NULL,    total_peers INTEGER DEFAULT 0,    added_timestamp INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_torrents_added ON torrents(added_timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_torrents_total_peers ON torrents(total_peers DESC);
+CREATE TABLE IF NOT EXISTS path_prefixes (    id INTEGER PRIMARY KEY AUTOINCREMENT,    prefix TEXT NOT NULL UNIQUE);
+CREATE TABLE IF NOT EXISTS torrent_files (    id INTEGER PRIMARY KEY AUTOINCREMENT,    torrent_id INTEGER NOT NULL,    prefix_id INTEGER,    filename TEXT NOT NULL,    size_bytes INTEGER NOT NULL,    file_index SMALLINT NOT NULL,    FOREIGN KEY (torrent_id) REFERENCES torrents(id) ON DELETE CASCADE,    FOREIGN KEY (prefix_id) REFERENCES path_prefixes(id));
+CREATE INDEX IF NOT EXISTS idx_files_torrent ON torrent_files(torrent_id);
+CREATE INDEX IF NOT EXISTS idx_files_prefix ON torrent_files(prefix_id);
+CREATE TABLE IF NOT EXISTS torrent_class (    torrent_id INTEGER PRIMARY KEY REFERENCES torrents(id) ON DELETE CASCADE,    category INTEGER NOT NULL,    tv_kind INTEGER,    adult INTEGER NOT NULL DEFAULT 0,    adult_p REAL,    season_lo INTEGER,    season_hi INTEGER,    episode_lo INTEGER,    episode_hi INTEGER,    resolution INTEGER,    confidence REAL,    clf_ver INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_class_cat ON torrent_class(category, tv_kind, torrent_id) WHERE adult = 0;
+CREATE INDEX IF NOT EXISTS idx_class_ver ON torrent_class(clf_ver);
+CREATE TABLE IF NOT EXISTS classifier_meta (key TEXT PRIMARY KEY, value TEXT);
+CREATE VIRTUAL TABLE IF NOT EXISTS torrent_search USING fts5(    name,    tokenize='porter unicode61',    content='torrents',    content_rowid='id');
+CREATE VIRTUAL TABLE IF NOT EXISTS torrent_docs USING fts5(    body,    tokenize='unicode61 remove_diacritics 2',    content='',    contentless_delete=1);
+CREATE TRIGGER IF NOT EXISTS torrents_ai AFTER INSERT ON torrents BEGIN    INSERT INTO torrent_search(rowid, name) VALUES (new.id, new.name);END;
+CREATE TRIGGER IF NOT EXISTS torrents_ad AFTER DELETE ON torrents BEGIN    INSERT INTO torrent_search(torrent_search, rowid, name) VALUES('delete', old.id, old.name);END;
+CREATE TRIGGER IF NOT EXISTS torrents_docs_ad AFTER DELETE ON torrents BEGIN    DELETE FROM torrent_docs WHERE rowid = old.id;END;
