@@ -20,13 +20,13 @@ class CrawlerDbSchemaTest {
     }
 
     @Test fun statementCountMatchesTheCConstants() {
-        // 11 base (5 tables + 6 indices) + 2 FTS5 virtual tables + 4 triggers.
+        // 11 base (5 tables + 6 indices) + 3 FTS5 virtual tables + 5 triggers.
         assertEquals(5, CrawlerDbSchema.tableStatements.size)
         assertEquals(6, CrawlerDbSchema.indexStatements.size)
         assertEquals(11, CrawlerDbSchema.baseStatements.size)
-        assertEquals(2, CrawlerDbSchema.ftsStatements.size)
-        assertEquals(4, CrawlerDbSchema.triggerStatements.size)
-        assertEquals(17, CrawlerDbSchema.statements.size)
+        assertEquals(3, CrawlerDbSchema.ftsStatements.size)
+        assertEquals(5, CrawlerDbSchema.triggerStatements.size)
+        assertEquals(19, CrawlerDbSchema.statements.size)
         assertEquals(
             CrawlerDbSchema.tableStatements +
                 CrawlerDbSchema.indexStatements +
@@ -115,7 +115,7 @@ class CrawlerDbSchemaTest {
     @Test fun triggerBodiesAreIntact() {
         val triggers = CrawlerDbSchema.triggerStatements
         assertEquals(
-            listOf("torrents_ai", "torrents_ad", "files_ai", "files_ad"),
+            listOf("torrents_ai", "torrents_ad", "files_ai", "files_ad", "torrents_docs_ad"),
             triggers.map { it.removePrefix("CREATE TRIGGER IF NOT EXISTS ").substringBefore(' ') },
         )
         for (trigger in triggers) {

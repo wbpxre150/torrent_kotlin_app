@@ -8,7 +8,7 @@ package com.torrent.app.backup
  * The SQL text is copied verbatim — same tokens, same order, same 4-space
  * indentation inside the parentheses — so a DB built here is the DB the native
  * crawler expects to open. The C literals are split into individual statements
- * by hand on their top-level `;`, which keeps the four FTS trigger bodies
+ * by hand on their top-level `;`, which keeps the five FTS trigger bodies
  * (`BEGIN … END;`) intact as single statements. Every statement therefore ends
  * with `;`.
  *
@@ -98,7 +98,10 @@ object CrawlerDbSchema {
     /** The whole non-FTS schema: [tableStatements] + [indexStatements] (11). */
     val baseStatements: List<String> = tableStatements + indexStatements
 
-    /** The two FTS5 external-content virtual tables (`database.c:66-79`). */
+    /**
+     * The FTS5 virtual tables: the two external-content ones plus the schema-v2
+     * contentless `torrent_docs` (`database.c:66-90`).
+     */
     val ftsStatements: List<String> = listOf(
         "CREATE VIRTUAL TABLE IF NOT EXISTS torrent_search USING fts5(" +
             "    name," +
@@ -112,9 +115,15 @@ object CrawlerDbSchema {
             "    content='torrent_files'," +
             "    content_rowid='id'" +
             ");",
+        "CREATE VIRTUAL TABLE IF NOT EXISTS torrent_docs USING fts5(" +
+            "    body," +
+            "    tokenize='unicode61 remove_diacritics 2'," +
+            "    content=''," +
+            "    contentless_delete=1" +
+            ");",
     )
 
-    /** The four FTS sync triggers, bodies intact (`database.c:81-96`). */
+    /** The five FTS sync triggers, bodies intact (`database.c:91-113`). */
     val triggerStatements: List<String> = listOf(
         "CREATE TRIGGER IF NOT EXISTS torrents_ai AFTER INSERT ON torrents BEGIN" +
             "    INSERT INTO torrent_search(rowid, name) VALUES (new.id, new.name);" +
@@ -130,10 +139,13 @@ object CrawlerDbSchema {
             "    INSERT INTO file_search(file_search, rowid, filename) " +
             "VALUES('delete', old.id, old.filename);" +
             "END;",
+        "CREATE TRIGGER IF NOT EXISTS torrents_docs_ad AFTER DELETE ON torrents BEGIN" +
+            "    DELETE FROM torrent_docs WHERE rowid = old.id;" +
+            "END;",
     )
 
     /**
-     * Every schema statement (17), grouped: tables, their secondary indexes,
+     * Every schema statement (19), grouped: tables, their secondary indexes,
      * the FTS5 tables, the triggers. The DDL text is the C source's verbatim;
      * only the grouping differs from the C literals' interleaved order.
      */
