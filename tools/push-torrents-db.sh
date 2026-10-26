@@ -102,8 +102,7 @@ SENT0=$CUR
 for (( i=DONE; i<TOTAL; i++ )); do
   skip=$(( i * BLOCKS ))
   if [ $(( i + 1 )) -eq "$TOTAL" ]; then EXPECT=$(( SIZE - i * CHUNK )); else EXPECT=$CHUNK; fi
-  BEFORE=$(devsize)
-  [ -n "$BEFORE" ] || die "lost the device (stat failed) — re-run $0 to resume from chunk $i"
+  BEFORE=$(devsize); BEFORE="${BEFORE:-0}"
   [ "$BEFORE" -eq $(( i * CHUNK )) ] || die "device partial is $BEFORE bytes, expected $(( i * CHUNK )) — stale; rm $INCOMING and $META and start over"
   ok=0
   for (( t=1; t<=TRIES; t++ )); do
