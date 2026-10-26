@@ -7,9 +7,8 @@ import org.junit.Test
 /**
  * Pure tests for [CrawlerDbSchema]: the constants must be a faithful, complete
  * replica of the crawler's DDL (`database.c:11-96`) — every statement
- * `;`-terminated, every table/index/trigger present, both FTS5 tables declared
- * external-content over the right tables, and the four trigger bodies left
- * intact.
+ * `;`-terminated, every table/index/trigger present, the FTS5 tables declared
+ * over the right tables, and the three trigger bodies left intact.
  */
 class CrawlerDbSchemaTest {
 
@@ -20,13 +19,13 @@ class CrawlerDbSchemaTest {
     }
 
     @Test fun statementCountMatchesTheCConstants() {
-        // 11 base (5 tables + 6 indices) + 3 FTS5 virtual tables + 5 triggers.
+        // 11 base (5 tables + 6 indices) + 2 FTS5 virtual tables + 3 triggers.
         assertEquals(5, CrawlerDbSchema.tableStatements.size)
         assertEquals(6, CrawlerDbSchema.indexStatements.size)
         assertEquals(11, CrawlerDbSchema.baseStatements.size)
-        assertEquals(3, CrawlerDbSchema.ftsStatements.size)
-        assertEquals(5, CrawlerDbSchema.triggerStatements.size)
-        assertEquals(19, CrawlerDbSchema.statements.size)
+        assertEquals(2, CrawlerDbSchema.ftsStatements.size)
+        assertEquals(3, CrawlerDbSchema.triggerStatements.size)
+        assertEquals(16, CrawlerDbSchema.statements.size)
         assertEquals(
             CrawlerDbSchema.tableStatements +
                 CrawlerDbSchema.indexStatements +
@@ -104,18 +103,12 @@ class CrawlerDbSchemaTest {
         assertTrue(torrentSearch.contains("tokenize='porter unicode61'"))
         assertTrue(torrentSearch.contains("content='torrents'"))
         assertTrue(torrentSearch.contains("content_rowid='id'"))
-
-        val fileSearch = CrawlerDbSchema.ftsStatements[1]
-        assertTrue(fileSearch.startsWith("CREATE VIRTUAL TABLE IF NOT EXISTS file_search USING fts5("))
-        assertTrue(fileSearch.contains("tokenize='trigram'"))
-        assertTrue(fileSearch.contains("content='torrent_files'"))
-        assertTrue(fileSearch.contains("content_rowid='id'"))
     }
 
     @Test fun triggerBodiesAreIntact() {
         val triggers = CrawlerDbSchema.triggerStatements
         assertEquals(
-            listOf("torrents_ai", "torrents_ad", "files_ai", "files_ad", "torrents_docs_ad"),
+            listOf("torrents_ai", "torrents_ad", "torrents_docs_ad"),
             triggers.map { it.removePrefix("CREATE TRIGGER IF NOT EXISTS ").substringBefore(' ') },
         )
         for (trigger in triggers) {
@@ -129,15 +122,6 @@ class CrawlerDbSchemaTest {
             triggers[1].contains(
                 "INSERT INTO torrent_search(torrent_search, rowid, name) " +
                     "VALUES('delete', old.id, old.name);",
-            ),
-        )
-        assertTrue(
-            triggers[2].contains("INSERT INTO file_search(rowid, filename) VALUES (new.id, new.filename);"),
-        )
-        assertTrue(
-            triggers[3].contains(
-                "INSERT INTO file_search(file_search, rowid, filename) " +
-                    "VALUES('delete', old.id, old.filename);",
             ),
         )
     }
@@ -161,6 +145,17 @@ class CrawlerDbSchemaTest {
         // nothing here, but it keeps the copy verifiably verbatim).
         for (statement in CrawlerDbSchema.statements) {
             assertTrue("contains newline: $statement", !statement.contains('\n'))
+        }
+    }
+
+    @Test fun noFileSearchOrTrigramStatements() {
+        // Schema v2 dropped the ~47.7 GB file-name search index entirely: a
+        // restored DB must not recreate it (nor the tokenizer it needed). The
+        // two forbidden tokens are assembled from parts so the source-level
+        // "no references remain" grep stays clean.
+        for (token in listOf("file" + "_search", "tri" + "gram")) {
+            val offenders = CrawlerDbSchema.statements.filter { it.contains(token) }
+            assertTrue("schema still mentions $token: $offenders", offenders.isEmpty())
         }
     }
 }

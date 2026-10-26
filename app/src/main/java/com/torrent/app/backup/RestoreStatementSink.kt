@@ -16,9 +16,9 @@ package com.torrent.app.backup
  * implementation is [SqliteRestoreSink].
  *
  * FTS5 is NOT part of this contract: the FTS tables, the triggers and the
- * index `rebuild` for both search indexes run in the native `--rebuild-fts`
+ * index `rebuild` for `torrent_search` run in the native `--rebuild-fts`
  * one-shot against the temp DB after the import, with the crawler's bundled
- * SQLite (platform SQLite never needs FTS5 or the trigram tokenizer).
+ * SQLite (platform SQLite never needs FTS5).
  */
 interface RestoreStatementSink {
 

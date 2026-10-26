@@ -47,9 +47,9 @@ import java.io.IOException
  * id-major order, so the replay is first-writer-wins and deterministic).
  *
  * FTS5 is deliberately absent: the FTS tables, the triggers and the index
- * `rebuild` for both search indexes run in the native `--rebuild-fts` one-shot
+ * `rebuild` for `torrent_search` run in the native `--rebuild-fts` one-shot
  * against the temp DB with the crawler's bundled SQLite 3.49.1, so platform
- * SQLite never needs FTS5 or the trigram tokenizer.
+ * SQLite never needs FTS5.
  *
  * Android-touching (opened on-device by the restore flow); the surrounding
  * logic in [DbRestoreManager] is plain-JUnit testable against a fake sink.
@@ -282,8 +282,8 @@ class SqliteRestoreSink(
             "synchronous=$checkpointSynchronous for the final checkpoint " +
                 "(bulk phase ran at $bulkSynchronous)",
             "wal_checkpoint(TRUNCATE): $checkpoint",
-            "import complete; FTS5 tables, triggers and the torrent_search/" +
-                "file_search rebuild are delegated to the native --rebuild-fts",
+            "import complete; FTS5 tables, triggers and the torrent_search " +
+                "rebuild are delegated to the native --rebuild-fts",
         )
         for (line in lines) Log.i(TAG, line)
         return lines

@@ -153,7 +153,7 @@ set_source_files_properties(
             "BLOOM_VERSION=\"2.0\";BLOOM_VERSION_MAJOR=2;BLOOM_VERSION_MINOR=0"
 )
 
-# SQLite: FTS5 is required for the torrent_search/file_search virtual
+# SQLite: FTS5 is required for the torrent_search/torrent_docs virtual
 # tables; THREADSAFE=1 matches the desktop build. sqlite3.c is noisy,
 # silence its warnings.
 set_source_files_properties(

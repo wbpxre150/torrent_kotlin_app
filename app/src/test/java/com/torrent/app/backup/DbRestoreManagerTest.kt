@@ -171,7 +171,7 @@ class DbRestoreManagerTest {
         var lastDir: File? = null
         var capturedDbBytes: ByteArray? = null
         /** Lines the one-shot pushes into the restore status. */
-        var lines: List<String> = listOf("rebuild: torrent_search + file_search")
+        var lines: List<String> = listOf("rebuild: torrent_search")
         /** Invoked at the top of [run], before anything is captured. */
         var probe: (() -> Unit)? = null
         val emittedLines = mutableListOf<String>()
@@ -1226,7 +1226,7 @@ class DbRestoreManagerTest {
             listOf(
                 "sqlite_version=fake (platform SQLite)",
                 "wal_checkpoint(TRUNCATE): busy=0",
-                "rebuild: torrent_search + file_search",
+                "rebuild: torrent_search",
             ),
             st.lines)
     }
