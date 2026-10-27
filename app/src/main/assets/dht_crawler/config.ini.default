@@ -117,6 +117,12 @@ bep51_node_cooldown_sec = 3
 tree_peers_queue_capacity = 500
 # get_peers timeout per tree in milliseconds
 tree_get_peers_timeout_ms = 1500
+# get_peers lookup deadline per infohash in milliseconds
+tree_get_peers_deadline_ms = 6000
+# concurrent get_peers queries per round
+tree_get_peers_fanout = 8
+# total get_peers packets per infohash
+tree_get_peers_max_queries = 16
 # Peers to attempt in parallel per infohash
 tree_parallel_peers = 4
 # TCP connection establishment timeout in milliseconds
