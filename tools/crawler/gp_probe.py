@@ -65,6 +65,7 @@ GP_KEYS = (
     "yield_percent",
     "packets_total",
     "packets_per_lookup",
+    "rounds_total",
     "mean_lookup_ms",
     "answers_total",
     "from_retry_total",
@@ -491,6 +492,7 @@ def derive(samples, health, meta):
         "yield_percent": None,
         "peer_entries_per_s": None,
         "packets_per_lookup": None,
+        "mean_rounds_per_lookup": None,
         "mean_lookup_ms": None,
         "pps": None,
         "pps_cap": None,
@@ -547,12 +549,15 @@ def derive(samples, health, meta):
     lookups = series_delta(samples, lambda s: dig(s, "gp", "lookups_total"))
     with_peers = series_delta(samples, lambda s: dig(s, "gp", "lookups_with_peers"))
     packets = series_delta(samples, lambda s: dig(s, "gp", "packets_total"))
+    rounds = series_delta(samples, lambda s: dig(s, "gp", "rounds_total"))
     if lookups and lookups["delta"] > 0:
         if with_peers:
             out["yield_percent"] = with_peers["delta"] / lookups["delta"] * 100.0
             out["peer_entries_per_s"] = with_peers["per_s"]
         if packets:
             out["packets_per_lookup"] = packets["delta"] / lookups["delta"]
+        if rounds and rounds["delta"] > 0:
+            out["mean_rounds_per_lookup"] = 1.0 + rounds["delta"] / lookups["delta"]
     latency = delta_mean_lookup_ms(samples)
     if latency:
         out["mean_lookup_ms"] = latency["mean_ms"]
@@ -722,6 +727,13 @@ def render_table(derived, meta):
     )
     rows.append(
         ("packets per lookup", f2(d.get("packets_per_lookup")), "d`packets_total`/d`lookups_total`")
+    )
+    rows.append(
+        (
+            "mean rounds",
+            f2(d.get("mean_rounds_per_lookup")),
+            "1 + d`rounds_total`/d`lookups_total`",
+        )
     )
     rows.append(
         (
