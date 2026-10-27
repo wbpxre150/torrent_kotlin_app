@@ -556,7 +556,7 @@ def derive(samples, health, meta):
             out["peer_entries_per_s"] = with_peers["per_s"]
         if packets:
             out["packets_per_lookup"] = packets["delta"] / lookups["delta"]
-        if rounds and rounds["delta"] > 0:
+        if rounds:
             out["mean_rounds_per_lookup"] = 1.0 + rounds["delta"] / lookups["delta"]
     latency = delta_mean_lookup_ms(samples)
     if latency:
