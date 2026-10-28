@@ -768,6 +768,7 @@ class ControlServerWebSocketTest {
                 assertEquals(2, d.getJSONArray("logs").length())
                 for (key in listOf(
                     "dbSize", "internalFree", "internalFreeBytes", "pausedNoWifi", "statsLine",
+                    "backfillLine",
                 )) {
                     assertTrue("crawler entry is missing $key: $d", d.has(key))
                 }
