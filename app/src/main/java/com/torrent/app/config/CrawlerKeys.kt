@@ -21,7 +21,7 @@ object CrawlerKeys {
         "nice_level",
         // Bloom filters
         "bloom_enabled", "bloom_capacity", "failure_bloom_capacity", "failure_strike_count",
-        "bloom_error_rate", "bloom_persist", "bloom_path",
+        "bloom_error_rate", "bloom_persist", "bloom_path", "bloom_persist_interval_sec",
         // Batch writer
         "batch_size", "flush_interval",
         // Daily backup (pinned off on Android)

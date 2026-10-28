@@ -141,6 +141,10 @@ class CrawlerKeysTest {
         assertTrue("tree_metadata_fresh_peer_retries must be advanced-overridable", "tree_metadata_fresh_peer_retries" in CrawlerKeys.ALLOWED_ADVANCED_KEYS)
         assertFalse("tree_metadata_fresh_peer_retries must not be form-managed", "tree_metadata_fresh_peer_retries" in CrawlerKeys.FORM_MANAGED_KEYS)
     }
+    @Test fun parseAdvanced_allowsBloomPersistIntervalSecKey() {
+        assertTrue("bloom_persist_interval_sec must be known", "bloom_persist_interval_sec" in CrawlerKeys.KNOWN_KEYS)
+        assertTrue("bloom_persist_interval_sec must be advanced-overridable", "bloom_persist_interval_sec" in CrawlerKeys.ALLOWED_ADVANCED_KEYS)
+    }
     @Test fun parseAdvanced_allowsTreeMetadataTimeoutMsKey() {
         val r = CrawlerKeys.parseAdvanced("tree_metadata_timeout_ms=5000")
         assertTrue(r.ok)

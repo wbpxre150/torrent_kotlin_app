@@ -30,6 +30,8 @@ failure_bloom_capacity=30000000
 failure_strike_count=2
 bloom_error_rate=0.001
 bloom_persist=1
+# bloom_persist_interval_sec: min seconds between bloom-filter disk saves (0 = every flush, else 30-3600). Default: 300
+bloom_persist_interval_sec=300
 bloom_path=data/bloom.dat
 
 # ==== Batched Writes ====
