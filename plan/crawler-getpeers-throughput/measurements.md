@@ -228,8 +228,48 @@ ship — open issue: mean lookup
 
 | Metric | Before | After | Target | Pass |
 |---|---|---|---|---|
-| flushes/h (measured trigger) | | — | recorded | ☐ |
-| `bloom_saves_total` / 30 min | | | ≤7 | ☐ |
-| `bloom_bytes_written_total` / h | ~1.08 GB | | ≤0.3 GB | ☐ |
-| dedup unchanged (`torrents_indexed` growth == `torrents_last_hour`) | | | yes | ☐ |
-| shutdown still persists both filters (mtime updates) | | | yes | ☐ |
+| flushes/h (measured trigger) | **40** | | recorded | ☑ before / After pending |
+| `bloom_saves_total` / 30 min | | | ≤7 | ☐ pending |
+| `bloom_bytes_written_total` / h | **4.0 GB (measured)** | | ≤1.5 GB (rev 4, see note c) | ☐ pending |
+| dedup unchanged (`torrents_indexed` growth == `torrents_last_hour`) | | | yes | ☐ pending |
+| shutdown still persists both filters (mtime updates) | | | yes | ☐ pending |
+
+**Trigger measurement (2026-10-28, device b93dac74, crawler pid 23436, no restart mid-window).** Ten `stat`
+samples of `files/crawler/data/bloom.dat` and `failure_bloom.dat` over 9 minutes (08:12:24 → 08:21:24)
+found **7 distinct save events per file** — mtimes 08:11:06.359, 08:12:54.719, 08:14:29.771,
+08:16:00.763, 08:17:55.151, 08:19:32.675, 08:21:00.527, deltas 108.4 / 95.1 / 91.0 / 114.4 / 97.5 /
+87.9 s (mean ≈ 99 s). Both files are saved ~50 ms apart in the same event, 53,915,997 B each. That is
+**40 flushes/h**, not the ~10 assumed by the stage-5 prompt: with `batch_size=500` and
+`torrents_last_hour` 19,771 → 20,222 the batch fills every ~90 s, so the batch-full path
+(`batch_writer_add` → `batch_writer_flush`) — not the 300 s flush thread — drives the save cadence.
+Consequence: **2 × 53.9 MB × 40/h ≈ 4.0 GB/h** of flash writes, superseding the ~1.08 GB/h estimate.
+The prompt's trigger rule (`flushes/h ≥ 15` → implement and ship) therefore fires: this stage ships.
+
+**Note (c) — rev 4, the bytes gate.** The prompt's `≤0.3 GB/h` target is unreachable at the locked
+`bloom_persist_interval_sec=300` default: one save event writes both filters (107,831,994 B), so the
+floor at 300 s is 12 × 107.8 MB ≈ **1.29 GB/h** (≤0.3 GB/h would need an interval ≥ ~1280 s). It was
+derived from a mis-scaled estimate (~6 saves × 53.9 MB ≈ 0.32 GB counted as "/h" and as one filter).
+Re-specified as **≤1.5 GB/h**, derived from the binding gate: ≤7 saves per 30 min → ≤14 saves/h ×
+107,831,994 B = **≤1.51 GB/h**, i.e. a ≥2.6× reduction from the measured 4.0 GB/h baseline. The
+`≤7 saves / 30 min` criterion is unchanged and remains the binding requirement; this row is derived
+evidence. `bloom_bytes_written_total` accumulates `bloom_filter_stats()` bytes for both filters on
+each successful save event and is read as a `/stats` delta.
+
+**Status of the After column (2026-10-28).** The code landed as submodule `19d0f4c` / parent `323119f`
+(see *Stage 5 implementation* below), but the After measurements and the device criteria (30-min soak,
+interval-0 replay, restart dedup, forced-save mtimes, log scan) are **not yet observed**: a concurrent
+classifier-v4 `/dev` run was editing the same worktree and shares device b93dac74, so the soak windows
+were deferred rather than run against a build carrying that unrelated in-flight change. Re-run the
+stage-5 verification sequence once that work lands and fill the After column then.
+
+**Stage 5 implementation.** Submodule `19d0f4c` adds `bloom_persist_interval_sec` (default 300, clamp
+30–3600, `0` = save on every flush) in `include/config.h` + `src/config.c`; `src/batch_writer.c` gates
+the two `bloom_filter_save()` calls behind `bloom_save_force || interval == 0 || now − last_save >=
+interval` using `CLOCK_MONOTONIC`, keeps the in-memory `bloom_filter_add()` on every flush, forces a
+save in `batch_writer_shutdown()` before its final flush, and counts `bloom_saves_total` /
+`bloom_bytes_written_total` (C11 atomics, exposed under `supervisor` in `/stats`). The direct saves
+after `--rebuild-bloom-filter` (`main.c:351`), at exit (`main.c:905-911`) and in supervisor destroy
+(`supervisor.c:995-1000`) are untouched. Parent `323119f` bumps the gitlink and allow-lists the key
+(`CrawlerKeys.kt`, advanced-only) plus the `config.ini.default` template line and two unit-test
+assertions. Host build (prepared copy), `:app:testDebugUnitTest` (1066 tests, 0 failures) and
+`:app:assembleDebug` were green at implementation time.
