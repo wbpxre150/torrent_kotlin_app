@@ -161,9 +161,9 @@ class CrawlerConfigTest {
         assertEquals("300", ini["bloom_persist_interval_sec"])
         // Stage 6 adult handling: classifier + calibrated thresholds + hard-block list
         assertEquals("1", ini["classifier_enabled"])
-        assertEquals("models/v3", ini["classifier_model_dir"])
+        assertEquals("models/v4", ini["classifier_model_dir"])
         assertEquals("tag", ini["adult_mode"])
-        assertEquals("0.653381", ini["adult_hide_threshold"])
+        assertEquals("0.927025", ini["adult_hide_threshold"])
         // The drop threshold is gone with drop-all-adult-tagged semantics: the key
         // must not be rendered at all (the crawler ignores it as unknown).
         assertNull(ini["adult_drop_threshold"])
@@ -245,7 +245,7 @@ class CrawlerConfigTest {
             assertTrue(cfg.configFile.exists())
         }
 
-        // --- Stage 5: classifier model staging into workDir/models/v3 ---
+        // --- Stage 5: classifier model staging into workDir/models/v4 ---
 
         @Test fun ensureLayout_stagesClassifierModelsByteIdenticalToAssets() {
             val cfg = configWithRealDefaultAsset()
@@ -395,7 +395,7 @@ class CrawlerConfigTest {
         }
 
         /** Checked-in model assets (read-only source of truth for the staging tests). */
-        private val MODEL_SRC_DIR = File("src/main/cpp/dht_crawler-android/models/v3")
+        private val MODEL_SRC_DIR = File("src/main/cpp/dht_crawler-android/models/v4")
 
         /** Mirrors `CrawlerConfig.currentVersionCode()`, which is private to the class. */
         private fun crawlerVersionCode(): Long {
@@ -410,7 +410,7 @@ class CrawlerConfigTest {
         }
 
         /**
-         * Mirrors `assets/dht_crawler/models/v3/` into the asset fixture with the real
+         * Mirrors `assets/dht_crawler/models/v4/` into the asset fixture with the real
          * checked-in model files, so byte fidelity is asserted against real binaries.
          */
         private fun copyClassifierModelAssets(assetDir: File) {
@@ -584,7 +584,7 @@ class CrawlerConfigTest {
             assertEquals("1", ini["classifier_enabled"])
             assertEquals(CrawlerConfig.MODELS_SUBDIR, ini["classifier_model_dir"])
             assertEquals("tag", ini["adult_mode"])
-            assertEquals("0.653381", ini["adult_hide_threshold"])
+            assertEquals("0.927025", ini["adult_hide_threshold"])
             assertNull(ini["adult_drop_threshold"])
             assertEquals(CrawlerConfig.HARD_BLOCK_FILE, ini["hard_block_file"])
         }

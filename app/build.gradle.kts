@@ -445,15 +445,15 @@ tasks.register<Copy>("copyDhtCrawlerAssets") {
     // Stage 5: fastText classifier model files. Binary — the Copy task is byte-exact
     // (no text filtering / charset conversion), so a plain copy is correct here.
     // `into("models")` is relative to the task destination above, giving the asset
-    // path dht_crawler/models/v3/<file> (overriding the crawler's compiled-in default dir).
+    // path dht_crawler/models/v4/<file> (overriding the crawler's compiled-in default dir).
     val modelSrc = file("src/main/cpp/dht_crawler-android/models")
     from(modelSrc) {
-        include("v3/**")
+        include("v4/**")
         into("models")
     }
     into(file("build/generated/assets/dht_crawler/dht_crawler"))
     // A Copy task leaves files behind that its sources no longer produce: after a
-    // models/v2 -> models/v3 bump a warm build tree still held models/v2, and after a
+    // v3 -> v4 models bump a warm build tree still held the previous generation's dir, and after a
     // keyword file was dropped from the crawler repo its stale copy stayed here — both
     // got packaged into the APK. This destination dir is exclusively this task's output
     // (keyword files at the top level, models/ below), so dropping it wholesale before
@@ -463,7 +463,7 @@ tasks.register<Copy>("copyDhtCrawlerAssets") {
     }
     // Gradle does not treat a file *added* to a Copy task's destination as "out of date",
     // so without this the whole task (and the cleanup above) is skipped on a warm tree and
-    // a stale models/v1 is packaged. Always re-run: the copy is ~26 MB locally, and the
+    // a stale models generation is packaged. Always re-run: the copy is ~26 MB locally, and the
     // native builds dominate anyway. Still a `Copy` task — keyword-file semantics unchanged.
     outputs.upToDateWhen { false }
 }

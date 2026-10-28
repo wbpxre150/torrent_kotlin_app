@@ -1449,8 +1449,8 @@ class DaemonService : Service() {
      * [CrawlerConfig.MODELS_SUBDIR], then re-renders `config.ini` so the pinned
      * `classifier_model_dir` and the new thresholds reach the daemon before it runs.
      *
-     * The reset is unconditional (a value tuned against `models/v2` score distributions
-     * is invalid under `models/v3`, not merely stale) and idempotent via the persisted
+     * The reset is unconditional (a value tuned against the previous generation's models
+     * is invalid under the current generation, not merely stale) and idempotent via the persisted
      * model-dir sentinel. Runs on the crawler-control executor inside the calling
      * block's try/catch (both crawler start paths: [runCrawlerApply] and
      * [startCrawlerSupervisor]); a migration failure aborts that start/apply attempt
