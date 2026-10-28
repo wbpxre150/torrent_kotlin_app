@@ -107,6 +107,7 @@ class ControlServer(
     @Volatile private var cachedRpcSummary: com.torrent.app.transmission.TransmissionSummary? = null
     @Volatile private var cachedCrawlerStatsJson: String? = null
     @Volatile private var cachedCrawlerStatsLine: String? = null
+    @Volatile private var cachedCrawlerBackfillLine: String? = null
     // One frame flow per feed: replay keeps the newest frame for a client that
     // connects between ticks, DROP_OLDEST keeps a slow socket from stalling
     // the ticker.
@@ -647,6 +648,7 @@ class ControlServer(
         }
         cachedCrawlerStatsJson = raw
         cachedCrawlerStatsLine = raw?.let { crawlerStatsLine(it) }
+        cachedCrawlerBackfillLine = raw?.let { crawlerBackfillLine(it) }
         statsFrames.emit(crawlerStatsJson(cachedCrawlerStatsJson, crawler?.state))
     }
 
@@ -859,6 +861,7 @@ class ControlServer(
             """<div class="row"><span class="k">Internal free</span><span class="v"><span data-field="internalFree">${formatBytes(free)}</span>$spaceWarn</span></div>""",
             """<div class="row"><span class="k">Search</span><span class="v"><a href="/search">/search</a></span></div>""",
             """<div class="row"><span class="k">Stats</span><span class="v" data-field="statsLine">${esc(cachedCrawlerStatsLine ?: "—")}</span></div>""",
+            """<div class="row"><span class="k">Backfill</span><span class="v" data-field="backfillLine">${esc(cachedCrawlerBackfillLine ?: "—")}</span></div>""",
         )
     }
 
@@ -977,6 +980,7 @@ class ControlServer(
                         append(",\"internalFreeBytes\":").append(free)
                         append(",\"pausedNoWifi\":").append(crawlerPausedNoWifi())
                         append(",\"statsLine\":").append(jsonStr(cachedCrawlerStatsLine))
+                        append(",\"backfillLine\":").append(jsonStr(cachedCrawlerBackfillLine))
                     }
                     append("}")
                 }
@@ -1728,6 +1732,31 @@ class ControlServer(
             s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 .replace("\"", "&quot;")
 
+        /**
+         * The one-line `classifier_backfill` summary the dashboard card shows,
+         * derived from the same raw loopback /stats body as [crawlerStatsLine]:
+         * the backfill state, rows processed of the total, and the target
+         * classifier generation, with the daemon's `last_error` appended while
+         * the backfill is failed. Field names are the daemon's wire names
+         * (`rows_processed`/`rows_total`, not the design doc's `rows_done`).
+         * Null when the body does not parse or carries no backfill object, so
+         * the card keeps its previous line.
+         */
+        internal fun crawlerBackfillLine(raw: String): String? {
+            return try {
+                val b = JSONObject(raw).optJSONObject("classifier_backfill") ?: return null
+                val state = b.optString("state", "")
+                val target = b.optInt("target_clf_ver", 0)
+                val done = b.optLong("rows_processed", 0L)
+                val total = b.optLong("rows_total", 0L)
+                val err = b.optString("last_error", "")
+                val line = "Backfill: %s %d / %d → v%d".format(state, done, total, target)
+                if (state == "failed" && err.isNotBlank()) "$line — $err" else line
+            } catch (e: Exception) {
+                null
+            }
+        }
+
         /** 32×32 PNG favicon (blue rounded square, white down-arrow) served
          * at /favicon.ico. Embedded as Base64 so the dashboard keeps its
          * zero-external-assets rule (no file assets, no external hosts). */
@@ -2366,6 +2395,7 @@ ${adultSelectionRow(adultSelection)}
                   patchText(fieldIn(section, 'dbSize'), d.dbSize);
                   patchText(fieldIn(section, 'internalFree'), d.internalFree);
                   patchText(fieldIn(section, 'statsLine'), d.statsLine);
+                  patchText(fieldIn(section, 'backfillLine'), d.backfillLine);
                   // The paused badge is rendered on every crawler render and
                   // only its `hidden` attribute is flipped here, so a pause that
                   // starts after the page loaded appears within one tick. Only

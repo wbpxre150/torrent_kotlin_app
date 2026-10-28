@@ -48,9 +48,12 @@ class CrawlerConfig(
      * classifier model files from `assets/dht_crawler/models/v4/` into [modelsDir],
      * when missing or when the `"<versionCode>|<MODELS_SUBDIR>"` `.assets_version`
      * stamp differs — so a model-dir bump re-stages even at an unchanged version code.
-     * On a stamp mismatch the previous generation's model dirs under `models/` are
-     * deleted. The models are binary (`fastText` `.ftz`); they are streamed byte-for-byte
-     * — see [copyBinaryAtomically].
+     * Every call also sweeps `models/` for other generations ([deleteStaleModelDirs]):
+     * only immediate child dirs whose name is a `v<digits>` generation other than the
+     * active one are deleted, so a stale generation can never survive a stamp state,
+     * and non-generation dirs/files under `models/` are never touched. The models are
+     * binary (`fastText` `.ftz`); they are streamed byte-for-byte — see
+     * [copyBinaryAtomically].
      */
     fun ensureAssets() {
         val version = currentVersionCode()
@@ -70,10 +73,12 @@ class CrawlerConfig(
             if (stampMatches && target.exists()) continue
             openAsset("$ASSET_DIR/$MODELS_SUBDIR/$name").use { copyBinaryAtomically(it, target) }
         }
+        // Sweep on every call, not just on a stamp mismatch: "no stale generation
+        // dir survives" must not depend on stamp state. Any other `vN` model dir
+        // under models/ is a previous generation's (~26 MB of dead weight). The
+        // active dir is never a candidate, so a running crawler keeps its files.
+        deleteStaleModelDirs()
         if (!stampMatches) {
-            // The stamp changed, so any other model dir under models/ is a previous
-            // generation's (~26 MB of dead weight). Never touch the current dir.
-            deleteStaleModelDirs()
             stamp.writeText(stampValue)
         }
     }
@@ -82,15 +87,11 @@ class CrawlerConfig(
      * Deletes every immediate child dir of `workDir/models` that is not the current
      * [MODELS_SUBDIR] generation (e.g. `v3` once the app ships `v4`). Sibling dirs only:
      * the current one is never a candidate, so an in-flight crawler that resolves
-     * [modelsDir] keeps its files.
+     * [modelsDir] keeps its files. Delegates to the pure [deleteStaleModelDirs], which
+     * owns the `v<digits>` guard.
      */
     private fun deleteStaleModelDirs() {
-        val current = File(workDir, MODELS_SUBDIR).name
-        val parent = modelsDir.parentFile ?: return
-        for (child in parent.listFiles().orEmpty()) {
-            if (!child.isDirectory || child.name == current) continue
-            child.deleteRecursively()
-        }
+        modelsDir.parentFile?.let { deleteStaleModelDirs(it, File(workDir, MODELS_SUBDIR).name) }
     }
 
     /**
@@ -219,6 +220,29 @@ class CrawlerConfig(
 
         /** Classifier model dir, work-dir relative (mirrors crawler `classifier_model_dir`). */
         const val MODELS_SUBDIR = "models/v4"
+
+        /**
+         * A classifier model generation dir name: `v` followed by digits (`v3`, `v4`, …).
+         * Only names matching this are sweep candidates under `models/` — see
+         * [deleteStaleModelDirs].
+         */
+        private val STALE_MODEL_DIR_NAME = Regex("^v\\d+$")
+
+        /**
+         * Deletes every immediate child of [modelsRoot] that is a generation dir (name
+         * matching [STALE_MODEL_DIR_NAME]) other than [activeName]. Pure (plain [File]s,
+         * no Android deps) so it is unit-testable. Never touches: plain files (even one
+         * named `v3`), non-generation dirs (e.g. `backup/`), the active dir, and a
+         * missing/unreadable [modelsRoot] ([File.listFiles] returning null).
+         */
+        internal fun deleteStaleModelDirs(modelsRoot: File, activeName: String) {
+            for (child in modelsRoot.listFiles().orEmpty()) {
+                if (!child.isDirectory) continue
+                if (child.name == activeName) continue
+                if (!STALE_MODEL_DIR_NAME.matches(child.name)) continue
+                child.deleteRecursively()
+            }
+        }
 
         /** `save_categories` — categories to keep; the key is omitted when none is selected. */
         const val SAVE_CATEGORIES_KEY = "save_categories"

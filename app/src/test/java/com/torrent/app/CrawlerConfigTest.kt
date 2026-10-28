@@ -124,6 +124,78 @@ class CrawlerConfigTest {
         assertEquals("new = 2\n", target.readText())
     }
 
+    // --- deleteStaleModelDirs (pure `v<digits>` guard) ---
+
+    @Test fun deleteStaleModelDirs_deletesTheStaleGenerationAndKeepsTheActiveOne() {
+        val models = tmp.newFolder("models")
+        val active = File(models, "v4").apply { mkdirs() }
+        File(active, "adult.ftz").writeBytes(byteArrayOf(1, 2, 3))
+        val stale = File(models, "v3").apply { mkdirs() }
+        File(stale, "adult.ftz").writeBytes(byteArrayOf(4, 5, 6))
+
+        CrawlerConfig.deleteStaleModelDirs(models, "v4")
+
+        assertFalse("a previous generation's dir must be reclaimed", stale.exists())
+        assertTrue("the active generation dir is never a candidate", active.isDirectory)
+        assertTrue("staged files of the active dir survive", File(active, "adult.ftz").isFile)
+    }
+
+    @Test fun deleteStaleModelDirs_v5ActiveDeletesTheStaleV4Dir() {
+        // Genericity: the sweep knows nothing about the shipped generation, so a future
+        // models/v5 bump reclaims models/v4 with no change here.
+        val models = tmp.newFolder("models")
+        val active = File(models, "v5").apply { mkdirs() }
+        val stale = File(models, "v4").apply { mkdirs() }
+        File(stale, "adult.ftz").writeBytes(byteArrayOf(7, 8, 9))
+
+        CrawlerConfig.deleteStaleModelDirs(models, "v5")
+
+        assertFalse("a stale v4 dir is swept when v5 is active", stale.exists())
+        assertTrue("the active v5 dir survives", active.isDirectory)
+    }
+
+    @Test fun deleteStaleModelDirs_keepsNonGenerationDirs() {
+        val models = tmp.newFolder("models")
+        val active = File(models, "v4").apply { mkdirs() }
+        val backup = File(models, "backup").apply { mkdirs() }
+        File(backup, "adult.ftz").writeBytes(byteArrayOf(1))
+        val prefixed = File(models, "v4-old").apply { mkdirs() }
+        val versioned = File(models, "v").apply { mkdirs() }
+
+        CrawlerConfig.deleteStaleModelDirs(models, "v4")
+
+        assertTrue("only `v<digits>` dirs are generations", backup.isDirectory)
+        assertTrue("a `v4-old` dir is not a generation name", prefixed.isDirectory)
+        assertTrue("a bare `v` dir is not a generation name", versioned.isDirectory)
+        assertTrue(active.isDirectory)
+    }
+
+    @Test fun deleteStaleModelDirs_keepsPlainFilesIncludingOneNamedLikeAGeneration() {
+        val models = tmp.newFolder("models")
+        val active = File(models, "v4").apply { mkdirs() }
+        val notes = File(models, "notes.txt").apply { writeText("keep me") }
+        // A FILE named like a generation is not a dir and must never be swept.
+        val fileNamedV3 = File(models, "v3").apply { writeText("not a dir") }
+
+        CrawlerConfig.deleteStaleModelDirs(models, "v4")
+
+        assertTrue("plain files under models/ survive", notes.isFile)
+        assertTrue("a file named v3 is not a generation dir", fileNamedV3.isFile)
+        assertEquals("not a dir", fileNamedV3.readText())
+        assertTrue(active.isDirectory)
+    }
+
+    @Test fun deleteStaleModelDirs_missingOrEmptyRootIsANoOp() {
+        // A missing root (first run) or an unreadable one makes listFiles() return null.
+        val missing = File(tmp.root, "absent/models")
+        CrawlerConfig.deleteStaleModelDirs(missing, "v4")
+        assertFalse("the sweep must not create the root", missing.exists())
+
+        val empty = tmp.newFolder("empty-models")
+        CrawlerConfig.deleteStaleModelDirs(empty, "v4")
+        assertEquals("an empty root stays empty", 0, empty.listFiles()?.size ?: 0)
+    }
+
     // --- parseIni ---
 
     @Test fun parseIni_ignoresCommentsAndTrims() {

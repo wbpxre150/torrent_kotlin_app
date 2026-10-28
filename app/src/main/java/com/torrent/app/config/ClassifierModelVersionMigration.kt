@@ -1,14 +1,19 @@
 package com.torrent.app.config
 
 /**
- * Stage 12: the crawler's adult thresholds are probabilities calibrated against one
- * specific classifier model generation, so they are meaningless after a model dir bump
- * (`v3` -> `v4`). This migration resets them to the new generation's
- * defaults exactly once, using the last-seen model dir as its sentinel.
+ * The crawler's adult thresholds are probabilities calibrated against one specific classifier
+ * model generation, so they are meaningless after a bump to a newer generation (this build ships
+ * `models/v4`). This migration resets them to the new generation's defaults exactly once, using
+ * the last-seen model dir as its sentinel.
  *
- * The reset is deliberately unconditional — a user-tuned value was tuned against the
- * old model's score distribution and is therefore invalid, not merely stale — and it
- * must happen before the crawler is (re)started so v4 never runs with v3 thresholds.
+ * The reset is deliberately unconditional — a user-tuned value was tuned against the old model's
+ * score distribution and is therefore invalid, not merely stale — and it must happen before the
+ * crawler is (re)started so v4 never runs with v3 thresholds.
+ *
+ * It reaches app settings only: the sentinel, the two threshold keys, and the `config.ini`
+ * re-render the caller performs when this returns `true`. It must never write the crawler DB
+ * (`classifier_meta`/`torrent_class`) — the native backfill detects its work from
+ * `classifier_meta.clf_ver` still being the old generation.
  *
  * Pure: all state access is injected, so the decision is unit-testable without Android.
  */

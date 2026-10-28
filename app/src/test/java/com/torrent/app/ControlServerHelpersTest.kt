@@ -2,13 +2,21 @@ package com.torrent.app
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
 
 import com.torrent.app.config.BackupSettings
 import com.torrent.app.config.CrawlerSettings
 import com.torrent.app.ControlServer.Companion.CrawlerSettingsFormResult
 import org.junit.Assert.assertFalse
+// Robolectric (not for Context here, but for org.json): the mockable
+// android.jar stubs org.json, so `crawlerBackfillLine` would see a JSONObject
+// that answers every opt* with its default. Same reason
+// TransmissionConfigTest / TransmissionRpcClientTest run under this runner.
+@RunWith(RobolectricTestRunner::class)
 class ControlServerHelpersTest {
     @Test fun parseForm_decodesPairs() {
         val m = ControlServer.parseForm("token=abc123&label=transmission")
@@ -282,6 +290,45 @@ class ControlServerHelpersTest {
     @Test fun esc_escapesHtmlAndQuotes() {
         assertEquals("a&quot;b &amp; c&lt;d&gt;", ControlServer.esc("a\"b & c<d>"))
         assertEquals("plain", ControlServer.esc("plain"))
+    }
+
+    /**
+     * Stage 4: the crawler card's `classifier_backfill` line, formatted from the
+     * daemon's real /stats object (wire names `rows_processed` / `rows_total`,
+     * not the design doc's `rows_done`) with no thousands separators, matching
+     * the existing `%d` style of `crawlerStatsLine`. `last_error` is appended
+     * only while the backfill is failed, and a body without the object (or one
+     * that does not parse) yields no line at all.
+     */
+    @Test fun crawlerBackfillLine_formatsTheDaemonsBackfillObject() {
+        val running = """{"torrents_indexed":286705,"classifier_backfill":{
+            "state":"running","target_clf_ver":4,"rows_left":133634,
+            "rows_processed":51234,"rows_total":184868,"started_at":1761650000,
+            "finished_at":0,"last_error":""}}"""
+        assertEquals(
+            "Backfill: running 51234 / 184868 → v4",
+            ControlServer.crawlerBackfillLine(running),
+        )
+
+        val idle = """{"classifier_backfill":{"state":"idle","target_clf_ver":4,
+            "rows_left":0,"rows_processed":0,"rows_total":0,"started_at":0,
+            "finished_at":0,"last_error":""}}"""
+        assertEquals("Backfill: idle 0 / 0 → v4", ControlServer.crawlerBackfillLine(idle))
+
+        val failed = """{"classifier_backfill":{"state":"failed","target_clf_ver":4,
+            "rows_processed":12,"rows_total":184868,"last_error":"database disk image is malformed"}}"""
+        val failedLine = ControlServer.crawlerBackfillLine(failed)
+        assertNotNull("a failed backfill must still render its counters", failedLine)
+        assertTrue(failedLine!!, failedLine.startsWith("Backfill: failed 12 / 184868 → v4"))
+        assertTrue(
+            failedLine,
+            failedLine.endsWith("database disk image is malformed"),
+        )
+
+        // No classifier_backfill object (older daemon) and an unparseable body:
+        // no line, so the card keeps whatever it last showed.
+        assertNull(ControlServer.crawlerBackfillLine("""{"torrents_indexed":1}"""))
+        assertNull(ControlServer.crawlerBackfillLine("not json"))
     }
 
     /**

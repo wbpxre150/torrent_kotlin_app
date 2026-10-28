@@ -40,6 +40,8 @@ import org.json.JSONObject
 import com.torrent.app.config.CrawlerGate
 import com.torrent.app.config.ClassifierModelVersionMigration
 import com.torrent.app.config.ConfigDefaults
+import com.torrent.app.config.CrawlerStartOrder
+import com.torrent.app.config.effectiveCrawlerSettingsAfterMigration
 import com.torrent.app.backup.Bep51BackupManager
 import com.torrent.app.backup.Bep51BootstrapDownloader
 import com.torrent.app.backup.BootstrapResult
@@ -938,15 +940,11 @@ class DaemonService : Service() {
         // Stage 12: a classifier model-dir bump invalidates every stored threshold, so
         // migrate BEFORE the previous-settings snapshot (a later rollback must not
         // resurrect v2 thresholds) and before anything can start the crawler.
+        // This path keeps its explicit sequence rather than using [CrawlerStartOrder]: its
+        // gate can close after the render and return before any start (see below).
         val migrated = migrateClassifierVersion(crawlerConfig)
         // The reset is unconditional: it wins over the thresholds the user submitted.
-        val effective = if (migrated) {
-            s.copy(
-                adultHideThreshold = ConfigDefaults.CRAWLER.adultHideThreshold,
-            )
-        } else {
-            s
-        }
+        val effective = effectiveCrawlerSettingsAfterMigration(s, migrated)
         // Captured after the migration, so the LKG snapshot holds the reset thresholds.
         val previous = configStore.load().crawler
 
@@ -1425,18 +1423,22 @@ class DaemonService : Service() {
         crawlerControlExecutor.execute {
             try {
                 val crawlerConfig = CrawlerConfig(this)
-                crawlerConfig.ensureLayout()
                 // Stage 12: a classifier model-dir bump invalidates every stored
                 // threshold, so migrate BEFORE anything can start the crawler.
-                migrateClassifierVersion(crawlerConfig)
-                // Stage 5: before the crawler's (re)launch, warm-start it from
-                // a downloaded BEP51 bootstrap cache when configured. Bounded
-                // (15 s connect / 30 s read), and every failure falls through
-                // to the cold start below.
-                maybeBootstrapBep51Cache(crawlerConfig)
-                val crawler =
-                    registerCrawlerSupervisor(emptyList())
-                crawler.start()
+                CrawlerStartOrder(
+                    prepare = { crawlerConfig.ensureLayout() },
+                    migrate = { migrateClassifierVersion(crawlerConfig) },
+                    start = {
+                        // Stage 5: before the crawler's (re)launch, warm-start it from
+                        // a downloaded BEP51 bootstrap cache when configured. Bounded
+                        // (15 s connect / 30 s read), and every failure falls through
+                        // to the cold start below.
+                        maybeBootstrapBep51Cache(crawlerConfig)
+                        val crawler =
+                            registerCrawlerSupervisor(emptyList())
+                        crawler.start()
+                    },
+                ).run()
             } catch (e: Exception) {
                 android.util.Log.e("DaemonService", "failed to start crawler supervisor", e)
             }
@@ -1456,6 +1458,11 @@ class DaemonService : Service() {
      * [startCrawlerSupervisor]); a migration failure aborts that start/apply attempt
      * — it is logged by the caller and the apply path surfaces FAILED — without
      * crash-looping the service.
+     * Scope: SharedPreferences only — `classifier_model_version` (the sentinel) and the two
+     * threshold keys — plus the `config.ini` re-render above. It must NEVER write the crawler DB
+     * (`classifier_meta` / `torrent_class`) and must never delete or recreate that database: the
+     * native backfill detects its outstanding work from `classifier_meta.clf_ver` still being the
+     * old generation, so wiping or bumping that column would silently skip the reclassification.
      *
      * @return true when the thresholds were migrated (the sentinel did not match),
      *   false when it already matched this build's model generation.
