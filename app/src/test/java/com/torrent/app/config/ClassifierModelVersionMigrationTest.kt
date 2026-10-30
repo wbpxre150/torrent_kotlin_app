@@ -9,7 +9,7 @@ import org.junit.Test
 
 /**
  * The adult thresholds are probabilities calibrated per classifier model generation, so a
- * model-dir bump (`models/v3` -> `models/v4`) invalidates every stored value and must reset
+ * model-dir bump (`models/v5` -> `models/v6`) invalidates every stored value and must reset
  * them exactly once, before the crawler daemon starts.
  *
  * The fake below is a mutable in-memory store (not a captured constant) so that run->run
@@ -59,11 +59,11 @@ class ClassifierModelVersionMigrationTest {
         assertEquals(listOf("models/v3"), writes)
     }
 
-    @Test fun run_v3ToV4BumpResetsThresholds() {
-        stored = "models/v3"
+    @Test fun run_v5ToV6BumpResetsThresholds() {
+        stored = "models/v5"
         val ran = migration().run(CrawlerConfig.MODELS_SUBDIR)
 
-        assertTrue("the shipped v3 -> v4 bump must migrate", ran)
+        assertTrue("the shipped v5 -> v6 bump must migrate", ran)
         assertEquals("exactly one reset", 1, resets)
         assertEquals(listOf(CrawlerConfig.MODELS_SUBDIR), writes)
         assertEquals(
@@ -107,14 +107,14 @@ class ClassifierModelVersionMigrationTest {
         assertEquals(CrawlerConfig.MODELS_SUBDIR, stored)
     }
 
-    @Test fun run_hypotheticalV5BumpAlsoResets() {
-        stored = "models/v4"
-        val ran = migration().run("models/v5")
+    @Test fun run_hypotheticalV7BumpAlsoResets() {
+        stored = "models/v6"
+        val ran = migration().run("models/v7")
 
         assertTrue("a future generation bump must migrate with no logic change", ran)
         assertEquals(1, resets)
-        assertEquals(listOf("models/v5"), writes)
-        assertEquals("models/v5", stored)
+        assertEquals(listOf("models/v7"), writes)
+        assertEquals("models/v7", stored)
     }
 
     @Test fun run_callbackSequenceIsExactlyReadResetWrite() {
@@ -129,7 +129,7 @@ class ClassifierModelVersionMigrationTest {
             writeStoredModelDir = { events.add("WRITE") },
         )
 
-        assertTrue(recording("models/v3").run(CrawlerConfig.MODELS_SUBDIR))
+        assertTrue(recording("models/v5").run(CrawlerConfig.MODELS_SUBDIR))
         assertEquals("a generation change is read, reset, then write", listOf("READ", "RESET", "WRITE"), events)
 
         events.clear()

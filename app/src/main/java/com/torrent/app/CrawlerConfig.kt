@@ -16,7 +16,7 @@ import java.nio.file.StandardOpenOption
 
 /**
  * Owns the dht_crawler's working dir under internal storage: `filesDir/crawler/`
- * (contains `config.ini`, `data/`, the keyword files, and `models/v4/` with the
+ * (contains `config.ini`, `data/`, the keyword files, and `models/v6/` with the
  * classifier model files). Stage 09 (internal
  * storage only); the crawler process itself is started by a later supervisor step.
  */
@@ -45,7 +45,7 @@ class CrawlerConfig(
 
     /**
      * Copies the keyword files from `assets/dht_crawler/` into [workDir], and the
-     * classifier model files from `assets/dht_crawler/models/v4/` into [modelsDir],
+     * classifier model files from `assets/dht_crawler/models/v6/` into [modelsDir],
      * when missing or when the `"<versionCode>|<MODELS_SUBDIR>"` `.assets_version`
      * stamp differs — so a model-dir bump re-stages even at an unchanged version code.
      * Every call also sweeps `models/` for other generations ([deleteStaleModelDirs]):
@@ -57,7 +57,7 @@ class CrawlerConfig(
      */
     fun ensureAssets() {
         val version = currentVersionCode()
-        // The stamp carries the model dir as well as the version code: a v3 -> v4
+        // The stamp carries the model dir as well as the version code: a v5 -> v6
         // bump must re-stage even when `versionCode` itself is unchanged.
         val stampValue = "$version|$MODELS_SUBDIR"
         val stamp = File(workDir, STAMP_FILE)
@@ -85,7 +85,7 @@ class CrawlerConfig(
 
     /**
      * Deletes every immediate child dir of `workDir/models` that is not the current
-     * [MODELS_SUBDIR] generation (e.g. `v3` once the app ships `v4`). Sibling dirs only:
+     * [MODELS_SUBDIR] generation (e.g. `v5` once the app ships `v6`). Sibling dirs only:
      * the current one is never a candidate, so an in-flight crawler that resolves
      * [modelsDir] keeps its files. Delegates to the pure [deleteStaleModelDirs], which
      * owns the `v<digits>` guard.
@@ -219,7 +219,7 @@ class CrawlerConfig(
         const val HARD_BLOCK_FILE = "hard_block.txt"
 
         /** Classifier model dir, work-dir relative (mirrors crawler `classifier_model_dir`). */
-        const val MODELS_SUBDIR = "models/v4"
+        const val MODELS_SUBDIR = "models/v6"
 
         /**
          * A classifier model generation dir name: `v` followed by digits (`v3`, `v4`, …).
@@ -270,8 +270,8 @@ class CrawlerConfig(
         }
 
         /**
-         * Binary model assets shipped under `assets/dht_crawler/models/v4/` and staged
-         * into `workDir/models/v4/`, where the crawler resolves them via the pinned
+         * Binary model assets shipped under `assets/dht_crawler/models/v6/` and staged
+         * into `workDir/models/v6/`, where the crawler resolves them via the pinned
          * `classifier_model_dir`.
          */
         val MODEL_FILES = listOf("adult.ftz", "category.ftz", "tv_kind.ftz", "manifest.json")
