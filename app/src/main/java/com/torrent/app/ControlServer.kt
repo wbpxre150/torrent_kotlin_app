@@ -1494,6 +1494,16 @@ class ControlServer(
         val resetPendingNote = if (st.resetPending)
             "<p class=\"warn\">A backup reset is pending — uploads are blocked until the R2 delete completes (retried automatically).</p>"
         else ""
+        // The reset form's hidden field is named `confirm`, and an inline handler resolves a
+        // form's named controls ahead of `window` — so the builtin must stay written as
+        // `window.confirm(...)`. A bare `confirm(` here resolves to that hidden input and
+        // throws a TypeError, which does NOT cancel the submit (report failure-reset-button-2.md).
+        val resetForm = """
+              <form method="post" action="/crawler/backup/db/reset"
+                    onsubmit="return window.confirm('This permanently deletes the DB backup in R2 (${esc(jsQuoteEsc(dbPrefix))}/) and re-uploads everything. Continue?')">
+                <input type="hidden" name="confirm" value="RESET">
+                <button type="submit" class="btn">Reset backup from zero</button></form>
+        """.trimIndent()
         return """
             <fieldset class="card"><legend>DB backup (upload the crawler's incremental SQLite dump to the R2 DB bucket)</legend>
               <p class="meta">Dumps new torrents (<code>torrents.db</code>) as gzip-compressed SQL to
@@ -1511,10 +1521,7 @@ class ControlServer(
               database in the background (many hours for a large DB). Uploads are blocked until the delete completes;
               a failed delete is retried automatically.</p>
               $resetPendingNote
-              <form method="post" action="/crawler/backup/db/reset"
-                    onsubmit="return confirm('This permanently deletes the DB backup in R2 (${esc(jsQuoteEsc(dbPrefix))}/) and re-uploads everything. Continue?')">
-                <input type="hidden" name="confirm" value="RESET">
-                <button type="submit" class="btn">Reset backup from zero</button></form>
+              $resetForm
             </fieldset>
             <fieldset class="card"><legend>DB restore (stream the R2 dump chain into a fresh database)</legend>
               <p class="meta">Stops the crawler, then streams every dump object in the DB bucket

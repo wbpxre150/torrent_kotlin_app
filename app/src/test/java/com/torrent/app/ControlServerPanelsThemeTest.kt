@@ -143,7 +143,7 @@ class ControlServerPanelsThemeTest {
 
     /**
      * "Reset backup from zero": the DB backup card carries the reset form and
-     * a submit handler that calls the global confirm() builtin. The route itself
+     * a submit handler that calls the `window.confirm()` builtin. The route itself
      * is covered by [ControlServerAuthRedirectTest]; here we only pin the markup
      * contract.
      */
@@ -156,12 +156,31 @@ class ControlServerPanelsThemeTest {
         assertTrue("missing the hidden confirm field", html.contains("name=\"confirm\""))
         assertTrue("missing the button label", html.contains("Reset backup from zero"))
         assertTrue("the hidden field must pre-set the confirm word", html.contains("value=\"RESET\""))
-        // An inline handler can only see globals: it must use the confirm()
-        // builtin, never a page-local function (that shipped as a ReferenceError).
-        assertTrue("missing the global confirm() dialog", html.contains("onsubmit=\"return confirm("))
+        // An inline handler's scope chain reaches the form's named controls before
+        // `window`, and this form has an input named `confirm`: the builtin must stay
+        // qualified, otherwise the handler throws `TypeError: confirm is not a function`
+        // and the submit goes through unconfirmed.
+        assertTrue(
+            "the dialog must be the window-qualified builtin",
+            html.contains("onsubmit=\"return window.confirm(")
+        )
+        // The guards below are scoped to the reset form's own markup: the panel's other
+        // forms legitimately use the bare confirm() builtin (none of them has a control
+        // named `confirm`), so only this form's handler can be shadowed by that name.
+        val afterResetAction = html.substringAfter("action=\"/crawler/backup/db/reset\"", "")
+        val resetFormHtml = afterResetAction.substringBefore("</form>", "")
+        assertTrue("could not isolate the reset form markup", resetFormHtml.isNotEmpty())
+        assertTrue(
+            "the reset form must carry the qualified handler",
+            resetFormHtml.contains("onsubmit=\"return window.confirm(")
+        )
+        assertFalse(
+            "an unqualified confirm() resolves to the form's own input",
+            resetFormHtml.contains("onsubmit=\"return confirm(")
+        )
         assertFalse(
             "the inline handler must not reference a page-scoped function",
-            html.contains("dbResetConfirm")
+            resetFormHtml.contains("dbResetConfirm")
         )
         // The explanation must name the prefix the purge will delete, escaped.
         val prefixed = newServer(backup = BackupSettings(r2DbObjectPrefix = "db"))
