@@ -45,13 +45,17 @@ class ControlServerPanelsThemeTest {
         return TokenManager(context)
     }
 
-    private fun newServer(): ControlServer {
+    private fun newServer(
+        backup: BackupSettings = BackupSettings(),
+        crawlerBackupDbStatus: () -> com.torrent.app.backup.DbBackupStatus =
+            { com.torrent.app.backup.DbBackupStatus() },
+    ): ControlServer {
         val config = AppConfig(
             wizardCompleted = true,
             transmission = TransmissionSettings("u", "p", 51413, 0, 0, 0, 0),
             ftp = FtpSettings("kodi", "pw", 2121, false),
             crawler = CrawlerSettings(),
-            backup = BackupSettings(),
+            backup = backup,
             dataSubpath = "data",
         )
         val notWired = ApplyResult(false, "test", false)
@@ -72,6 +76,7 @@ class ControlServerPanelsThemeTest {
             startDaemon = { false },
             applyTransmission = { _, _ -> notWired },
             applyFtp = { notWired },
+            crawlerBackupDbStatus = crawlerBackupDbStatus,
         )
     }
 
@@ -133,6 +138,45 @@ class ControlServerPanelsThemeTest {
         assertTrue(
             "maintenance one-shot buttons must use the secondary pill",
             html.contains("class=\"btn secondary\"")
+        )
+    }
+
+    /**
+     * "Reset backup from zero": the DB backup card carries the reset form and
+     * the JS hook its submit handler calls. The route itself is covered by
+     * [ControlServerAuthRedirectTest]; here we only pin the markup contract.
+     */
+    @Test fun dbBackupSection_rendersResetForm() {
+        val html = crawlerPanel()
+        assertTrue(
+            "missing the reset form action",
+            html.contains("action=\"/crawler/backup/db/reset\"")
+        )
+        assertTrue("missing the hidden confirm field", html.contains("name=\"confirm\""))
+        assertTrue("missing the button label", html.contains("Reset backup from zero"))
+        assertTrue("missing the dbResetConfirm JS hook", html.contains("dbResetConfirm"))
+        // The explanation must name the prefix the purge will delete, escaped.
+        val prefixed = newServer(backup = BackupSettings(r2DbObjectPrefix = "db"))
+            .buildCrawlerPanel(null, false, false)
+        assertTrue(
+            "the explanation must render the configured prefix",
+            prefixed.contains("<code>db/</code>")
+        )
+    }
+
+    /** A pending reset blocks every upload, so the card must say so. */
+    @Test fun dbBackupSection_warnsWhenResetPending() {
+        val pending = newServer(
+            backup = BackupSettings(r2DbObjectPrefix = "db"),
+            crawlerBackupDbStatus = { com.torrent.app.backup.DbBackupStatus(resetPending = true) },
+        ).buildCrawlerPanel(null, false, false)
+        assertTrue(
+            "a pending reset must be announced",
+            pending.contains("A backup reset is pending")
+        )
+        assertFalse(
+            "no pending banner without the marker",
+            crawlerPanel().contains("A backup reset is pending")
         )
     }
 }

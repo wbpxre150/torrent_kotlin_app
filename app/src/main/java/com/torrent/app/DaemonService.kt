@@ -282,6 +282,28 @@ class DaemonService : Service() {
             bookmarkFile = { File(filesDir, "backup/db_bookmark.txt") },
             readLastSuccessDate = { configStore.lastDbBackupSuccessDate() },
             writeLastSuccessDate = { configStore.setDbBackupSuccessDate(it) },
+            // "Reset backup from zero": the purge seam lists/deletes under the
+            // configured DB object prefix in the very same bucket the uploader
+            // writes to, so a reset can never reach another bucket. The marker
+            // lives next to the bookmark file, so a purge interrupted by a
+            // process death is retried by the next periodic check.
+            purgerFactory = { s ->
+                val client = com.torrent.app.s3.S3Client(
+                    endpoint = s.r2Endpoint,
+                    bucket = s.r2DbBucket,
+                    accessKeyId = s.r2AccessKeyId,
+                    secretAccessKey = s.r2SecretAccessKey,
+                )
+                object : com.torrent.app.backup.S3DbPurger {
+                    override fun list(prefix: String): com.torrent.app.s3.S3ListResult =
+                        client.list(prefix)
+
+                    override fun delete(objectKey: String): com.torrent.app.s3.S3DeleteResult =
+                        client.delete(objectKey)
+                }
+            },
+            resetMarkerFile = { File(filesDir, "backup/db_reset_pending") },
+            clearLastSuccessDate = { configStore.clearDbBackupSuccessDate() },
         )
         // DB restore (plan 2, Stage 4): one-shot, no scheduler. Reuses the
         // crawler-control executor (the 60 s stop + the one-shot must not run
@@ -297,7 +319,10 @@ class DaemonService : Service() {
                 crawlerApplyStatus.phase.isActive ||
                     crawlerMaintenance.status.running ||
                     bep51Backup.status.state == com.torrent.app.backup.BackupState.RUNNING ||
-                    dbBackup.inFlight
+                    // A pending reset means the remote chain is being deleted:
+                    // a restore must never read a half-purged chain.
+                    dbBackup.inFlight ||
+                    dbBackup.resetPending
             },
             clientFactory = { s ->
                 val client = com.torrent.app.s3.S3Client(
@@ -378,6 +403,7 @@ class DaemonService : Service() {
             crawlerBackupStatus = { bep51Backup.status },
             crawlerBackupDbUpload = { dbBackup.uploadNow(manual = true).message },
             crawlerBackupDbStatus = { dbBackup.status },
+            crawlerBackupDbReset = { dbBackup.resetNow().message },
             crawlerRestoreDb = { dbRestore.restoreNow().message },
             addHandler = crawlerAddHandler,
             crawlerRestoreDbStatus = { dbRestore.status },

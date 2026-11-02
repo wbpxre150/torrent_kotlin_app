@@ -14,6 +14,7 @@ import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketException
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -52,6 +53,9 @@ class ControlServerAuthRedirectTest {
 
     private var port = 0
     private lateinit var control: ControlServer
+
+    /** How often the injected reset lambda ran; proves the route's guard. */
+    private val resetCalls = AtomicInteger()
 
     @Before fun startServer() {
         port = freePort()
@@ -134,6 +138,46 @@ class ControlServerAuthRedirectTest {
     }
 
     /**
+     * "Reset backup from zero" wipes the whole remote DB dump chain, so a form
+     * post without the typed confirmation must be refused *and* must not reach
+     * the manager — the JS prompt is a convenience, not the guard.
+     */
+    @Test fun dbResetPost_refusesWrongConfirmWithoutCallingReset() {
+        val r = postWithRetry("/crawler/backup/db/reset", body = "confirm=nope", cookie = COOKIE)
+        assertEquals(r.statusLine, 302, r.status)
+        val location = r.header("Location")
+        assertNotNull("expected a Location on the reset redirect", location)
+        assertTrue(
+            "expected a /settings/crawler?msg= redirect, got: $location",
+            location!!.startsWith("/settings/crawler?msg=")
+        )
+        assertFalse("the Location must not carry token=: $location", location.contains("token="))
+        val msg = redirectMessage(location)
+        assertTrue("expected a refusal message, got: $msg", msg.contains("refused"))
+        assertTrue("expected ok=false, got: $location", location.endsWith("&ok=false"))
+        assertEquals("the reset must not run without the typed word", 0, resetCalls.get())
+    }
+
+    @Test fun dbResetPost_confirmedCallsResetOnce() {
+        val r = postWithRetry("/crawler/backup/db/reset", body = "confirm=RESET", cookie = COOKIE)
+        assertEquals(r.statusLine, 302, r.status)
+        val location = r.header("Location")
+        assertNotNull("expected a Location on the reset redirect", location)
+        assertTrue(
+            "expected a /settings/crawler?msg= redirect, got: $location",
+            location!!.startsWith("/settings/crawler?msg=")
+        )
+        assertFalse("the Location must not carry token=: $location", location.contains("token="))
+        assertEquals("db backup reset queued", redirectMessage(location))
+        assertTrue("expected ok=true, got: $location", location.endsWith("&ok=true"))
+        assertEquals("the reset must be queued exactly once", 1, resetCalls.get())
+    }
+
+    /** The `msg=` status the redirect carries, URL-decoded. */
+    private fun redirectMessage(location: String): String = java.net.URLDecoder.decode(
+        location.substringAfter("msg=").substringBefore("&ok="), "UTF-8")
+
+    /**
      * Posts an authenticated form to [path] and pins the redirect contract: a
      * 302 to [expect] with its `msg=` status, and no token anywhere in the
      * Location. [expect] differs from [path] for the crawler maintenance /
@@ -185,6 +229,10 @@ class ControlServerAuthRedirectTest {
             startDaemon = { false },
             applyTransmission = { _, _ -> notWired },
             applyFtp = { notWired },
+            crawlerBackupDbReset = {
+                resetCalls.incrementAndGet()
+                "db backup reset queued"
+            },
             port = port,
         )
     }

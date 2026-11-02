@@ -83,6 +83,11 @@ class ControlServer(
     private val crawlerBackupDbUpload: () -> String = { "DB backup is not wired" },
     private val crawlerBackupDbStatus: () -> com.torrent.app.backup.DbBackupStatus =
         { com.torrent.app.backup.DbBackupStatus() },
+    // "Reset backup from zero": the POST route deletes every object under the
+    // configured DB object prefix and re-drains the whole database. It needs
+    // the typed confirmation, re-checked server-side, before it is queued.
+    private val crawlerBackupDbReset: () -> String =
+        { "refused: DB backup reset is not wired" },
     // DB restore (plan 2, Stage 4): the POST route queues an explicit
     // restore of the crawler DB from the R2 dump chain; the GET route
     // polls the manager's status (no secrets).
@@ -523,6 +528,17 @@ class ControlServer(
                     // polls /api/crawler/backup/db for the result.
                     post("crawler/backup/db") {
                         val msg = crawlerBackupDbUpload()
+                        val ok = !msg.startsWith("refused")
+                        redirectAuthed(call, "/settings/crawler?msg=${urlEnc(msg)}&ok=$ok")
+                    }
+
+                    // "Reset backup from zero": the form's typed confirmation is
+                    // re-checked here — a client that skips the JS prompt (or
+                    // posts by hand) must not be able to wipe the R2 chain.
+                    post("crawler/backup/db/reset") {
+                        val confirm = parseForm(call.receiveText())["confirm"]
+                        val msg = if (dbResetConfirmed(confirm)) crawlerBackupDbReset()
+                        else "refused: type $DB_RESET_CONFIRM_WORD to confirm"
                         val ok = !msg.startsWith("refused")
                         redirectAuthed(call, "/settings/crawler?msg=${urlEnc(msg)}&ok=$ok")
                     }
@@ -1371,13 +1387,22 @@ class ControlServer(
               function pollDbBackup() {
                 fetch('/api/crawler/backup/db').then(function (r) { return r.json(); }).then(function (st) {
                   var box = document.getElementById('db-backup-status');
-                  var text = 'DB backup: ' + st.state + (st.message ? ' \u2014 ' + st.message : '');
+                  var text = 'DB backup: ' + st.state + (st.message ? ' \u2014 ' + st.message : '') + (st.resetPending ? ' \u2014 reset pending' : '');
                   if (st.bytes != null) text += ' (' + st.bytes + ' bytes uploaded)';
                   if (st.lastSuccess != null) text += ' (last success ' + new Date(st.lastSuccess).toLocaleString() + ')';
                   box.textContent = text;
                 }).catch(function () {});
               }
               setInterval(pollDbBackup, 5000); pollDbBackup();
+              // "Reset backup from zero" is destructive and irreversible, so the
+              // button asks for the word to be typed; the route re-checks it
+              // server-side. The prefix is JS-escaped, then HTML-escaped.
+              function dbResetConfirm(f) {
+                var v = prompt('This permanently deletes the DB backup in R2 (${esc(jsQuoteEsc(sBackup.r2DbObjectPrefix))}/) and re-uploads everything. Type RESET to continue.');
+                if (v !== 'RESET') return false;
+                f.confirm.value = v;
+                return true;
+              }
               function pollDbRestore() {
                 fetch('/api/crawler/restore').then(function (r) { return r.json(); }).then(function (st) {
                   var box = document.getElementById('db-restore-status');
@@ -1470,8 +1495,14 @@ class ControlServer(
     private fun buildDbBackupSection(): String {
         val st = crawlerBackupDbStatus()
         val rst = crawlerRestoreDbStatus()
+        val dbPrefix = loadConfig().backup.r2DbObjectPrefix
         val enabledNote = if (st.uploadEnabled) "" else
             "<p class=\"warn\">DB dump upload is disabled — tick <em>Enable daily DB dump upload</em> above and apply first.</p>"
+        // A pending marker blocks every upload until the R2 purge completes;
+        // the card must say so, otherwise a stalled upload looks like a bug.
+        val resetPendingNote = if (st.resetPending)
+            "<p class=\"warn\">A backup reset is pending — uploads are blocked until the R2 delete completes (retried automatically).</p>"
+        else ""
         return """
             <fieldset class="card"><legend>DB backup (upload the crawler's incremental SQLite dump to the R2 DB bucket)</legend>
               <p class="meta">Dumps new torrents (<code>torrents.db</code>) as gzip-compressed SQL to
@@ -1484,6 +1515,14 @@ class ControlServer(
                     onsubmit="return confirm('Upload the crawler DB dump to R2 now?')">
               <button type="submit" class="btn">Upload now</button></form>
               <div id="db-backup-status" class="meta">DB backup: ${st.state.name}</div>
+              <p class="meta"><strong>Reset backup from zero</strong> deletes every object under
+              <code>${esc(dbPrefix)}/</code> in the R2 DB bucket, resets the upload bookmark, and re-uploads the whole
+              database in the background (many hours for a large DB). Uploads are blocked until the delete completes;
+              a failed delete is retried automatically.</p>
+              $resetPendingNote
+              <form method="post" action="/crawler/backup/db/reset" onsubmit="return dbResetConfirm(this)">
+                <input type="hidden" name="confirm" value="">
+                <button type="submit" class="btn">Reset backup from zero</button></form>
             </fieldset>
             <fieldset class="card"><legend>DB restore (stream the R2 dump chain into a fresh database)</legend>
               <p class="meta">Stops the crawler, then streams every dump object in the DB bucket
@@ -1731,6 +1770,27 @@ class ControlServer(
         internal fun esc(s: String): String =
             s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 .replace("\"", "&quot;")
+
+        /**
+         * Escapes a value for embedding inside a JS single-quoted string. [esc]
+         * is HTML-only, and the DB object prefix is not validated against
+         * quotes, so a prefix like `o'brien` would otherwise end the string
+         * literal in [buildCrawlerPanel]'s inline script. Applied before [esc]
+         * (JS layer first, HTML attribute layer second).
+         */
+        internal fun jsQuoteEsc(s: String): String =
+            s.replace("\\", "\\\\").replace("'", "\\'")
+
+        /** The word the operator must type to confirm a DB backup reset. */
+        internal const val DB_RESET_CONFIRM_WORD = "RESET"
+
+        /**
+         * True only for an exact [DB_RESET_CONFIRM_WORD]: the reset deletes the
+         * whole remote DB dump chain, so a near-miss (case difference, stray
+         * whitespace, a missing field) must refuse rather than guess.
+         */
+        internal fun dbResetConfirmed(confirm: String?): Boolean =
+            confirm == DB_RESET_CONFIRM_WORD
 
         /**
          * The one-line `classifier_backfill` summary the dashboard card shows,
@@ -3950,6 +4010,7 @@ ${adultSelectionRow(adultSelection)}
             append(",\"statementCount\":").append(st.statementCount?.toString() ?: "null")
             append(",\"objectKey\":").append(jsonStr(st.objectKey))
             append(",\"uploadEnabled\":").append(st.uploadEnabled)
+            append(",\"resetPending\":").append(st.resetPending)
             append(",\"configured\":").append(st.configured).append("}")
         }
 

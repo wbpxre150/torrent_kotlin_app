@@ -237,7 +237,7 @@ class ControlServerHelpersTest {
         assertEquals(
             "{\"state\":\"IDLE\",\"message\":\"\",\"lastAttempt\":null,\"lastSuccess\":null,"
                 + "\"bytes\":null,\"sqlBytes\":null,\"statementCount\":null,\"objectKey\":null,"
-                + "\"uploadEnabled\":false,\"configured\":false}",
+                + "\"uploadEnabled\":false,\"resetPending\":false,\"configured\":false}",
             json)
     }
 
@@ -260,7 +260,7 @@ class ControlServerHelpersTest {
                 + "\"message\":\"uploaded 123 bytes to \\\"db/incremental_20231114_0-10.sql.gz\\\" (3 statements)\","
                 + "\"lastAttempt\":111,\"lastSuccess\":222,\"bytes\":123,\"sqlBytes\":123,"
                 + "\"statementCount\":3,\"objectKey\":\"db/incremental_20231114_0-10.sql.gz\","
-                + "\"uploadEnabled\":true,\"configured\":true}",
+                + "\"uploadEnabled\":true,\"resetPending\":false,\"configured\":true}",
             json)
     }
 
@@ -419,6 +419,31 @@ class ControlServerHelpersTest {
         assertEquals("new-bucket", on.r2DbBucket)
         // A blank prefix keeps the current value.
         assertEquals("cur-prefix", on.r2DbObjectPrefix)
+    }
+
+    /**
+     * The reset deletes the whole remote DB dump chain, so only the exact word
+     * typed into the prompt may confirm it — and the prompt's JS string literal
+     * must survive a prefix containing a quote or a backslash.
+     */
+    @Test fun dbResetConfirmed_acceptsOnlyExactWord() {
+        assertTrue(ControlServer.dbResetConfirmed("RESET"))
+        assertFalse("a missing field must refuse", ControlServer.dbResetConfirmed(null))
+        assertFalse("an empty field must refuse", ControlServer.dbResetConfirmed(""))
+        assertFalse("lower case must refuse", ControlServer.dbResetConfirmed("reset"))
+        assertFalse("leading space must refuse", ControlServer.dbResetConfirmed(" RESET"))
+        assertFalse("trailing space must refuse", ControlServer.dbResetConfirmed("RESET "))
+        assertEquals("\\'", ControlServer.jsQuoteEsc("'"))
+        assertEquals("o\\'brien", ControlServer.jsQuoteEsc("o'brien"))
+        assertEquals("a\\\\b", ControlServer.jsQuoteEsc("a\\b"))
+    }
+
+    @Test fun dbBackupStatusJson_resetPending() {
+        val pending = ControlServer.dbBackupStatusJson(
+            com.torrent.app.backup.DbBackupStatus(resetPending = true))
+        assertTrue(pending, pending.contains("\"resetPending\":true"))
+        val idle = ControlServer.dbBackupStatusJson(com.torrent.app.backup.DbBackupStatus())
+        assertTrue(idle, idle.contains("\"resetPending\":false"))
     }
 
     private fun backupSettingsForFormTest() = BackupSettings(
