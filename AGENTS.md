@@ -252,3 +252,31 @@ adb -s 51404fe4 shell am start -n com.torrent.app/.MainActivity
 
 The swap keeps the replaced file as `torrents.db.bak`; delete it once the new database is confirmed
 good: `adb -s 51404fe4 exec-out run-as com.torrent.app sh -c 'rm files/crawler/data/torrents.db.bak'`.
+
+<!-- gortex:communities:start -->
+## Community Skills
+
+| Area | Description | Explore |
+|------|-------------|---------|
+| Dht Crawler Src Log Msg | 293 symbols | `analyze(operation:"communities", id:"community-24")` |
+| App Storage 2 Dirs Safipccodec | 266 symbols | `analyze(operation:"communities", id:"community-80")` |
+| App Backup 2 Dirs Dbbookmark | 199 symbols | `analyze(operation:"communities", id:"community-67")` |
+| Cpp Dht Crawler Android | 193 symbols | `analyze(operation:"communities", id:"community-3")` |
+| App Config 10 Dirs | 179 symbols | `analyze(operation:"communities", id:"community-77")` |
+| App Backup 3 Dirs | 170 symbols | `analyze(operation:"communities", id:"community-69")` |
+| App Config 4 Dirs | 167 symbols | `analyze(operation:"communities", id:"community-134")` |
+| App Config 5 Dirs | 158 symbols | `analyze(operation:"communities", id:"community-135")` |
+| App S3 2 Dirs | 144 symbols | `analyze(operation:"communities", id:"community-143")` |
+| App Wizard 4 Dirs | 137 symbols | `analyze(operation:"communities", id:"community-86")` |
+| Torrent App 1 Dirs Controlserver | 135 symbols | `analyze(operation:"communities", id:"community-96")` |
+| Torrent App 2 Dirs Crawlerconfig | 131 symbols | `analyze(operation:"communities", id:"community-102")` |
+| 1 Dirs Get | 89 symbols | `analyze(operation:"communities", id:"community-157")` |
+| App Backup 1 Dirs Runcheck | 87 symbols | `analyze(operation:"communities", id:"community-65")` |
+| App Storage 1 Dirs Renamedoc | 70 symbols | `analyze(operation:"communities", id:"community-82")` |
+| App Backup 1 Dirs Sqlvalue | 67 symbols | `analyze(operation:"communities", id:"community-74")` |
+| App Config 1 Dirs Submit | 67 symbols | `analyze(operation:"communities", id:"community-139")` |
+| Torrent App 1 Dirs Crawlerproxyserver | 63 symbols | `analyze(operation:"communities", id:"community-104")` |
+| Torrent App 4 Dirs Start | 58 symbols | `analyze(operation:"communities", id:"community-50")` |
+| Cpp Ftp Server Reply | 54 symbols | `analyze(operation:"communities", id:"community-40")` |
+
+<!-- gortex:communities:end -->
