@@ -170,6 +170,16 @@ class ConfigStoreTest {
         assertEquals("2025-01-03", s.lastBackupSuccessDate())
     }
 
+    @Test fun clearDbBackupSuccessDate_clearsKey() {
+        val s = store()
+        s.setDbBackupSuccessDate("2025-01-02")
+        assertEquals("2025-01-02", s.lastDbBackupSuccessDate())
+        // A "reset backup from zero" drops the daily gate so the whole DB is
+        // drained again in the same day.
+        s.clearDbBackupSuccessDate()
+        assertNull(s.lastDbBackupSuccessDate())
+    }
+
     @Test fun setWizardCompleted_persists() {
         val s = store()
         assertFalse(s.load().wizardCompleted)

@@ -1,6 +1,9 @@
 package com.torrent.app.backup
 
 import com.torrent.app.config.BackupSettings
+import com.torrent.app.s3.S3DeleteResult
+import com.torrent.app.s3.S3ListResult
+import com.torrent.app.s3.S3ListedObject
 import com.torrent.app.s3.S3PutResult
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -104,6 +107,36 @@ class DbBackupManagerTest {
         }
     }
 
+    /**
+     * Fake [S3DbPurger] for the reset-from-zero tests: records every LIST
+     * prefix and every DELETE attempt, and scripts both sides (a queue of
+     * per-call LIST results, per-key and per-call DELETE overrides).
+     */
+    private class FakePurger(
+        var listResult: S3ListResult = S3ListResult.Success(200, emptyList()),
+        private val listResults: MutableList<S3ListResult> = mutableListOf(),
+    ) : S3DbPurger {
+        /** Every prefix passed to [list], in call order. */
+        val listPrefixes = mutableListOf<String>()
+        /** Every key [delete] was called with, in call order. */
+        val deleted = mutableListOf<String>()
+        /** Per-key scripted DELETE results (an unscripted key answers Success). */
+        val deleteResults = mutableMapOf<String, S3DeleteResult>()
+        /** Optional per-call DELETE results, consumed before [deleteResults]. */
+        val deleteQueue = mutableListOf<S3DeleteResult>()
+
+        override fun list(prefix: String): S3ListResult {
+            listPrefixes += prefix
+            return if (listResults.isNotEmpty()) listResults.removeAt(0) else listResult
+        }
+
+        override fun delete(objectKey: String): S3DeleteResult {
+            deleted += objectKey
+            if (deleteQueue.isNotEmpty()) return deleteQueue.removeAt(0)
+            return deleteResults[objectKey] ?: S3DeleteResult.Success(204)
+        }
+    }
+
     /** Scripted [DbDumper]; records the bookmark it was given. */
     private class FakeDumper(
         var outcome: DbDumpOutcome = testDumpOutcome(),
@@ -201,6 +234,9 @@ class DbBackupManagerTest {
         bookmarkFile: File = File(tmp.root, "db_bookmark.txt"),
         lastSuccessDate: () -> String? = { null },
         writeLastSuccessDate: (String) -> Unit = {},
+        purger: S3DbPurger = FakePurger(),
+        markerFile: File = File(tmp.root, "db_reset_pending"),
+        clearLastSuccessDate: () -> Unit = {},
     ) = DbBackupManager(
         dbFile = { dbFile },
         dumperFactory = { dumper },
@@ -215,6 +251,9 @@ class DbBackupManagerTest {
         fastFollowUpDelayMs = fastFollowUpDelayMs,
         readLastSuccessDate = lastSuccessDate,
         writeLastSuccessDate = writeLastSuccessDate,
+        purgerFactory = { purger },
+        resetMarkerFile = { markerFile },
+        clearLastSuccessDate = clearLastSuccessDate,
     )
 
     private fun dbFile(): File = File(tmp.root, "torrents.db").apply { writeBytes(ByteArray(16)) }
@@ -1195,5 +1234,250 @@ class DbBackupManagerTest {
         assertTrue(m.status.message, m.status.message.contains("boom"))
         assertFalse(m.inFlight)
         assertEquals(0, up.calls)
+    }
+
+    // --- reset from zero (Stage 1) -------------------------------------------
+
+    @Test fun resetPurgesPrefixObjectsAndRestartsFromZero() {
+        val up = FakeUploader()
+        val d = FakeDumper()
+        val purger = FakePurger(listResult = S3ListResult.Success(200, listOf(
+            S3ListedObject("db/a.sql.gz", 10L),
+            S3ListedObject("other/x", 20L),
+            S3ListedObject("db/a.idx.gz", 30L),
+        )))
+        val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        DbBookmark.write(bookmarkFile, DbBookmark(10, 2))
+        val markerFile = File(tmp.root, "db_reset_pending")
+        var cleared = 0
+        val m = newManager(
+            dbFile(), d, up,
+            bookmarkFile = bookmarkFile,
+            purger = purger,
+            markerFile = markerFile,
+            clearLastSuccessDate = { cleared++ },
+        )
+        val st = m.runCheck(manual = false, reset = true)
+        assertEquals(DbBackupState.SUCCESS, st.state)
+        // One uncapped LIST round, one prefix, prefix-only deletes.
+        assertEquals(listOf("db/"), purger.listPrefixes)
+        assertEquals(listOf("db/a.sql.gz", "db/a.idx.gz"), purger.deleted)
+        assertEquals(1, cleared)
+        assertFalse(markerFile.exists())
+        assertFalse(st.resetPending)
+        // The local cursor was dropped BEFORE the drain, so the dump restarts
+        // from the very beginning of the database.
+        assertEquals(DbBookmark.FIRST_RUN, d.lastBookmark)
+        assertEquals(1, up.calls)
+        assertTrue(st.message, st.message.startsWith("reset: deleted 2 objects; "))
+    }
+
+    @Test fun resetDeleteFailureFailsWithMarkerAndNoUpload() {
+        val up = FakeUploader()
+        val d = FakeDumper()
+        val purger = FakePurger(listResult = S3ListResult.Success(200, listOf(
+            S3ListedObject("db/a.sql.gz", 10L),
+            S3ListedObject("db/a.idx.gz", 20L),
+        )))
+        purger.deleteQueue += S3DeleteResult.Success(204)
+        purger.deleteQueue += S3DeleteResult.ServerError(503, "unavailable", attempts = 3)
+        val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        DbBookmark.write(bookmarkFile, DbBookmark(10, 2))
+        val markerFile = File(tmp.root, "db_reset_pending")
+        var cleared = 0
+        val m = newManager(
+            dbFile(), d, up,
+            bookmarkFile = bookmarkFile,
+            purger = purger,
+            markerFile = markerFile,
+            clearLastSuccessDate = { cleared++ },
+        )
+        val st = m.runCheck(manual = false, reset = true)
+        assertEquals(DbBackupState.FAILED, st.state)
+        assertTrue(st.message, st.message.startsWith("reset pending:"))
+        assertTrue(st.message, st.message.contains("db/a.idx.gz"))
+        // The marker survives, so every later upload stays blocked.
+        assertTrue(markerFile.exists())
+        assertTrue(st.resetPending)
+        // The local cursor and the daily date are untouched: nothing re-drains
+        // onto the half-deleted prefix.
+        assertEquals(DbBookmark(10, 2), DbBookmark.read(bookmarkFile))
+        assertEquals(0, cleared)
+        assertEquals(0, d.calls)
+        assertEquals(0, up.calls)
+    }
+
+    @Test fun pendingMarkerCompletesOnNextPeriodicCheck() {
+        val up = FakeUploader()
+        val d = FakeDumper()
+        val purger = FakePurger(listResult = S3ListResult.Success(200,
+            listOf(S3ListedObject("db/a.sql.gz", 10L))))
+        val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        DbBookmark.write(bookmarkFile, DbBookmark(10, 2))
+        val markerFile = File(tmp.root, "db_reset_pending").apply { writeText("") }
+        val m = newManager(dbFile(), d, up, bookmarkFile = bookmarkFile,
+            purger = purger, markerFile = markerFile)
+        // No reset flag: the leftover marker alone drives the retry.
+        val st = m.runCheck(manual = false)
+        assertEquals(DbBackupState.SUCCESS, st.state)
+        assertEquals(listOf("db/a.sql.gz"), purger.deleted)
+        assertFalse(markerFile.exists())
+        assertEquals(DbBookmark.FIRST_RUN, d.lastBookmark)
+        assertEquals(1, up.calls)
+    }
+
+    @Test fun pendingPurgeRunsDespiteDailyGate() {
+        val up = FakeUploader()
+        val purger = FakePurger(listResult = S3ListResult.Success(200,
+            listOf(S3ListedObject("db/a.sql.gz", 10L))))
+        val markerFile = File(tmp.root, "db_reset_pending").apply { writeText("") }
+        // Already uploaded today, per the fake clock (DAY1 = 2023-11-14).
+        var stored: String? = "2023-11-14"
+        val m = newManager(
+            dbFile(), FakeDumper(), up,
+            purger = purger,
+            markerFile = markerFile,
+            lastSuccessDate = { stored },
+            writeLastSuccessDate = { stored = it },
+            clearLastSuccessDate = { stored = null },
+        )
+        val st = m.runCheck(manual = false)
+        // The purge ran BEFORE the daily gate was consulted, and clearing the
+        // daily date let the re-drain through in the same check.
+        assertEquals(listOf("db/a.sql.gz"), purger.deleted)
+        assertFalse(markerFile.exists())
+        assertEquals(DbBackupState.SUCCESS, st.state)
+        assertEquals(1, up.calls)
+        assertTrue(st.message, st.message.startsWith("reset: deleted 1 objects; "))
+    }
+
+    @Test fun resetWhenDisabledIsNotConfigured() {
+        val purger = FakePurger()
+        val markerFile = File(tmp.root, "db_reset_pending")
+        val m = newManager(dbFile(), FakeDumper(), FakeUploader(),
+            settings(dbBackupEnabled = false), purger = purger, markerFile = markerFile)
+        val st = m.runCheck(manual = false, reset = true)
+        assertEquals(DbBackupState.NOT_CONFIGURED, st.state)
+        assertEquals(0, purger.listPrefixes.size)
+        assertEquals(0, purger.deleted.size)
+        // A failing gate must never write the marker (it would block uploads).
+        assertFalse(markerFile.exists())
+        assertFalse(st.resetPending)
+    }
+
+    @Test fun resetWhenBusySkipsWithoutMarker() {
+        val purger = FakePurger()
+        val markerFile = File(tmp.root, "db_reset_pending")
+        val m = newManager(dbFile(), FakeDumper(), FakeUploader(), busy = true,
+            purger = purger, markerFile = markerFile)
+        val st = m.runCheck(manual = false, reset = true)
+        assertEquals(DbBackupState.SKIPPED_BUSY, st.state)
+        assertEquals(0, purger.listPrefixes.size)
+        assertFalse(markerFile.exists())
+    }
+
+    @Test fun resetWithoutWifiSkipsWithoutMarker() {
+        val purger = FakePurger()
+        val markerFile = File(tmp.root, "db_reset_pending")
+        val m = newManager(dbFile(), FakeDumper(), FakeUploader(), wifi = false,
+            purger = purger, markerFile = markerFile)
+        val st = m.runCheck(manual = false, reset = true)
+        assertEquals(DbBackupState.SKIPPED_NO_WIFI, st.state)
+        assertEquals(0, purger.listPrefixes.size)
+        assertFalse(markerFile.exists())
+    }
+
+    @Test fun resetHandlesCappedListingsInRounds() {
+        val purger = FakePurger(listResults = mutableListOf(
+            S3ListResult.Capped(200, listOf(
+                S3ListedObject("db/a.sql.gz", 1L),
+                S3ListedObject("db/b.sql.gz", 1L),
+            ), "token-1"),
+            S3ListResult.Success(200, listOf(S3ListedObject("db/c.sql.gz", 1L))),
+        ))
+        val markerFile = File(tmp.root, "db_reset_pending")
+        val m = newManager(dbFile(), FakeDumper(), FakeUploader(),
+            purger = purger, markerFile = markerFile)
+        val st = m.runCheck(manual = false, reset = true)
+        assertEquals(DbBackupState.SUCCESS, st.state)
+        // A Capped listing deletes its page and lists again.
+        assertEquals(2, purger.listPrefixes.size)
+        assertEquals(listOf("db/a.sql.gz", "db/b.sql.gz", "db/c.sql.gz"), purger.deleted)
+        assertTrue(st.message, st.message.startsWith("reset: deleted 3 objects; "))
+        assertFalse(markerFile.exists())
+    }
+
+    @Test fun resetListFailureKeepsMarker() {
+        val purger = FakePurger(listResult = S3ListResult.ClientError(403, "Forbidden"))
+        val markerFile = File(tmp.root, "db_reset_pending")
+        val m = newManager(dbFile(), FakeDumper(), FakeUploader(),
+            purger = purger, markerFile = markerFile)
+        val st = m.runCheck(manual = false, reset = true)
+        assertEquals(DbBackupState.FAILED, st.state)
+        assertTrue(st.message, st.message.startsWith("reset pending: list failed"))
+        assertTrue(st.message, st.message.contains("403"))
+        assertTrue(markerFile.exists())
+        assertTrue(st.resetPending)
+        assertEquals(0, purger.deleted.size)
+    }
+
+    @Test fun resetTreatsDelete404AsDeleted() {
+        val purger = FakePurger(listResult = S3ListResult.Success(200,
+            listOf(S3ListedObject("db/a.sql.gz", 1L))))
+        // A retried purge after a partial one: the object is already gone.
+        purger.deleteResults["db/a.sql.gz"] = S3DeleteResult.ClientError(404, "NoSuchKey")
+        val markerFile = File(tmp.root, "db_reset_pending")
+        val m = newManager(dbFile(), FakeDumper(), FakeUploader(),
+            purger = purger, markerFile = markerFile)
+        val st = m.runCheck(manual = false, reset = true)
+        assertEquals(DbBackupState.SUCCESS, st.state)
+        assertTrue(st.message, st.message.startsWith("reset: deleted 1 objects; "))
+        assertFalse(markerFile.exists())
+    }
+
+    @Test fun resetNowRefusedWhileInFlight() {
+        val noop = NoopScheduledExecutorService()
+        val m = newManager(dbFile(), FakeDumper(), FakeUploader(), executor = noop)
+        m.uploadNow(manual = true)
+        val refused = m.resetNow()
+        // A reset is operator-initiated, so the refusal is always surfaced.
+        assertTrue(refused.message,
+            refused.message.contains("refused: an upload is already running"))
+        assertEquals(1, noop.submitted.get())
+    }
+
+    @Test fun cappedResetDrainChainsFastFollowUp() {
+        val up = FakeUploader()
+        val purger = FakePurger(listResult = S3ListResult.Success(200,
+            listOf(S3ListedObject("db/a.sql.gz", 1L))))
+        val noop = NoopScheduledExecutorService()
+        val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        var stored: String? = null
+        val m = newManager(
+            dbFile(), alwaysCappedDumper(), up,
+            executor = noop,
+            fastFollowUpDelayMs = 250,
+            bookmarkFile = bookmarkFile,
+            purger = purger,
+            lastSuccessDate = { stored },
+            writeLastSuccessDate = { stored = it },
+        )
+        val queued = m.resetNow()
+        assertEquals("db backup reset queued", queued.message)
+        noop.last!!.run()
+        val budget = DbBackupManager.MAX_CHUNKS_PER_CHECK
+        assertEquals(DbBackupState.SUCCESS, m.status.state)
+        assertEquals(budget, up.calls)
+        assertEquals(1, purger.listPrefixes.size)
+        assertTrue(m.status.message, m.status.message.startsWith("reset: deleted 1 objects; "))
+        // Still capped: the daily date is not written and the reset (a
+        // non-manual check) chains the fast follow-up that keeps draining.
+        assertNull(stored)
+        assertEquals(1, noop.oneShots.size)
+        assertEquals(250L, noop.oneShots[0].delayMs)
+        noop.oneShots[0].task.run()
+        noop.last!!.run()
+        assertEquals(2 * budget, up.calls)
+        assertEquals(2, noop.oneShots.size)
     }
 }

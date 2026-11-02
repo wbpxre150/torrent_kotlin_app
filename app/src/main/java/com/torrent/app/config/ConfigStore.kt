@@ -168,6 +168,15 @@ class ConfigStore(context: Context) {
     }
 
     /**
+     * Clears the daily DB-dump upload gate: a "reset backup from zero"
+     * re-drains the whole database, so the next check must not be skipped as
+     * "already uploaded today".
+     */
+    fun clearDbBackupSuccessDate() {
+        prefs.edit().remove(KEY_BACKUP_DB_LAST_SUCCESS_DATE).apply()
+    }
+
+    /**
      * Model dir (`models/vN`) the classifier thresholds were last migrated for; the
      * sentinel of [ClassifierModelVersionMigration] (Stage 12). `null` means "never
      * migrated", so the first daemon start after this shipped performs the reset.

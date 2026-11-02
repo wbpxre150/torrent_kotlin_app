@@ -2,6 +2,8 @@ package com.torrent.app.backup
 
 import com.torrent.app.config.BackupSettings
 import com.torrent.app.config.ConfigValidator
+import com.torrent.app.s3.S3DeleteResult
+import com.torrent.app.s3.S3ListResult
 import com.torrent.app.s3.S3PutResult
 import java.io.File
 import java.time.Instant
@@ -21,6 +23,19 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 fun interface S3DbUploader {
     fun put(objectKey: String, contentType: String, body: ByteArray): S3PutResult
+}
+
+/**
+ * Lists and deletes the objects of one bucket prefix — the seam for the
+ * "reset backup from zero" purge. A thin seam over
+ * [com.torrent.app.s3.S3Client.list] / [com.torrent.app.s3.S3Client.delete]
+ * so unit tests can fake the purge; adapt a real client with an object
+ * expression (the client itself is unchanged). A DELETE that answers 404
+ * means the object is already gone.
+ */
+interface S3DbPurger {
+    fun list(prefix: String): S3ListResult
+    fun delete(objectKey: String): S3DeleteResult
 }
 
 /**
@@ -64,6 +79,11 @@ data class DbBackupStatus(
     val objectKey: String? = null,
     val uploadEnabled: Boolean = false,
     val configured: Boolean = false,
+    /**
+     * A `db_reset_pending` marker exists: a "reset from zero" purge is
+     * unfinished, so uploads are blocked until a later check completes it.
+     */
+    val resetPending: Boolean = false,
 )
 
 /**
@@ -126,6 +146,21 @@ data class DbBackupStatus(
  * the failed chunk: every earlier chunk's PUTs were already followed by its
  * own bookmark write.
  *
+ * Reset from zero (crash-safe): [resetNow] deletes every object under
+ * `<r2DbObjectPrefix>/` in the DB bucket, drops the local [DbBookmark] and
+ * the persisted daily date, then drains the whole database again. The order
+ * inside such a check is gate checks → marker → purge → daily gate, so a
+ * pending purge is never blocked by the daily gate and never runs when the
+ * configured/busy/wifi gates fail (no marker is written then either). A
+ * durable `db_reset_pending` marker file next to the bookmark is written
+ * BEFORE the first delete and removed only once the purge, the bookmark and
+ * the daily date are all cleared: a purge that fails halfway (or a process
+ * killed mid-purge) leaves the marker behind, which fails the check with a
+ * "reset pending:" message, blocks every later upload from re-uploading onto
+ * a half-deleted prefix, and makes the next check retry the purge. Deletes
+ * are prefix-only: an object whose key does not start with the prefix is
+ * never deleted, whatever the server returns.
+ *
  * All collaborators are constructor-injected (plain-JUnit testable);
  * [clock] and [zone] drive the calendar-day gate.
  */
@@ -143,6 +178,13 @@ class DbBackupManager(
     private val fastFollowUpDelayMs: Long = FAST_FOLLOW_DELAY_MS,
     private val readLastSuccessDate: () -> String? = { null },
     private val writeLastSuccessDate: (String) -> Unit = {},
+    private val purgerFactory: (BackupSettings) -> S3DbPurger = {
+        throw IllegalStateException("reset not wired")
+    },
+    private val resetMarkerFile: () -> File = {
+        File(bookmarkFile().parentFile, "db_reset_pending")
+    },
+    private val clearLastSuccessDate: () -> Unit = {},
 ) {
     @Volatile
     var status: DbBackupStatus = DbBackupStatus()
@@ -158,6 +200,14 @@ class DbBackupManager(
      */
     val inFlight: Boolean
         get() = inFlightFlag
+
+    /**
+     * True while an unfinished "reset from zero" purge is pending: the
+     * `db_reset_pending` marker exists, so every upload is blocked (and the
+     * next check retries the purge). Unreadable marker path reads as false.
+     */
+    val resetPending: Boolean
+        get() = runCatching { resetMarkerFile().exists() }.getOrDefault(false)
 
     private val lock = Any()
     @Volatile
@@ -185,12 +235,35 @@ class DbBackupManager(
      * in flight, or "shutting down" once [stop] has run. The returned
      * status is the trigger result — poll [status] for the outcome.
      */
-    fun uploadNow(manual: Boolean): DbBackupStatus {
+    fun uploadNow(manual: Boolean): DbBackupStatus =
+        enqueue(manual = manual, reset = false, queuedMessage = "db backup queued")
+
+    /**
+     * Queues a "reset backup from zero" check on [executor]: every object
+     * under `<r2DbObjectPrefix>/` is deleted, the local bookmark and the
+     * persisted daily date are dropped, and the whole database is drained
+     * again (see "Reset from zero" in the class KDoc). It runs as a
+     * non-manual check, so a still-capped drain keeps chaining fast
+     * follow-ups until the backlog catches up. The purge starts on
+     * [executor]; poll [status] for the outcome.
+     */
+    fun resetNow(): DbBackupStatus =
+        enqueue(manual = false, reset = true, queuedMessage = "db backup reset queued")
+
+    /**
+     * Shared acceptance/enqueue body of [uploadNow] and [resetNow]. A trigger
+     * is operator-initiated when [manual] or [reset]: only then is the
+     * in-flight refusal written to [status], so a periodic tick never clobbers
+     * the running check's message. [queuedMessage] is the optimistic message
+     * of an accepted trigger; its queued task runs `runCheck(manual, reset)`.
+     */
+    private fun enqueue(manual: Boolean, reset: Boolean, queuedMessage: String): DbBackupStatus {
         val accepted = synchronized(lock) {
             if (inFlightFlag) {
-                // Only a manual trigger surfaces the refusal; a periodic tick
-                // must not clobber the in-flight upload's status message.
-                if (manual) {
+                // Only an operator-initiated trigger surfaces the refusal; a
+                // periodic tick must not clobber the in-flight upload's status
+                // message.
+                if (manual || reset) {
                     status = status.copy(message = "refused: an upload is already running")
                 }
                 false
@@ -198,7 +271,7 @@ class DbBackupManager(
                 inFlightFlag = true
                 // No RUNNING marker here: runCheck's daily gate "preserves the
                 // previous state", which must be the last real outcome.
-                status = status.copy(message = "db backup queued")
+                status = status.copy(message = queuedMessage)
                 true
             }
         }
@@ -206,7 +279,7 @@ class DbBackupManager(
         try {
             executor.execute {
                 try {
-                    runCheck(manual)
+                    runCheck(manual, reset)
                 } catch (e: Throwable) {
                     // Throwable, not Exception: an OutOfMemoryError raised
                     // while materializing a chunk must mark the check FAILED
@@ -276,10 +349,13 @@ class DbBackupManager(
 
     /**
      * Runs one full upload check synchronously (gates, dump, PUT, bookmark).
-     * Called on [executor] by [uploadNow]; package-internal so unit tests
+     * [reset] additionally requests a "reset from zero": the durable marker
+     * is written once the wifi gate passed, a pending purge runs before the
+     * daily gate, and the purge's object count prefixes the outcome message.
+     * Called on [executor] by [enqueue]; package-internal so unit tests
      * can run it on the test thread.
      */
-    internal fun runCheck(manual: Boolean): DbBackupStatus {
+    internal fun runCheck(manual: Boolean, reset: Boolean = false): DbBackupStatus {
         val settings = try {
             loadSettings()
         } catch (e: Exception) {
@@ -307,6 +383,39 @@ class DbBackupManager(
             return finish(DbBackupState.SKIPPED_NO_WIFI, "skipped: no Wi-Fi",
                 uploadEnabled = true, configured = true)
         }
+        // Reset from zero: gate checks → marker → purge → daily gate. The
+        // marker is written BEFORE the first delete, so a purge that fails
+        // halfway (or a process killed mid-purge) blocks every later upload
+        // and is retried by the next check. The daily gate is consulted only
+        // afterwards: a pending purge must never wait for tomorrow, and a
+        // failing gate above never writes a marker.
+        var purgedCount: Int? = null
+        if (reset) {
+            val marker = resetMarkerFile()
+            val markerFailure = try {
+                marker.parentFile?.mkdirs()
+                marker.writeText("")
+                null
+            } catch (e: Exception) {
+                e.message ?: e.javaClass.simpleName
+            }
+            if (markerFailure != null) {
+                return finish(
+                    DbBackupState.FAILED,
+                    "reset failed: could not write marker: $markerFailure",
+                    uploadEnabled = true, configured = true)
+            }
+        }
+        if (resetPending) {
+            when (val purged = purge(settings)) {
+                is PurgeResult.Ok -> purgedCount = purged.count
+                is PurgeResult.Failed -> return finish(
+                    DbBackupState.FAILED, purged.message,
+                    uploadEnabled = true, configured = true)
+            }
+        }
+        val resetPrefix =
+            if (purgedCount != null) "reset: deleted $purgedCount objects; " else ""
         val today = todayString()
         if (!manual && readLastSuccessDate() == today) {
             // Daily gate: already uploaded today. Keep the previous state, but
@@ -319,7 +428,7 @@ class DbBackupManager(
         }
         val file = dbFile()
         if (!file.exists()) {
-            return finish(DbBackupState.SKIPPED_NO_DB, "skipped: crawler DB is missing",
+            return finish(DbBackupState.SKIPPED_NO_DB, resetPrefix + "skipped: crawler DB is missing",
                 uploadEnabled = true, configured = true)
         }
         // Missing bookmark file = first-ever run: drain from the very
@@ -353,7 +462,7 @@ class DbBackupManager(
                 // Empty range (no new torrents in this chunk's range): nothing
                 // to upload, exactly as before the drain loop.
                 return finish(DbBackupState.SKIPPED_EMPTY,
-                    "skipped: no new torrents (max id ${outcome.maxTorrentId})",
+                    resetPrefix + "skipped: no new torrents (max id ${outcome.maxTorrentId})",
                     uploadEnabled = true, configured = true)
             }
             val dump = outcome as DbDumpOutcome.Dump
@@ -414,7 +523,7 @@ class DbBackupManager(
         }) + ", +$totalIndexBytes index bytes"
         return finish(
             DbBackupState.SUCCESS,
-            if (last.capped) {
+            resetPrefix + (if (last.capped) {
                 // Budget exhausted while still capped: the daily date is
                 // deliberately NOT written (see the class KDoc), and a
                 // periodic check chains a fast follow-up instead of waiting
@@ -424,12 +533,116 @@ class DbBackupManager(
                     "(capped at torrent id ${cursor.lastTorrentId})"
             } else {
                 message
-            },
+            }),
             uploadEnabled = true, configured = true,
             uploadedBytes = last.sqlBytes.size.toLong(),
             sqlBytes = last.sqlBytes.size.toLong(),
             statementCount = last.statementCount,
             objectKey = last.objectKey, lastSuccess = clock())
+    }
+
+    /** Outcome of [purge]: the number of deleted objects, or a failure message. */
+    private sealed class PurgeResult {
+        data class Ok(val count: Int) : PurgeResult()
+        data class Failed(val message: String) : PurgeResult()
+    }
+
+    /**
+     * Deletes every object under `<r2DbObjectPrefix>/` in the DB bucket, then
+     * drops the local cursor and the persisted daily date — the "reset from
+     * zero" half of [resetNow]. LIST is repeated while it answers
+     * [S3ListResult.Capped] (at most [MAX_PURGE_LIST_ROUNDS] rounds), and only
+     * keys that start with the prefix are ever deleted. The first failure
+     * aborts with a `reset pending:` message and leaves the marker in place,
+     * so the next check retries the purge instead of uploading onto a
+     * half-deleted prefix. A DELETE answering 404 means the object is already
+     * gone and counts as success.
+     */
+    private fun purge(settings: BackupSettings): PurgeResult {
+        val prefix = settings.r2DbObjectPrefix + "/"
+        require(prefix.length > 1) { "refusing to purge the whole bucket: empty r2DbObjectPrefix" }
+        val purger = try {
+            purgerFactory(settings)
+        } catch (e: Exception) {
+            return PurgeResult.Failed("reset pending: ${e.message ?: e.javaClass.simpleName}")
+        }
+        var deleted = 0
+        var round = 0
+        while (true) {
+            if (round == MAX_PURGE_LIST_ROUNDS) {
+                return PurgeResult.Failed("reset pending: purge did not converge")
+            }
+            round++
+            val listing = try {
+                purger.list(prefix)
+            } catch (e: Exception) {
+                return PurgeResult.Failed(
+                    "reset pending: list failed: ${e.message ?: e.javaClass.simpleName}")
+            }
+            val listed = when (listing) {
+                is S3ListResult.Success -> listing.objects
+                is S3ListResult.Capped -> listing.objects
+                is S3ListResult.ClientError -> return PurgeResult.Failed(
+                    "reset pending: list failed: HTTP ${listing.statusCode}")
+                is S3ListResult.ServerError -> return PurgeResult.Failed(
+                    "reset pending: list failed: HTTP ${listing.statusCode} " +
+                        "after ${listing.attempts} attempts")
+                is S3ListResult.Failure -> return PurgeResult.Failed(
+                    "reset pending: list failed: " +
+                        "${listing.cause.message ?: listing.cause.javaClass.simpleName}")
+            }
+            for (objectKey in listed.map { it.key }) {
+                // Prefix-only: a key the server returned outside the prefix is
+                // never deleted, and never counted.
+                if (!objectKey.startsWith(prefix)) continue
+                val result = try {
+                    purger.delete(objectKey)
+                } catch (e: Exception) {
+                    return PurgeResult.Failed(
+                        "reset pending: delete of $objectKey failed: " +
+                            "${e.message ?: e.javaClass.simpleName}")
+                }
+                when (result) {
+                    is S3DeleteResult.Success -> Unit
+                    // 404: already gone (a retried purge after a partial one).
+                    is S3DeleteResult.ClientError -> if (result.statusCode != 404) {
+                        return PurgeResult.Failed(
+                            "reset pending: delete of $objectKey failed: " +
+                                "HTTP ${result.statusCode}")
+                    }
+                    is S3DeleteResult.ServerError -> return PurgeResult.Failed(
+                        "reset pending: delete of $objectKey failed: " +
+                            "HTTP ${result.statusCode} after ${result.attempts} attempts")
+                    is S3DeleteResult.Failure -> return PurgeResult.Failed(
+                        "reset pending: delete of $objectKey failed: " +
+                            "${result.cause.message ?: result.cause.javaClass.simpleName}")
+                }
+                deleted++
+                // Poller-visible progress on a long purge; the check's final
+                // finish() overwrites the message with its outcome.
+                if (deleted % 100 == 0) {
+                    status = status.copy(message = "reset: deleted $deleted objects")
+                }
+            }
+            if (listing is S3ListResult.Success) break
+        }
+        // The prefix is empty now: drop the local cursor, the daily date and
+        // only then the marker (a failure here keeps the marker, so the next
+        // check re-lists an empty prefix and finishes the job).
+        val bookmark = bookmarkFile()
+        if (bookmark.exists() && !bookmark.delete()) {
+            return PurgeResult.Failed("reset pending: bookmark delete failed: ${bookmark.path}")
+        }
+        clearLastSuccessDate()
+        val marker = resetMarkerFile()
+        if (marker.exists() && !marker.delete()) {
+            return PurgeResult.Failed("reset pending: marker delete failed: ${marker.path}")
+        }
+        // finish() carries these over from the previous status, so they must be
+        // cleared on the status itself BEFORE the check's final finish().
+        status = status.copy(lastSuccess = null, uploadedBytes = null, sqlBytes = null,
+            statementCount = null, objectKey = null)
+        return PurgeResult.Ok(deleted)
     }
 
     /**
@@ -552,6 +765,9 @@ class DbBackupManager(
             objectKey = objectKey ?: status.objectKey,
             uploadEnabled = uploadEnabled,
             configured = configured,
+            // Read from the marker file, not carried over: the flag must stay
+            // truthful even after a restart that left a purge unfinished.
+            resetPending = resetPending,
         )
         status = st
         return st
@@ -582,6 +798,14 @@ class DbBackupManager(
          * ([FAST_FOLLOW_DELAY_MS] later).
          */
         const val MAX_CHUNKS_PER_CHECK = 64
+
+        /**
+         * Upper bound on LIST→DELETE rounds of one reset purge. The purge ends
+         * on the first uncapped listing; a server that keeps answering
+         * `Capped` (with objects left) fails the check with
+         * "reset pending: purge did not converge" instead of looping forever.
+         */
+        internal const val MAX_PURGE_LIST_ROUNDS = 50
 
         private fun defaultExecutor(): ScheduledExecutorService =
             Executors.newSingleThreadScheduledExecutor(ThreadFactory {
