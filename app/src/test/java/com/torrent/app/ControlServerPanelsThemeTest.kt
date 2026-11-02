@@ -143,8 +143,9 @@ class ControlServerPanelsThemeTest {
 
     /**
      * "Reset backup from zero": the DB backup card carries the reset form and
-     * the JS hook its submit handler calls. The route itself is covered by
-     * [ControlServerAuthRedirectTest]; here we only pin the markup contract.
+     * a submit handler that calls the global confirm() builtin. The route itself
+     * is covered by [ControlServerAuthRedirectTest]; here we only pin the markup
+     * contract.
      */
     @Test fun dbBackupSection_rendersResetForm() {
         val html = crawlerPanel()
@@ -154,7 +155,14 @@ class ControlServerPanelsThemeTest {
         )
         assertTrue("missing the hidden confirm field", html.contains("name=\"confirm\""))
         assertTrue("missing the button label", html.contains("Reset backup from zero"))
-        assertTrue("missing the dbResetConfirm JS hook", html.contains("dbResetConfirm"))
+        assertTrue("the hidden field must pre-set the confirm word", html.contains("value=\"RESET\""))
+        // An inline handler can only see globals: it must use the confirm()
+        // builtin, never a page-local function (that shipped as a ReferenceError).
+        assertTrue("missing the global confirm() dialog", html.contains("onsubmit=\"return confirm("))
+        assertFalse(
+            "the inline handler must not reference a page-scoped function",
+            html.contains("dbResetConfirm")
+        )
         // The explanation must name the prefix the purge will delete, escaped.
         val prefixed = newServer(backup = BackupSettings(r2DbObjectPrefix = "db"))
             .buildCrawlerPanel(null, false, false)

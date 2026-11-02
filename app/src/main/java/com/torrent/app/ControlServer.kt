@@ -1394,15 +1394,6 @@ class ControlServer(
                 }).catch(function () {});
               }
               setInterval(pollDbBackup, 5000); pollDbBackup();
-              // "Reset backup from zero" is destructive and irreversible, so the
-              // button asks for the word to be typed; the route re-checks it
-              // server-side. The prefix is JS-escaped, then HTML-escaped.
-              function dbResetConfirm(f) {
-                var v = prompt('This permanently deletes the DB backup in R2 (${esc(jsQuoteEsc(sBackup.r2DbObjectPrefix))}/) and re-uploads everything. Type RESET to continue.');
-                if (v !== 'RESET') return false;
-                f.confirm.value = v;
-                return true;
-              }
               function pollDbRestore() {
                 fetch('/api/crawler/restore').then(function (r) { return r.json(); }).then(function (st) {
                   var box = document.getElementById('db-restore-status');
@@ -1520,8 +1511,9 @@ class ControlServer(
               database in the background (many hours for a large DB). Uploads are blocked until the delete completes;
               a failed delete is retried automatically.</p>
               $resetPendingNote
-              <form method="post" action="/crawler/backup/db/reset" onsubmit="return dbResetConfirm(this)">
-                <input type="hidden" name="confirm" value="">
+              <form method="post" action="/crawler/backup/db/reset"
+                    onsubmit="return confirm('This permanently deletes the DB backup in R2 (${esc(jsQuoteEsc(dbPrefix))}/) and re-uploads everything. Continue?')">
+                <input type="hidden" name="confirm" value="RESET">
                 <button type="submit" class="btn">Reset backup from zero</button></form>
             </fieldset>
             <fieldset class="card"><legend>DB restore (stream the R2 dump chain into a fresh database)</legend>
