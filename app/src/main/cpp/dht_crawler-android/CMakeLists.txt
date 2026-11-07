@@ -239,18 +239,6 @@ if(LLAMA_INSTALL)
         ${LLAMA_INSTALL}/lib/libggml-base.a
         Threads::Threads
     )
-    # Static archives only contribute members that satisfy an undefined reference, and no
-    # crawler source calls llama yet (Stage B adds src/movie_kind.c). Force the exact API
-    # surface that module needs so the archive set, its order and its transitive ggml deps
-    # are proven at link time now -- the NDK toolchain links with --no-undefined
-    # --fatal-warnings, so any gap here is a hard error rather than a Stage B surprise.
-    # Stage B deletes these four flags once src/movie_kind.c has real call sites.
-    target_link_options(dhtcrawler PRIVATE
-        -Wl,--undefined=llama_model_load_from_file
-        -Wl,--undefined=llama_tokenize
-        -Wl,--undefined=llama_batch_get_one
-        -Wl,--undefined=llama_encode
-    )
 endif()
 
 # Strip release binaries (smaller .so in the APK)
