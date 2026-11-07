@@ -5,6 +5,8 @@
 #   -D SQLITE_DIR=<sqlite amalgamation dir with sqlite3.c/sqlite3.h>
 #   -D LIBUV_INSTALL=<libuv install prefix: lib/libuv.a, include/>
 #   -D MBEDTLS_INSTALL=<mbedTLS install prefix: lib/libmbedcrypto.a, include/>
+#   -D LLAMA_INSTALL=<llama.cpp install prefix: lib/libllama.a + ggml libs>  (optional)
+#   -D UTF8PROC_DIR=<vendored utf8proc sources>  (defaults to ./utf8proc)
 #
 # Builds a dynamic PIE executable `dhtcrawler` against Bionic with all
 # third-party deps static (same shape as libtransmissiond.so). Gradle
@@ -16,6 +18,10 @@ set(DHT_CRAWLER_SRC "" CACHE PATH "Patched dht_crawler source tree")
 set(SQLITE_DIR "" CACHE PATH "SQLite amalgamation directory (sqlite3.c, sqlite3.h)")
 set(LIBUV_INSTALL "" CACHE PATH "libuv install prefix (static libuv.a)")
 set(MBEDTLS_INSTALL "" CACHE PATH "mbedTLS install prefix (static libmbedcrypto.a)")
+# llama.cpp (pinned 18ab62a8, CPU-only) install prefix produced by Gradle's buildLlama.
+# Optional: when unset the movie-kind support is not compiled in (no MK_ENABLED).
+set(LLAMA_INSTALL "" CACHE PATH "llama.cpp install prefix (static libllama.a + ggml libs); unset = no movie-kind")
+set(UTF8PROC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/utf8proc" CACHE PATH "Vendored utf8proc sources (utf8proc.c, utf8proc.h)")
 
 if(NOT DHT_CRAWLER_SRC OR NOT SQLITE_DIR OR NOT LIBUV_INSTALL OR NOT MBEDTLS_INSTALL)
     message(FATAL_ERROR
@@ -45,6 +51,20 @@ set_target_properties(tparse PROPERTIES
     C_STANDARD 11
     C_STANDARD_REQUIRED ON
     # -std=c11, as the reference builds it (not the toolchain's gnu11).
+    C_EXTENSIONS OFF
+    # Linked into the PIE crawler executable.
+    POSITION_INDEPENDENT_CODE ON
+)
+
+# utf8proc 2.12.0 (MIT -- see utf8proc/LICENSE.md): Unicode NFC normalisation for
+# the movie-kind serving text. utf8proc.c #includes the generated utf8proc_data.c,
+# so that file is a header-like part of the single translation unit, not a source.
+add_library(utf8proc STATIC ${UTF8PROC_DIR}/utf8proc.c)
+target_include_directories(utf8proc PUBLIC ${UTF8PROC_DIR})
+set_target_properties(utf8proc PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED ON
+    # -std=c11, as upstream builds it (not the toolchain's gnu11).
     C_EXTENSIONS OFF
     # Linked into the PIE crawler executable.
     POSITION_INDEPENDENT_CODE ON
@@ -111,6 +131,13 @@ set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/ftc/ftc.cc
 # added above, only the dhtcrawler target below is defined after it, so the
 # vendored sources never see CLF_ENABLED.
 add_compile_definitions(CLF_ENABLED)
+# Movie-kind gating: MK_ENABLED exists only when Gradle's buildLlama handed us a
+# llama.cpp install prefix. Defined after tparse/ftc/utf8proc and before
+# add_executable, so it reaches the dhtcrawler target only -- a plain `cmake`
+# configure (or the vendored repo's host Makefile build) stays llama-free.
+if(LLAMA_INSTALL)
+    add_compile_definitions(MK_ENABLED)
+endif()
 add_executable(dhtcrawler
     ${CRAWLER_SOURCES}
     ${DHT_CRAWLER_SRC}/lib/bencode-c/bencode.c
@@ -178,11 +205,15 @@ target_include_directories(dhtcrawler PRIVATE
     ${SQLITE_DIR}
     ${LIBUV_INSTALL}/include
     ${MBEDTLS_INSTALL}/include
+    ${UTF8PROC_DIR}
 )
 
 # Static third-party deps, then Bionic system libs. pthread lives in
 # Bionic libc; -llog for __android_log_write (civetweb).
 target_link_libraries(dhtcrawler PRIVATE
+    # Unicode NFC for the movie-kind serving text (used by src/movie_kind.c once
+    # MK_ENABLED exists; unused archives cost nothing in a static link).
+    utf8proc
     tparse
     ftc
     # The crawler is C and ftc is C++11: c++_static (the NDK's default STL)
@@ -195,6 +226,32 @@ target_link_libraries(dhtcrawler PRIVATE
     dl
     log
 )
+
+# Movie-kind (Stage B+): llama.cpp static libs. Archives resolve left to right, so
+# llama comes before ggml, ggml-cpu and ggml-base; all four are static at this pin
+# (BUILD_SHARED_LIBS=OFF), which is why the aggregate ggml archive is listed too.
+if(LLAMA_INSTALL)
+    target_include_directories(dhtcrawler PRIVATE ${LLAMA_INSTALL}/include)
+    target_link_libraries(dhtcrawler PRIVATE
+        ${LLAMA_INSTALL}/lib/libllama.a
+        ${LLAMA_INSTALL}/lib/libggml.a
+        ${LLAMA_INSTALL}/lib/libggml-cpu.a
+        ${LLAMA_INSTALL}/lib/libggml-base.a
+        Threads::Threads
+    )
+    # Static archives only contribute members that satisfy an undefined reference, and no
+    # crawler source calls llama yet (Stage B adds src/movie_kind.c). Force the exact API
+    # surface that module needs so the archive set, its order and its transitive ggml deps
+    # are proven at link time now -- the NDK toolchain links with --no-undefined
+    # --fatal-warnings, so any gap here is a hard error rather than a Stage B surprise.
+    # Stage B deletes these four flags once src/movie_kind.c has real call sites.
+    target_link_options(dhtcrawler PRIVATE
+        -Wl,--undefined=llama_model_load_from_file
+        -Wl,--undefined=llama_tokenize
+        -Wl,--undefined=llama_batch_get_one
+        -Wl,--undefined=llama_encode
+    )
+endif()
 
 # Strip release binaries (smaller .so in the APK)
 if(CMAKE_BUILD_TYPE STREQUAL "Release")

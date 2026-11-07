@@ -1,3 +1,6 @@
+// Needed by fetchLlamaCpp's tarball pin check (`java` alone is the Gradle Java extension here).
+import java.security.MessageDigest
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -382,6 +385,134 @@ tasks.register("fetchSqlite") {
         }
     }
 }
+// The movie-kind model is trained and quantised against this exact llama.cpp commit, so
+// the tarball is pinned by sha256 -- unlike the existence-only fetches above, a mismatched
+// download is deleted and re-fetched rather than used (a tree of unclear provenance would
+// silently produce a binary the 153 MB model was not fitted to).
+tasks.register("fetchLlamaCpp") {
+    description = "Download the pinned llama.cpp sources (18ab62a8) for the movie-kind dep"
+
+    val nativeDir = file("build/native")
+    val srcDir = file("$nativeDir/src/llama-18ab62a8")
+    val tarball = file("$nativeDir/src/llama-18ab62a8.tar.gz")
+    val stamp = file("$srcDir/.sha")
+    val url =
+        "https://github.com/ggml-org/llama.cpp/archive/18ab62a8ec5144ae5d2f65e78374ba69652d75dd.tar.gz"
+    val sha256 = "34bd70e229bf0439575b7865e986209d23584bd35274d95c256f9ccf398ab46a"
+    // tar's own top-level directory name; renamed to srcDir below so the path is pin-stable.
+    val archiveRoot = file("$nativeDir/src/llama.cpp-18ab62a8ec5144ae5d2f65e78374ba69652d75dd")
+
+    outputs.dir(srcDir)
+
+    fun sha256Of(f: File): String {
+        val md = MessageDigest.getInstance("SHA-256")
+        f.inputStream().use { input ->
+            val buf = ByteArray(1 shl 16)
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                md.update(buf, 0, n)
+            }
+        }
+        return md.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    doLast {
+        // 1. Fetch the tarball, discarding a cached copy whose bytes are not the pin
+        if (tarball.exists() && sha256Of(tarball) != sha256) {
+            logger.warn("llama.cpp tarball sha256 mismatch, re-downloading $url")
+            tarball.delete()
+        }
+        if (!tarball.exists()) {
+            tarball.parentFile.mkdirs()
+            project.exec {
+                commandLine("curl", "-L", "--fail", "-o", tarball.absolutePath, url)
+            }
+        }
+        // 2. Verify before extracting -- this is the pin every later stage builds against
+        val actual = sha256Of(tarball)
+        if (actual != sha256) {
+            error("llama.cpp tarball sha256 mismatch: expected $sha256, got $actual ($url)")
+        }
+        // 3. Extract (re-extract when the tree is missing or came from a different pin)
+        if (srcDir.exists() && (!stamp.exists() || stamp.readText().trim() != sha256)) {
+            srcDir.deleteRecursively()
+        }
+        if (!file("$srcDir/CMakeLists.txt").exists()) {
+            archiveRoot.deleteRecursively()
+            project.exec {
+                commandLine("tar", "-xzf", tarball.absolutePath, "-C", file("$nativeDir/src").absolutePath)
+            }
+            srcDir.deleteRecursively()
+            project.exec {
+                commandLine("mv", archiveRoot.absolutePath, srcDir.absolutePath)
+            }
+        }
+        stamp.writeText("$sha256\n")
+    }
+}
+tasks.register("buildLlama") {
+    description = "Cross-compile llama.cpp (CPU-only, pinned 18ab62a8) static libs for arm64 (movie-kind dep)"
+    dependsOn("fetchLlamaCpp")
+
+    val ndk = providers.environmentVariable("ANDROID_NDK_HOME")
+        .orElse(providers.provider {
+            val sdk = android.sdkDirectory
+            val ndks = file("$sdk/ndk").listFiles()?.sortedByDescending { it.name }
+            ndks?.firstOrNull()?.absolutePath ?: error("NDK not found")
+        })
+    val ndkDir = file(ndk.get())
+    val toolchainFile = file("$ndkDir/build/cmake/android.toolchain.cmake")
+
+    val nativeDir = file("build/native")
+    val srcDir = file("$nativeDir/src/llama-18ab62a8")
+    val buildDir = file("$nativeDir/build-llama")
+    val installDir = file("$nativeDir/llama-install")
+
+    outputs.dir(installDir)
+
+    doLast {
+        // 1. Configure (Ninja generator + NDK toolchain, CPU-only inference, static libs)
+        project.exec {
+            commandLine(
+                "cmake", "-G", "Ninja",
+                "-S", srcDir.absolutePath, "-B", buildDir.absolutePath,
+                "-DCMAKE_TOOLCHAIN_FILE=${toolchainFile.absolutePath}",
+                "-DANDROID_ABI=arm64-v8a",
+                "-DANDROID_PLATFORM=android-24",
+                "-DCMAKE_BUILD_TYPE=Release",
+                "-DCMAKE_INSTALL_PREFIX=${installDir.absolutePath}",
+                // The crawler is a PIE executable with every dep linked in.
+                "-DBUILD_SHARED_LIBS=OFF",
+                // Inference only: no tools, examples, server, unified app, common helpers, tests.
+                "-DLLAMA_BUILD_TOOLS=OFF",
+                "-DLLAMA_BUILD_TESTS=OFF",
+                "-DLLAMA_BUILD_EXAMPLES=OFF",
+                "-DLLAMA_BUILD_SERVER=OFF",
+                "-DLLAMA_BUILD_APP=OFF",
+                "-DLLAMA_BUILD_COMMON=OFF",
+                // CPU backend only, and never tuned for the build host.
+                "-DGGML_CPU=ON",
+                "-DGGML_NATIVE=OFF",
+                // At this pin GGML_CPU_ARM_ARCH becomes -march=<value>
+                // (ggml/src/ggml-cpu/CMakeLists.txt:210). The dotprod/i8mm quant kernels are
+                // compile-time gated on it, so a wrong value silently costs the dotprod 2x.
+                "-DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod+i8mm",
+                // The NDK toolchain ships no OpenMP runtime.
+                "-DGGML_OPENMP=OFF",
+                "-DGGML_LLAMAFILE=OFF",
+                "-DGGML_BLAS=OFF",
+                "-DGGML_CUDA=OFF",
+                "-DGGML_VULKAN=OFF",
+                "-DGGML_OPENCL=OFF"
+            )
+        }
+        // 2. Build + install the static archives and public headers
+        project.exec {
+            commandLine("cmake", "--build", buildDir.absolutePath, "--target", "install", "-j8")
+        }
+    }
+}
 tasks.register("prepareDhtCrawlerSrc") {
     description = "Copy dht_crawler sources to build/native/src/dht_crawler and apply the patches"
 
@@ -470,7 +601,7 @@ tasks.register<Copy>("copyDhtCrawlerAssets") {
 
 tasks.register("buildDhtCrawler") {
     description = "Cross-compile dht_crawler for arm64, package libdhtcrawler.so (Stage 09)"
-    dependsOn("buildMbedtls", "buildLibuv", "fetchSqlite", "prepareDhtCrawlerSrc")
+    dependsOn("buildMbedtls", "buildLibuv", "fetchSqlite", "prepareDhtCrawlerSrc", "buildLlama")
 
     val ndk = providers.environmentVariable("ANDROID_NDK_HOME")
         .orElse(providers.provider {
@@ -487,6 +618,8 @@ tasks.register("buildDhtCrawler") {
     val sqliteDir = file("$nativeDir/src/sqlite-amalgamation")
     val libuvInstall = file("$nativeDir/libuv-install")
     val mbedtlsInstall = file("$nativeDir/mbedtls-install")
+    val llamaInstall = file("$nativeDir/llama-install")
+    val utf8procDir = file("src/main/cpp/dht_crawler-android/utf8proc")
     val buildDir = file("$nativeDir/dht_crawler-build")
     val crawlerOut = file("$buildDir/dhtcrawler")
     val jniLibsArm64 = file("src/main/jniLibs/arm64-v8a")
@@ -497,6 +630,7 @@ tasks.register("buildDhtCrawler") {
     inputs.dir(sqliteDir)
     inputs.dir(libuvInstall)
     inputs.file("$mbedtlsInstall/lib/libmbedcrypto.a")
+    inputs.dir(llamaInstall)
 
     doLast {
         // 1. Configure (Ninja + NDK toolchain, dynamic PIE, static deps)
@@ -511,7 +645,11 @@ tasks.register("buildDhtCrawler") {
                 "-DDHT_CRAWLER_SRC=${crawlerSrcDir.absolutePath}",
                 "-DSQLITE_DIR=${sqliteDir.absolutePath}",
                 "-DLIBUV_INSTALL=${libuvInstall.absolutePath}",
-                "-DMBEDTLS_INSTALL=${mbedtlsInstall.absolutePath}"
+                "-DMBEDTLS_INSTALL=${mbedtlsInstall.absolutePath}",
+                // Movie-kind (Stage A): llama.cpp install prefix + vendored utf8proc. The
+                // wrapper defines MK_ENABLED only when LLAMA_INSTALL is non-empty.
+                "-DLLAMA_INSTALL=${llamaInstall.absolutePath}",
+                "-DUTF8PROC_DIR=${utf8procDir.absolutePath}"
             )
         }
         // 2. Build the crawler executable
