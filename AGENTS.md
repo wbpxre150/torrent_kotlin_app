@@ -118,11 +118,28 @@ prefix is required by the packaging step — they are **exec'd as PIE binaries, 
 | `libftpserver.so` | `src/main/cpp/ftp-server/` (C11) | `buildFtpServer` → CMake/NDK | FTP server for media clients; posix or SAF backend (SAF talks to `SafIpcServer`) |
 
 **Task graph:** `buildMbedtls` (mbedTLS **3.6.6**) → `buildCurl` (curl **8.20.0**) → `buildTransmission`;
-`buildLibuv` (**1.48.0**) + `fetchSqlite` (**3.49.1** amalgamation) + `prepareDhtCrawlerSrc` → `buildDhtCrawler`;
-`buildFtpServer` (leaf). `copyDhtCrawlerAssets` copies the crawler's keyword files into
+`buildLibuv` (**1.48.0**) + `fetchSqlite` (**3.49.1** amalgamation) + `prepareDhtCrawlerSrc` →
+`buildDhtCrawler`; `fetchLlamaCpp` (llama.cpp pin `18ab62a8ec5144ae5d2f65e78374ba69652d75dd`, tarball
+sha256 `34bd70e229bf0439575b7865e986209d23584bd35274d95c256f9ccf398ab46a`) → `buildLlama` →
+`buildDhtCrawler`;
+`buildFtpServer` (leaf). `copyDhtCrawlerAssets` copies the crawler's keyword files and both model
+generations (~179 MB, ~6 s) into
 `build/generated/assets/dht_crawler/` (wired into merge assets). `afterEvaluate` makes
 `mergeDebugJniLibFolders` depend on all three build tasks. `-PdhtCrawlerSrc=<path>` overrides the
 crawler source root. Native build inputs/outputs land under `app/build/native/`.
+
+**Movie-kind classifier (v9).** The crawler links a CPU-only llama.cpp (`buildLlama`) and the vendored
+`dht_crawler-android/utf8proc/` (**2.12.0**); the NDK wrapper defines `MK_ENABLED` and
+`MK_NFC_ENABLED` only when `LLAMA_INSTALL` is set, so a plain host configure stays plain C99. Two
+model generations ship side by side: `models/v6` (fastText, pinned by `classifier_model_dir`) and
+`models/v9` (JEV backbone Q8_0 + head, pinned by `movie_kind_model_dir`). `ensureAssets` stages both,
+the sweep keeps the active *set* `{v6, v9}` and removes retired dirs, and `.assets_version` is
+`<versionCode>|models/v6|models/v9` — a stamp change is what triggers restaging, no versionCode bump.
+`/stats` carries `movie_kind` (enabled/status/rows/model shas) and `movie_kind_backfill`
+(state/rows_processed/rows_total/failures/thermal_pauses) beside the unchanged fastText
+`classifier`/`classifier_backfill`. The `movie-kind-bench` maintenance action runs
+`--movie-kind-bench data/torrents.db` (every maintenance action stops the supervised crawler first);
+the reset one-shot is `--movie-kind-backfill <db> --reset` with the app force-stopped.
 
 **dht_crawler patches (order is fixed, applied by `prepareDhtCrawlerSrc`):** `bencode-cap-fix.patch` →
 `bencode-init-fix.patch` → `civetweb-stop-flag-atomic.patch`. Upstream fixes belong in `patches/`.
