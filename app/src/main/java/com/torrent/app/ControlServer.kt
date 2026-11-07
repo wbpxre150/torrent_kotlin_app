@@ -1449,6 +1449,7 @@ class ControlServer(
         MaintenanceAction.REBUILD_BLOOM_FILTER -> "Rebuild bloom filter"
         MaintenanceAction.CLEAR_FAILURE_FILTER -> "Clear failure filter"
         MaintenanceAction.CATEGORY_FILTER_UPDATE -> "Category filter update"
+        MaintenanceAction.MOVIE_KIND_BENCH -> "Movie-kind bench"
     }
 
     /** What a maintenance action does, phrased for its confirmation prompt. */
@@ -1461,6 +1462,8 @@ class ControlServer(
         MaintenanceAction.CATEGORY_FILTER_UPDATE ->
             "Delete all torrents in unchecked categories and adult-tagged torrents " +
                 "from the database"
+        MaintenanceAction.MOVIE_KIND_BENCH ->
+            "Bench the movie-kind encoder over the database rows (read-only)"
     }
 
     /** The BEP51 cache backup section on the crawler panel (Stage 4). */

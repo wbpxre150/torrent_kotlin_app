@@ -73,7 +73,14 @@ object CrawlerDbSchema {
             "    episode_hi INTEGER," +
             "    resolution INTEGER," +
             "    confidence REAL," +
-            "    clf_ver INTEGER NOT NULL" +
+            "    clf_ver INTEGER NOT NULL," +
+            // Movie-kind (Stage C): the v9 JEVH genre mask and the generation that
+            // produced it. Additive and nullable on purpose — a database that
+            // predates them has neither, and "unclassified" is
+            // movie_kind_clf_ver IS NULL (a mask of 0 is a valid `none` verdict,
+            // never a marker). No index: the candidate walk reuses idx_class_cat.
+            "    movie_kind_mask INTEGER," +
+            "    movie_kind_clf_ver INTEGER" +
             ");",
         // classifier_meta
         "CREATE TABLE IF NOT EXISTS classifier_meta (key TEXT PRIMARY KEY, value TEXT);",

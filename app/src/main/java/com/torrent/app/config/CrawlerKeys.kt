@@ -37,6 +37,12 @@ object CrawlerKeys {
         // Ingest-time classifier + adult handling (Stage 5/6)
         "classifier_enabled", "classifier_model_dir",
         "adult_mode", "adult_hide_threshold", "hard_block_file",
+        // Movie-kind classifier + backfill (Stage D). Storage-only: the app stages
+        // the model dir (pinned) and renders no form field for these, so the three
+        // tunables are settable from the advanced textarea (the
+        // `movie_kind_enabled = 0` escape hatch depends on it).
+        "movie_kind_enabled", "movie_kind_model_dir", "movie_kind_threads",
+        "movie_kind_thermal_backoff_c",
         // Categories to save (empty list = save everything)
         "save_categories", "save_tv_kinds",
         // Language filter
@@ -73,7 +79,7 @@ object CrawlerKeys {
         "db_path", "bloom_path", "bep51_cache_path",
         "backup_path", "ssh_dest_path", "ssh_key_path", "ssh_bookmark_path",
         "rclone_dest_path", "rclone_bookmark_path",
-        "classifier_model_dir", "hard_block_file",
+        "classifier_model_dir", "movie_kind_model_dir", "hard_block_file",
     )
 
     /** Backup keys — backups are off on Android and pinned to 0 by the writer. */

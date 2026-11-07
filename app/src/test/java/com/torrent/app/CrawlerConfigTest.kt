@@ -133,7 +133,7 @@ class CrawlerConfigTest {
         val stale = File(models, "v3").apply { mkdirs() }
         File(stale, "adult.ftz").writeBytes(byteArrayOf(4, 5, 6))
 
-        CrawlerConfig.deleteStaleModelDirs(models, "v4")
+        CrawlerConfig.deleteStaleModelDirs(models, setOf("v4"))
 
         assertFalse("a previous generation's dir must be reclaimed", stale.exists())
         assertTrue("the active generation dir is never a candidate", active.isDirectory)
@@ -148,10 +148,31 @@ class CrawlerConfigTest {
         val stale = File(models, "v5").apply { mkdirs() }
         File(stale, "adult.ftz").writeBytes(byteArrayOf(7, 8, 9))
 
-        CrawlerConfig.deleteStaleModelDirs(models, "v6")
+        CrawlerConfig.deleteStaleModelDirs(models, setOf("v6"))
 
         assertFalse("a stale v5 dir is swept when v6 is active", stale.exists())
         assertTrue("the active v6 dir survives", active.isDirectory)
+    }
+
+    @Test fun deleteStaleModelDirs_keepsEveryActiveGenerationAndSweepsTheRetiredOne() {
+        // Two generations ship at once (v6 fastText + v9 movie-kind), so the sweep
+        // takes the active *set*: neither shipped dir may be mistaken for a stale
+        // sibling, and the retired v4 generation must still go.
+        val models = tmp.newFolder("models-multi-active")
+        val v6 = File(models, "v6").apply { mkdirs() }
+        File(v6, "adult.ftz").writeBytes(byteArrayOf(1))
+        val v9 = File(models, "v9").apply { mkdirs() }
+        File(v9, "movie_kind_head.bin").writeBytes(byteArrayOf(2))
+        val v4 = File(models, "v4").apply { mkdirs() }
+        File(v4, "adult.ftz").writeBytes(byteArrayOf(3))
+
+        CrawlerConfig.deleteStaleModelDirs(models, setOf("v6", "v9"))
+
+        assertFalse("the retired v4 generation is swept", v4.exists())
+        assertTrue("the fastText generation survives", v6.isDirectory)
+        assertTrue("staged files of v6 survive", File(v6, "adult.ftz").isFile)
+        assertTrue("the movie-kind generation survives", v9.isDirectory)
+        assertTrue("staged files of v9 survive", File(v9, "movie_kind_head.bin").isFile)
     }
 
     @Test fun deleteStaleModelDirs_keepsNonGenerationDirs() {
@@ -162,7 +183,7 @@ class CrawlerConfigTest {
         val prefixed = File(models, "v4-old").apply { mkdirs() }
         val versioned = File(models, "v").apply { mkdirs() }
 
-        CrawlerConfig.deleteStaleModelDirs(models, "v4")
+        CrawlerConfig.deleteStaleModelDirs(models, setOf("v4"))
 
         assertTrue("only `v<digits>` dirs are generations", backup.isDirectory)
         assertTrue("a `v4-old` dir is not a generation name", prefixed.isDirectory)
@@ -177,7 +198,7 @@ class CrawlerConfigTest {
         // A FILE named like a generation is not a dir and must never be swept.
         val fileNamedV3 = File(models, "v3").apply { writeText("not a dir") }
 
-        CrawlerConfig.deleteStaleModelDirs(models, "v4")
+        CrawlerConfig.deleteStaleModelDirs(models, setOf("v4"))
 
         assertTrue("plain files under models/ survive", notes.isFile)
         assertTrue("a file named v3 is not a generation dir", fileNamedV3.isFile)
@@ -188,11 +209,11 @@ class CrawlerConfigTest {
     @Test fun deleteStaleModelDirs_missingOrEmptyRootIsANoOp() {
         // A missing root (first run) or an unreadable one makes listFiles() return null.
         val missing = File(tmp.root, "absent/models")
-        CrawlerConfig.deleteStaleModelDirs(missing, "v4")
+        CrawlerConfig.deleteStaleModelDirs(missing, setOf("v4"))
         assertFalse("the sweep must not create the root", missing.exists())
 
         val empty = tmp.newFolder("empty-models")
-        CrawlerConfig.deleteStaleModelDirs(empty, "v4")
+        CrawlerConfig.deleteStaleModelDirs(empty, setOf("v4"))
         assertEquals("an empty root stays empty", 0, empty.listFiles()?.size ?: 0)
     }
 
@@ -240,6 +261,11 @@ class CrawlerConfigTest {
         // must not be rendered at all (the crawler ignores it as unknown).
         assertNull(ini["adult_drop_threshold"])
         assertEquals("hard_block.txt", ini["hard_block_file"])
+        // Stage D movie-kind classifier (models/v9): storage-only, no form field.
+        assertEquals("1", ini["movie_kind_enabled"])
+        assertEquals("models/v9", ini["movie_kind_model_dir"])
+        assertEquals("4", ini["movie_kind_threads"])
+        assertEquals("82", ini["movie_kind_thermal_backoff_c"])
         assertNull(ini["backup_path"])
         assertNull(ini["ssh_host"])
         assertNull(ini["ssh_user"])
@@ -359,6 +385,39 @@ class CrawlerConfigTest {
             )
         }
 
+        @Test fun ensureLayout_stagesMovieKindModelsByteIdenticalToAssets() {
+            val cfg = configWithRealDefaultAsset()
+            cfg.ensureLayout()
+
+            val manifest = JSONObject(File(MOVIE_MODEL_SRC_DIR, "manifest.json").readText())
+            for (name in CrawlerConfig.MOVIE_MODEL_FILES) {
+                val source = File(MOVIE_MODEL_SRC_DIR, name)
+                val staged = File(cfg.movieModelsDir, name)
+                assertTrue("$name must be staged into ${cfg.movieModelsDir}", staged.isFile)
+                assertEquals("$name size must match the asset", source.length(), staged.length())
+                assertEquals("$name staged hash", sha256Hex(source), sha256Hex(staged))
+                assertArrayEquals(
+                    "$name must be copied byte-for-byte", source.readBytes(), staged.readBytes()
+                )
+            }
+            // The manifest pins both binaries (size + sha256); assert the STAGED bytes
+            // against it, so a swapped or corrupted model fails here, not on device.
+            val backbone = manifest.getJSONObject("backbone")
+            assertEquals("Q8_0", backbone.getString("quant"))
+            val stagedBackbone = File(cfg.movieModelsDir, backbone.getString("file"))
+            assertEquals(backbone.getLong("bytes"), stagedBackbone.length())
+            assertEquals(backbone.getString("sha256"), sha256Hex(stagedBackbone))
+            val head = manifest.getJSONObject("head")
+            val stagedHead = File(cfg.movieModelsDir, head.getString("file"))
+            assertEquals(head.getLong("bytes"), stagedHead.length())
+            assertEquals(head.getString("sha256"), sha256Hex(stagedHead))
+            assertEquals(
+                "no partial copies may remain",
+                emptyList<String>(),
+                cfg.movieModelsDir.listFiles()!!.map { it.name }.filter { it.endsWith(".tmp") }
+            )
+        }
+
         @Test fun ensureAssets_doesNotRewriteModelsWhenVersionStampMatches() {
             val cfg = configWithRealDefaultAsset()
             cfg.ensureLayout()
@@ -379,7 +438,8 @@ class CrawlerConfigTest {
             val stamp = File(cfg.workDir, CrawlerConfig.STAMP_FILE)
             assertEquals(
                 "the stamp must pin the model dir, not just the version code",
-                "${crawlerVersionCode()}|${CrawlerConfig.MODELS_SUBDIR}",
+                "${crawlerVersionCode()}|${CrawlerConfig.MODELS_SUBDIR}|" +
+                    CrawlerConfig.MOVIE_MODEL_SUBDIR,
                 stamp.readText().trim()
             )
         }
@@ -410,7 +470,8 @@ class CrawlerConfigTest {
             }
             assertEquals(
                 "the stamp must be upgraded to the model-dir scheme",
-                "${crawlerVersionCode()}|${CrawlerConfig.MODELS_SUBDIR}",
+                "${crawlerVersionCode()}|${CrawlerConfig.MODELS_SUBDIR}|" +
+                    CrawlerConfig.MOVIE_MODEL_SUBDIR,
                 stamp.readText().trim()
             )
         }
@@ -432,7 +493,8 @@ class CrawlerConfigTest {
             assertTrue("staged model files survive the sweep", current.isFile)
             assertTrue("only dirs are swept: plain files stay", unrelated.isFile)
             assertEquals(
-                "${crawlerVersionCode()}|${CrawlerConfig.MODELS_SUBDIR}",
+                "${crawlerVersionCode()}|${CrawlerConfig.MODELS_SUBDIR}|" +
+                    CrawlerConfig.MOVIE_MODEL_SUBDIR,
                 File(cfg.workDir, CrawlerConfig.STAMP_FILE).readText().trim()
             )
         }
@@ -454,6 +516,32 @@ class CrawlerConfigTest {
             assertTrue("the stamp is rewritten", stamp.exists())
         }
 
+        @Test fun ensureAssets_keepsBothShippedGenerationsAndSweepsTheRetiredOne() {
+            val cfg = configWithRealDefaultAsset()
+            cfg.ensureLayout()
+            // A pre-Stage-D install: one model dir in the stamp, a retired v4 dir
+            // left over from an older build.
+            val retired = File(cfg.workDir, "models/v4").apply { mkdirs() }
+            File(retired, "adult.ftz").writeBytes(byteArrayOf(4, 4, 4))
+            val stamp = File(cfg.workDir, CrawlerConfig.STAMP_FILE)
+            stamp.writeText("${crawlerVersionCode()}|models/v6")
+
+            cfg.ensureAssets()
+
+            assertFalse("the retired v4 generation is reclaimed", retired.exists())
+            assertTrue("the fastText generation survives the sweep", cfg.modelsDir.isDirectory)
+            assertTrue("the movie-kind generation survives the sweep", cfg.movieModelsDir.isDirectory)
+            for (name in CrawlerConfig.MOVIE_MODEL_FILES) {
+                assertTrue("$name must stay staged in ${cfg.movieModelsDir}", File(cfg.movieModelsDir, name).isFile)
+            }
+            assertEquals(
+                "the stamp must carry both model dirs",
+                "${crawlerVersionCode()}|${CrawlerConfig.MODELS_SUBDIR}|" +
+                    CrawlerConfig.MOVIE_MODEL_SUBDIR,
+                stamp.readText().trim()
+            )
+        }
+
         private fun configWithRealDefaultAsset(): CrawlerConfig {
             val context = RuntimeEnvironment.getApplication()
             val fixture = File(tmp.root, "assets/dht_crawler").apply { mkdirs() }
@@ -469,6 +557,9 @@ class CrawlerConfigTest {
         /** Checked-in model assets (read-only source of truth for the staging tests). */
         private val MODEL_SRC_DIR = File("src/main/cpp/dht_crawler-android/models/v6")
 
+        /** Checked-in movie-kind (JEVH) assets — the v9 generation's source of truth. */
+        private val MOVIE_MODEL_SRC_DIR = File("src/main/cpp/dht_crawler-android/models/v9")
+
         /** Mirrors `CrawlerConfig.currentVersionCode()`, which is private to the class. */
         private fun crawlerVersionCode(): Long {
             val context = RuntimeEnvironment.getApplication()
@@ -482,13 +573,22 @@ class CrawlerConfigTest {
         }
 
         /**
-         * Mirrors `assets/dht_crawler/models/v6/` into the asset fixture with the real
-         * checked-in model files, so byte fidelity is asserted against real binaries.
+         * Mirrors `assets/dht_crawler/models/v6/` and `.../v9/` into the asset fixture with
+         * the real checked-in model files, so byte fidelity is asserted against real
+         * binaries.
          */
         private fun copyClassifierModelAssets(assetDir: File) {
             assertTrue("checked-in model dir must exist: $MODEL_SRC_DIR", MODEL_SRC_DIR.isDirectory)
             val dst = File(assetDir, CrawlerConfig.MODELS_SUBDIR).apply { mkdirs() }
             MODEL_SRC_DIR.listFiles()!!.forEach { it.copyTo(File(dst, it.name), overwrite = true) }
+            assertTrue(
+                "checked-in movie-kind dir must exist: $MOVIE_MODEL_SRC_DIR",
+                MOVIE_MODEL_SRC_DIR.isDirectory
+            )
+            val movieDst = File(assetDir, CrawlerConfig.MOVIE_MODEL_SUBDIR).apply { mkdirs() }
+            for (name in CrawlerConfig.MOVIE_MODEL_FILES) {
+                File(MOVIE_MODEL_SRC_DIR, name).copyTo(File(movieDst, name), overwrite = true)
+            }
         }
 
         private fun sha256Hex(file: File): String =

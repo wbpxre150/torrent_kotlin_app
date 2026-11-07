@@ -49,7 +49,7 @@ class CrawlerKeysTest {
         // (backup_path is also a backup key and is covered by the backup test)
         for (key in listOf(
             "db_path", "bloom_path", "bep51_cache_path",
-            "classifier_model_dir", "hard_block_file"
+            "classifier_model_dir", "movie_kind_model_dir", "hard_block_file"
         )) {
             val r = CrawlerKeys.parseAdvanced("$key=/tmp/x")
             assertFalse("$key must be rejected", r.ok)
@@ -182,6 +182,38 @@ class CrawlerKeysTest {
         }
         assertEquals("tag", CrawlerKeys.ADULT_MODES.first())
         assertEquals(listOf("tag", "drop"), CrawlerKeys.ADULT_MODES)
+    }
+
+    @Test fun movieKindKeys_areKnownWithTheModelDirPathManaged() {
+        // The four names must match the C crawler's `config_load_file`
+        // (dht_crawler/src/config.c) exactly — a mismatch silently drops the key.
+        val tunables =
+            listOf("movie_kind_enabled", "movie_kind_threads", "movie_kind_thermal_backoff_c")
+        for (key in listOf("movie_kind_model_dir") + tunables) {
+            assertTrue("$key must be known", key in CrawlerKeys.KNOWN_KEYS)
+            assertFalse("$key must not be form-managed", key in CrawlerKeys.FORM_MANAGED_KEYS)
+            assertFalse("$key must not be backup-managed", key in CrawlerKeys.BACKUP_KEYS)
+        }
+        // The model dir is app-staged and pinned, so it is never textarea-settable.
+        assertTrue("movie_kind_model_dir must be path-managed", "movie_kind_model_dir" in CrawlerKeys.PATH_KEYS)
+        assertFalse(
+            "movie_kind_model_dir must not be advanced-overridable",
+            "movie_kind_model_dir" in CrawlerKeys.ALLOWED_ADVANCED_KEYS
+        )
+        val rejected = CrawlerKeys.parseAdvanced("movie_kind_model_dir=models/v4")
+        assertFalse(rejected.ok)
+        assertTrue(
+            rejected.errors.toString(),
+            rejected.errors.any { it.contains("movie_kind_model_dir") && it.contains("path key") }
+        )
+        // The three tunables have no form field, so the advanced textarea is the only
+        // way to set them — the `movie_kind_enabled = 0` escape hatch depends on it.
+        for (key in tunables) {
+            assertTrue("$key must be advanced-overridable", key in CrawlerKeys.ALLOWED_ADVANCED_KEYS)
+            val r = CrawlerKeys.parseAdvanced("$key=1")
+            assertTrue("$key must be accepted: ${r.errors}", r.ok)
+            assertEquals("1", r.entries[key])
+        }
     }
 
     @Test fun adultDropThresholdKey_isGoneWithTheDropAllSemantics() {

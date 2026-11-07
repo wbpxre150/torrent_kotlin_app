@@ -53,6 +53,10 @@ class CrawlerMaintenanceTest {
             MaintenanceAction.CATEGORY_FILTER_UPDATE,
             MaintenanceAction.fromRoute("category-filter-update")
         )
+        assertEquals(
+            MaintenanceAction.MOVIE_KIND_BENCH,
+            MaintenanceAction.fromRoute("movie-kind-bench")
+        )
         assertNull(MaintenanceAction.fromRoute("porn-filter-update"))
     }
 
@@ -70,6 +74,7 @@ class CrawlerMaintenanceTest {
         assertEquals("--rebuild-bloom-filter", MaintenanceAction.REBUILD_BLOOM_FILTER.flag)
         assertEquals("--clear-failure-filter", MaintenanceAction.CLEAR_FAILURE_FILTER.flag)
         assertEquals("--category-filter-update", MaintenanceAction.CATEGORY_FILTER_UPDATE.flag)
+        assertEquals("--movie-kind-bench", MaintenanceAction.MOVIE_KIND_BENCH.flag)
     }
 
     @Test fun needsSpaceCheckOnlyForDbRewritingActions() {
@@ -81,6 +86,29 @@ class CrawlerMaintenanceTest {
         // The purge only deletes rows (+ WAL checkpoint) and no longer compacts
         // the database, so it is not space-gated.
         assertFalse(MaintenanceAction.CATEGORY_FILTER_UPDATE.needsSpaceCheck)
+        // The bench only reads the database and times the encoder.
+        assertFalse(MaintenanceAction.MOVIE_KIND_BENCH.needsSpaceCheck)
+    }
+
+    @Test fun movieKindBench_commandLineCarriesTheDatabaseOperand() {
+        // The bench is the one action that takes an operand: the db path relative to
+        // workDir (`filesDir/crawler`), matching the crawler's `db_path`. The row
+        // count is the C side's default.
+        assertEquals(
+            listOf("--movie-kind-bench", "data/torrents.db"),
+            CrawlerMaintenance.argv(MaintenanceAction.MOVIE_KIND_BENCH)
+        )
+        for (a in MaintenanceAction.entries - MaintenanceAction.MOVIE_KIND_BENCH) {
+            assertEquals("$a must stay a bare flag", listOf(a.flag), CrawlerMaintenance.argv(a))
+        }
+    }
+
+    @Test fun movieKindBench_skipsSpaceCheckEvenWithNoSpace() {
+        val ex = CapturingExecutor()
+        val m = newMaintenance(ex, dbSize = 1_000L, freeSpace = 0L)
+        val st = m.start(MaintenanceAction.MOVIE_KIND_BENCH)
+        assertTrue("movie-kind-bench must not be space-gated", st.running)
+        assertEquals(1, ex.submitted.get())
     }
 
     @Test fun compact_refusedWhenNotEnoughFreeSpace() {

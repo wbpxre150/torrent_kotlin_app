@@ -573,13 +573,16 @@ tasks.register<Copy>("copyDhtCrawlerAssets") {
     from(crawlerSrc) {
         include("torrent_search_keywords.txt", "hard_block.txt")
     }
-    // Stage 5: fastText classifier model files. Binary — the Copy task is byte-exact
-    // (no text filtering / charset conversion), so a plain copy is correct here.
+    // Stage 5: fastText classifier model files; Stage D adds the movie-kind (JEVH)
+    // generation. Binary — the Copy task is byte-exact (no text filtering / charset
+    // conversion), so a plain copy is correct here. The include list is explicit on
+    // purpose: `v*/**` would ship the retired v4 generation too.
     // `into("models")` is relative to the task destination above, giving the asset
-    // path dht_crawler/models/v6/<file> (overriding the crawler's compiled-in default dir).
+    // paths dht_crawler/models/v6/<file> and dht_crawler/models/v9/<file> (overriding
+    // the crawler's compiled-in default dirs).
     val modelSrc = file("src/main/cpp/dht_crawler-android/models")
     from(modelSrc) {
-        include("v6/**")
+        include("v6/**", "v9/**")
         into("models")
     }
     into(file("build/generated/assets/dht_crawler/dht_crawler"))

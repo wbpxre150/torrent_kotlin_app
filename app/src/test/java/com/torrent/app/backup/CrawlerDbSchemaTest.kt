@@ -88,6 +88,29 @@ class CrawlerDbSchemaTest {
         }
     }
 
+    @Test fun torrentClassCarriesTheMovieKindColumns() {
+        // Stage C's migration adds these two nullable columns right after clf_ver;
+        // the backup import replays this DDL verbatim, so a drift here breaks the
+        // `INSERT … SELECT *` copies and `rebuild-db-v2.sh --check-schema`.
+        val torrentClass = CrawlerDbSchema.tableStatements.single {
+            it.startsWith("CREATE TABLE IF NOT EXISTS torrent_class (")
+        }
+        assertTrue(
+            "the movie-kind columns must follow clf_ver: $torrentClass",
+            torrentClass.contains(
+                "    clf_ver INTEGER NOT NULL,    movie_kind_mask INTEGER,    movie_kind_clf_ver INTEGER);",
+            ),
+        )
+        assertTrue(
+            "the movie-kind columns are nullable",
+            !torrentClass.contains("movie_kind_mask INTEGER NOT NULL"),
+        )
+        assertTrue(
+            "no index is created for the movie-kind columns",
+            CrawlerDbSchema.indexStatements.none { it.contains("movie_kind") },
+        )
+    }
+
     @Test fun partialIndexOnAdultIsPreserved() {
         assertTrue(
             CrawlerDbSchema.indexStatements.any {

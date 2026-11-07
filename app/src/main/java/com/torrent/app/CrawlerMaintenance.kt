@@ -19,6 +19,10 @@ enum class MaintenanceAction(val route: String, val flag: String, val needsSpace
     // The purge only deletes rows (plus a WAL checkpoint): it never rewrites
     // the database file, so it needs no DB-sized free space.
     CATEGORY_FILTER_UPDATE("category-filter-update", "--category-filter-update", false),
+    // Read-only bench of the movie-kind encoder over the existing DB rows: it
+    // writes nothing, so it is not space-gated either. Unlike every other action
+    // it needs the db operand — see [CrawlerMaintenance.argv].
+    MOVIE_KIND_BENCH("movie-kind-bench", "--movie-kind-bench", false),
     ;
 
     companion object {
@@ -121,7 +125,7 @@ class CrawlerMaintenance(
         try {
             stopCrawler()
             status = status.copy(message = "running ${action.flag}")
-            val exitCode = oneShotRunner.run(listOf(action.flag), workDir) { line ->
+            val exitCode = oneShotRunner.run(argv(action), workDir) { line ->
                 pushLine(lines, line)
             }
             val ok = exitCode == 0
@@ -153,6 +157,22 @@ class CrawlerMaintenance(
     companion object {
         /** Ring-buffer cap for the one-shot output tail. */
         internal const val MAX_LINES = 2000
+
+        /**
+         * The db operand the movie-kind bench needs: relative to [workDir]
+         * (`filesDir/crawler`), matching the crawler's `db_path`. The row count is
+         * the C side's default.
+         */
+        internal const val BENCH_DB_OPERAND = "data/torrents.db"
+
+        /**
+         * argv for [action]'s one-shot: a bare flag for every action except the
+         * movie-kind bench, which also takes the database operand.
+         */
+        internal fun argv(action: MaintenanceAction): List<String> = when (action) {
+            MaintenanceAction.MOVIE_KIND_BENCH -> listOf(action.flag, BENCH_DB_OPERAND)
+            else -> listOf(action.flag)
+        }
 
         /** Human-readable byte count for refusal messages. */
         internal fun formatBytes(b: Long): String = when {
