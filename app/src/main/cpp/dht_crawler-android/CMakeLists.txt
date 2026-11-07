@@ -137,6 +137,12 @@ add_compile_definitions(CLF_ENABLED)
 # configure (or the vendored repo's host Makefile build) stays llama-free.
 if(LLAMA_INSTALL)
     add_compile_definitions(MK_ENABLED)
+    # The serving-text renderer (src/movie_kind_render.c) is deliberately ungated
+    # so the vendored host build tests the real thing; only its NFC step needs
+    # utf8proc, and the shipped binary always gets it. Defined here beside
+    # MK_ENABLED, i.e. after the utf8proc target above, so it reaches the
+    # dhtcrawler target only.
+    add_compile_definitions(MK_NFC_ENABLED)
 endif()
 add_executable(dhtcrawler
     ${CRAWLER_SOURCES}
@@ -211,8 +217,9 @@ target_include_directories(dhtcrawler PRIVATE
 # Static third-party deps, then Bionic system libs. pthread lives in
 # Bionic libc; -llog for __android_log_write (civetweb).
 target_link_libraries(dhtcrawler PRIVATE
-    # Unicode NFC for the movie-kind serving text (used by src/movie_kind.c once
-    # MK_ENABLED exists; unused archives cost nothing in a static link).
+    # Unicode NFC for the movie-kind serving text (used by
+    # src/movie_kind_render.c under MK_NFC_ENABLED; unused archives cost nothing
+    # in a static link).
     utf8proc
     tparse
     ftc
