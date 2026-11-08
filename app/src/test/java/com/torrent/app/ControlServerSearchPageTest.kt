@@ -224,7 +224,8 @@ class ControlServerSearchPageTest {
 
     @Test fun js_restoreOnlyRepaintsAndNeverRefiresTheQuery() {
         // restore() re-renders the saved cards through buildCard(); it must not
-        // touch the feed, so doSearch() keeps the page's only sendBrowse();.
+        // touch the feed. The page carries two sendBrowse(); calls: doSearch()'s and
+        // the movie-kind chip row's refresh (movie-kind facet stage 3).
         val start = page.indexOf("function restore()")
         assertTrue("missing restore()", start >= 0)
         val end = page.indexOf("function applySel(", start)
@@ -234,8 +235,8 @@ class ControlServerSearchPageTest {
         assertFalse("restore must not call sendBrowse", body.contains("sendBrowse"))
         assertTrue("restore must repaint through buildCard", body.contains("buildCard("))
         assertEquals(
-            "the page keeps exactly one sendBrowse(); call",
-            1, page.split("sendBrowse();").size - 1,
+            "the page keeps exactly one sendBrowse(); call per refresh path",
+            2, page.split("sendBrowse();").size - 1,
         )
     }
 
@@ -256,13 +257,16 @@ class ControlServerSearchPageTest {
     }
 
     @Test fun js_chipControlsDoNotAutoLoad() {
-        // webui-ux stage 3: the chip controls only update in-page selection
-        // state; results load only on Search (button/Enter) or Randomize.
+        // webui-ux stage 3: the category/tv-kind chip controls only update in-page
+        // selection state; results load only on Search (button/Enter) or Randomize.
+        // Movie-kind facet stage 3 adds one deliberate exception: the multi-select
+        // movie-kind row refreshes the current browse on every toggle, so the page
+        // carries two sendBrowse(); calls — doSearch()'s and that row's.
         val sends = page.split("sendBrowse();").size - 1
-        assertTrue("expected exactly one sendBrowse(); call, found $sends", sends == 1)
+        assertTrue("expected exactly two sendBrowse(); calls, found $sends", sends == 2)
         assertTrue(
-            "sendBrowse(); must sit inside doSearch()",
-            page.indexOf("function doSearch()") < page.indexOf("sendBrowse();"),
+            "doSearch()'s sendBrowse(); must sit inside doSearch()",
+            page.indexOf("function doSearch()") < page.lastIndexOf("sendBrowse();"),
         )
         assertTrue(page.contains("sel.category"))
         assertTrue(page.contains("sel.tv_kind"))
@@ -324,6 +328,130 @@ class ControlServerSearchPageTest {
             assertFalse("$marker must not load results", body.contains("send("))
             assertFalse("$marker must not call sendBrowse", body.contains("sendBrowse"))
         }
+    }
+
+    // ── movie-kind facet: chips, badges, persistence ───────────────────────
+
+    /** [html]'s movie-kind chips as (data-movie-kind, aria-pressed, label). */
+    private fun movieChipsIn(html: String): List<Triple<String, String, String>> =
+        Regex("<button class=\"chip\" type=\"button\" data-movie-kind=\"([^\"]*)\" " +
+            "aria-pressed=\"(true|false)\">([^<]+)</button>")
+            .findAll(html).map { m ->
+                Triple(m.groupValues[1], m.groupValues[2], m.groupValues[3])
+            }.toList()
+
+    @Test fun page_hasMovieKindChipRow() {
+        // The row is generated from CrawlerTaxonomy.MOVIE_KINDS (never a third
+        // hand-written genre list), starts hidden (it is movie-only) and leads with
+        // a `none` chip matching rows without a verdict.
+        assertTrue(page.contains("id=\"movie-kind-row\" hidden"))
+        assertTrue(page.contains("data-movie-kind=\"none\""))
+        for (name in listOf("scifi", "western")) {
+            assertTrue("missing the $name genre chip", page.contains("data-movie-kind=\"$name\""))
+        }
+        val chips = movieChipsIn(page)
+        assertEquals(listOf("none") + CrawlerTaxonomy.MOVIE_KINDS, chips.map { it.first })
+        assertTrue("every movie chip starts unpressed", chips.all { it.second == "false" })
+        assertEquals(Triple("none", "false", "None"), chips.first())
+        assertEquals("Sci-Fi", chips.first { it.first == "scifi" }.third)
+        assertEquals("Western", chips.first { it.first == "western" }.third)
+    }
+
+    @Test fun page_keepsTheMovieKindRowInDropMode() {
+        // The row is independent of adult_mode (only the adult row is gated), so the
+        // facet survives a crawler that drops adult rows at ingest.
+        val drop = ControlServer.buildSearchPage(
+            CrawlerTaxonomy.CATEGORIES.toSet(), adultMode = "drop")
+        assertTrue(drop.contains("id=\"movie-kind-row\" hidden"))
+        assertTrue(drop.contains("data-movie-kind=\"scifi\""))
+        assertEquals(listOf("none") + CrawlerTaxonomy.MOVIE_KINDS,
+            movieChipsIn(drop).map { it.first })
+    }
+
+    @Test fun js_movieKindStateAndLabels() {
+        // `sel.movie_kinds` is the facet ([] = no filter) and the chip/badge labels
+        // are emitted from CrawlerTaxonomy.MOVIE_KIND_LABELS, not re-typed.
+        assertTrue(page.contains("movie_kinds: []"))
+        assertTrue(page.contains("var MOVIE_KIND_LABELS = {"))
+        for ((name, label) in CrawlerTaxonomy.MOVIE_KIND_LABELS) {
+            assertTrue("missing the $name label", page.contains("\"$name\":\"$label\""))
+        }
+    }
+
+    @Test fun js_movieKindFacetRidesEveryRequest() {
+        // Every request builder carries the facet (null when empty ⇒ no URL param),
+        // and pendingReq/current mirror it so Load more and Back keep it.
+        val expr = "movie_kinds: sel.movie_kinds && sel.movie_kinds.length ? sel.movie_kinds : null"
+        assertEquals(
+            "sendBrowse(), doSearch(), randomize and the restored current must all carry it",
+            4, page.split(expr).size - 1,
+        )
+        assertTrue("pendingReq must mirror the facet",
+            page.contains("tv_kind: obj.tv_kind, movie_kinds: obj.movie_kinds,"))
+        assertTrue("the rendered current must keep the facet",
+            page.contains("movie_kinds: req.movie_kinds, adult: req.adult, page: page,"))
+        assertTrue("Load more must keep the facet",
+            page.contains("movie_kinds: c.movie_kinds, adult: c.adult, page: c.page + 1"))
+    }
+
+    @Test fun js_movieKindChipsAreIndependentToggles() {
+        // Multi-select OR facet: a click toggles the genre in/out of sel.movie_kinds
+        // and flips only that chip. It must NOT use the tv-kind focus mode, whose
+        // sibling-hiding assumes single-select.
+        val body = handlerBody("el('movie-kind-row').onclick")
+        assertFalse("the movie row must not use focus mode", body.contains("chipFocus("))
+        assertFalse("the movie row must not hide siblings", body.contains("focusRow("))
+        assertTrue(body.contains("sel.movie_kinds.indexOf(k)"))
+        assertTrue(body.contains("sel.movie_kinds.push(k)"))
+        assertTrue(body.contains("sel.movie_kinds.splice(at, 1)"))
+        assertTrue("a toggle clears the stale result set", body.contains("clearResults();"))
+        assertTrue("a toggle refreshes the browse", body.contains("sendBrowse();"))
+    }
+
+    @Test fun js_movieKindRowIsMovieOnlyAndClearsOnSwitch() {
+        // The row is revealed only for the movie category; switching away drops the
+        // facet and repaints every chip unpressed.
+        assertTrue(page.contains("function hideMovieRow()"))
+        assertTrue(page.contains("row.setAttribute('hidden', '')"))
+        assertTrue(page.contains("sel.movie_kinds = [];"))
+        assertTrue(page.contains("function repaintMovieChips()"))
+        assertTrue("the category handler must gate the row on the movie category",
+            handlerBody("el('category-grid').onclick")
+                .contains("if (sel.category === 'movie') el('movie-kind-row').removeAttribute('hidden');"))
+        val start = page.indexOf("function applySel(focus) {")
+        assertTrue("missing applySel(focus)", start >= 0)
+        val end = page.indexOf("if (ADULT_SELECTION) {", start)
+        assertTrue("unterminated applySel()", end > start)
+        val applyBody = page.substring(start, end)
+        assertTrue("applySel must reveal the movie row for the movie category",
+            applyBody.contains("movieRow.removeAttribute('hidden')"))
+        assertTrue("applySel must repaint the movie chips",
+            applyBody.contains("repaintMovieChips()"))
+    }
+
+    @Test fun js_cardsShowUpToThreeGenreBadges() {
+        // Genre badges use the pretty labels, cap at 3 and summarise the rest as
+        // `+N`; rows without a verdict (null/[]/absent movie_kind) get none.
+        val start = page.indexOf("function buildCard(r) {")
+        assertTrue("missing buildCard()", start >= 0)
+        val end = page.indexOf("function render(", start)
+        assertTrue("unterminated buildCard()", end > start)
+        val body = page.substring(start, end)
+        assertTrue(body.contains("if (r.movie_kind && r.movie_kind.length) {"))
+        assertTrue(body.contains("i < r.movie_kind.length && i < 3"))
+        assertTrue(body.contains("MOVIE_KIND_LABELS[genre] || genre"))
+        assertTrue(body.contains("badge('+' + (r.movie_kind.length - 3))"))
+    }
+
+    @Test fun js_savesAndRestoresTheMovieKindFacet() {
+        // Additive field in the existing torrent.search.v1 payload (no key/version
+        // bump); a blob saved before stage 3 restores as [] and applySel repaints.
+        assertTrue("save must persist the facet",
+            page.contains("movie_kinds: sel.movie_kinds, adult: sel.adult"))
+        assertTrue("restore must read it back",
+            page.contains("sel.movie_kinds = Array.isArray(saved.sel.movie_kinds)"))
+        assertTrue(page.contains("? saved.sel.movie_kinds.map(String) : [];"))
+        assertTrue(page.contains("var SAVE_KEY = 'torrent.search.v1';"))
     }
 
     // ── per-card peer refresh on the search results ─────────────────────────

@@ -2070,6 +2070,27 @@ class ControlServer(
         }
 
         /**
+         * The movie-kind chip row of the /search page (movie-kind facet stage 3): a
+         * leading `None` chip plus one chip per [CrawlerTaxonomy.MOVIE_KINDS] genre.
+         * The chips are generated from the taxonomy so the page never carries a
+         * third hand-written copy of the genre list. The page's JS reads them
+         * generically through `data-movie-kind`; unlike the TV-kind row above they
+         * are independent multi-select toggles (OR), not a single-select row.
+         */
+        private fun movieKindChips(): String {
+            val chips = mutableListOf(
+                """<button class="chip" type="button" data-movie-kind="none" """ +
+                    """aria-pressed="false">None</button>""")
+            for (name in CrawlerTaxonomy.MOVIE_KINDS) {
+                val label = CrawlerTaxonomy.MOVIE_KIND_LABELS[name] ?: name
+                chips += """<button class="chip" type="button" data-movie-kind="$name" """ +
+                    """aria-pressed="false">$label</button>"""
+            }
+            // 14 spaces = the chip column of the (trimIndent()ed) page string.
+            return chips.joinToString("\n").prependIndent("              ")
+        }
+
+        /**
          * The `Adult` selection row (Hide/Show/Only) of the /search page, or `""`
          * when it must not be offered. The row is only meaningful in
          * `adult_mode=tag`: in `adult_mode=drop` the crawler discards adult-tagged
@@ -2145,6 +2166,9 @@ ${categoryChips(enabled)}
               <button class="chip" type="button" data-tv-kind="multi_season" aria-pressed="false">Multi-season</button>
               <button class="chip" type="button" data-tv-kind="complete_series" aria-pressed="false">Complete series</button>
               <button class="chip" type="button" data-tv-kind="daily" aria-pressed="false">Daily</button>
+            </div>
+            <div id="movie-kind-row" hidden>
+${movieKindChips()}
             </div>
 ${adultSelectionRow(adultSelection)}
             <div id="results-status">Pick your filters, then Search or Randomize</div>
@@ -2588,6 +2612,8 @@ ${adultSelectionRow(adultSelection)}
             #category-grid{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
             #tv-kind-row{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 12px}
             #tv-kind-row[hidden]{display:none}
+            #movie-kind-row{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 12px}
+            #movie-kind-row[hidden]{display:none}
             .seg{display:inline-flex;flex-wrap:wrap;gap:8px;margin:0 0 12px}
             .seg-row{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:0 0 12px}
             .seg-label{color:var(--muted);font-size:.9rem;font-weight:600}
@@ -2617,6 +2643,17 @@ ${adultSelectionRow(adultSelection)}
         """.trimIndent()
 
         /**
+         * [CrawlerTaxonomy.MOVIE_KIND_LABELS] as the JS object literal [SEARCH_JS]
+         * uses for the movie-kind chip and badge labels. Declared before [SEARCH_JS]
+         * because the object's property initializers run in source order. The keys
+         * and values are plain ASCII taxonomy names, so no JS escaping is needed.
+         */
+        private val MOVIE_KIND_LABELS_JS: String =
+            CrawlerTaxonomy.MOVIE_KIND_LABELS.entries.joinToString(",", "{", "}") { (name, label) ->
+                "\"$name\":\"$label\""
+            }
+
+        /**
          * The /search page interaction logic (search-dashboard stage 3b): the
          * authenticated /search/ws client, category/TV/adult controls,
          * result cards, infinite scroll and the add-to-transmission button.
@@ -2635,7 +2672,11 @@ ${adultSelectionRow(adultSelection)}
               // (re)connect; send()/loadMore() write through it.
               var ws = null;
 
-              var sel = { category: null, tv_kind: null, adult: 'hide' };
+              // `movie_kinds` is the multi-select movie-kind facet (OR semantics);
+              // an empty array means "no facet". MOVIE_KIND_LABELS comes from
+              // CrawlerTaxonomy.MOVIE_KIND_LABELS so chips and badges stay in step.
+              var sel = { category: null, tv_kind: null, movie_kinds: [], adult: 'hide' };
+              var MOVIE_KIND_LABELS = ${MOVIE_KIND_LABELS_JS};
               var current = null;
               var seq = 0;
               var activeId = 0;
@@ -2789,6 +2830,17 @@ ${adultSelectionRow(adultSelection)}
                 meta.className = 'meta';
                 if (r.category) meta.appendChild(badge(String(r.category)));
                 if (r.tv_kind) meta.appendChild(badge(String(r.tv_kind)));
+                // Movie-kind genre badges (stage 3): at most 3, then a `+N` overflow
+                // badge. Rows without a verdict (`movie_kind` null/[]/absent) get none.
+                if (r.movie_kind && r.movie_kind.length) {
+                  for (var i = 0; i < r.movie_kind.length && i < 3; i++) {
+                    var genre = String(r.movie_kind[i]);
+                    meta.appendChild(badge(MOVIE_KIND_LABELS[genre] || genre));
+                  }
+                  if (r.movie_kind.length > 3) {
+                    meta.appendChild(badge('+' + (r.movie_kind.length - 3)));
+                  }
+                }
 
                 var size = document.createElement('span');
                 size.textContent = r.size != null ? String(r.size) : fmtBytes(r.size_bytes);
@@ -2898,7 +2950,8 @@ ${adultSelectionRow(adultSelection)}
                 var page = typeof payload.page === 'number' ? payload.page : (req.page || 1);
                 current = {
                   type: req.type, q: req.q, category: req.category, tv_kind: req.tv_kind,
-                  adult: req.adult, page: page, has_more: !!payload.has_more
+                  movie_kinds: req.movie_kinds, adult: req.adult, page: page,
+                  has_more: !!payload.has_more
                 };
                 var n = typeof payload.total_count === 'number' ? payload.total_count : results.length;
                 var txt = n + (n === 1 ? ' result' : ' results');
@@ -2926,7 +2979,8 @@ ${adultSelectionRow(adultSelection)}
                 pendingAppend = !!append;
                 pendingReq = {
                   type: obj.type, q: obj.q, category: obj.category,
-                  tv_kind: obj.tv_kind, adult: obj.adult, page: obj.page
+                  tv_kind: obj.tv_kind, movie_kinds: obj.movie_kinds,
+                  adult: obj.adult, page: obj.page
                 };
                 setLoading(true);
                 if (!append) statusText('Searching\u2026');
@@ -2938,6 +2992,7 @@ ${adultSelectionRow(adultSelection)}
               function sendBrowse() {
                 send({
                   type: 'browse', category: sel.category, tv_kind: sel.tv_kind,
+                  movie_kinds: sel.movie_kinds && sel.movie_kinds.length ? sel.movie_kinds : null,
                   adult: sel.adult, page: 1
                 }, false);
               }
@@ -2950,7 +3005,7 @@ ${adultSelectionRow(adultSelection)}
                 var c = current;
                 send({
                   type: c.type, q: c.q, category: c.category, tv_kind: c.tv_kind,
-                  adult: c.adult, page: c.page + 1
+                  movie_kinds: c.movie_kinds, adult: c.adult, page: c.page + 1
                 }, true);
               }
 
@@ -3136,7 +3191,10 @@ ${adultSelectionRow(adultSelection)}
               function save() {
                 try {
                   sessionStorage.setItem(SAVE_KEY, JSON.stringify({
-                    sel: { category: sel.category, tv_kind: sel.tv_kind, adult: sel.adult },
+                    sel: {
+                      category: sel.category, tv_kind: sel.tv_kind,
+                      movie_kinds: sel.movie_kinds, adult: sel.adult
+                    },
                     focus: { category: rowFocused(el('category-grid')), tv_kind: rowFocused(el('tv-kind-row')) },
                     mode: lastQuery ? lastQuery.mode : null,
                     q: lastQuery ? lastQuery.q : null,
@@ -3163,6 +3221,9 @@ ${adultSelectionRow(adultSelection)}
                     sel.category = saved.sel.category == null ? null : String(saved.sel.category);
                     sel.tv_kind = saved.sel.tv_kind == null ? null : String(saved.sel.tv_kind);
                     if (saved.sel.adult != null) sel.adult = String(saved.sel.adult);
+                    // Additive field: a blob saved before stage 3 has no movie_kinds.
+                    sel.movie_kinds = Array.isArray(saved.sel.movie_kinds)
+                      ? saved.sel.movie_kinds.map(String) : [];
                   }
                   applySel(saved.focus && typeof saved.focus === 'object' ? saved.focus : null);
                   var box = el('results');
@@ -3180,7 +3241,9 @@ ${adultSelectionRow(adultSelection)}
                   if (lastQuery.mode === 'search' || lastQuery.mode === 'browse') {
                     current = {
                       type: lastQuery.mode, q: lastQuery.q, category: sel.category,
-                      tv_kind: sel.tv_kind, adult: sel.adult, page: lastQuery.page,
+                      tv_kind: sel.tv_kind,
+                      movie_kinds: sel.movie_kinds && sel.movie_kinds.length ? sel.movie_kinds : null,
+                      adult: sel.adult, page: lastQuery.page,
                       has_more: lastQuery.has_more
                     };
                   } else {
@@ -3214,6 +3277,15 @@ ${adultSelectionRow(adultSelection)}
                   if (kindChip) selectOnly(tvRow, kindChip);
                   if (showTv && focus && focus.tv_kind) focusRow(tvRow); else revealRow(tvRow);
                 }
+                // Movie-kind row (stage 3): movie category only. The chips have no
+                // focus mode; their pressed state is repainted from sel.
+                if (sel.category === 'movie') {
+                  var movieRow = el('movie-kind-row');
+                  if (movieRow) movieRow.removeAttribute('hidden');
+                } else {
+                  hideMovieRow();
+                }
+                repaintMovieChips();
                 if (ADULT_SELECTION) {
                   var adultRow = el('adult-control');
                   if (adultRow) {
@@ -3254,6 +3326,31 @@ ${adultSelectionRow(adultSelection)}
                   chips[i].classList.remove('hidden');
                 }
               }
+
+              // ── movie-kind facet (multi-select, stage 3) ─────────────────
+              // The row is movie-only: hiding it also drops the facet, so a later
+              // movie browse never carries a stale genre filter.
+              function hideMovieRow() {
+                var row = el('movie-kind-row');
+                if (!row) return;
+                row.setAttribute('hidden', '');
+                sel.movie_kinds = [];
+                repaintMovieChips();
+              }
+
+              // Repaint the movie-kind chips from sel.movie_kinds: the selection
+              // lives in `sel` (multi-select), not in the chips' aria-pressed.
+              function repaintMovieChips() {
+                var row = el('movie-kind-row');
+                if (!row) return;
+                var chips = row.querySelectorAll('.chip');
+                for (var i = 0; i < chips.length; i++) {
+                  var k = chips[i].getAttribute('data-movie-kind');
+                  chips[i].setAttribute('aria-pressed',
+                    sel.movie_kinds.indexOf(k) === -1 ? 'false' : 'true');
+                }
+              }
+
               el('category-grid').onclick = function (ev) {
                 var t = ev.target;
                 var cat = t && t.getAttribute ? t.getAttribute('data-category') : null;
@@ -3267,6 +3364,7 @@ ${adultSelectionRow(adultSelection)}
                   sel.tv_kind = null;
                   selectOnly(tvRow, tvRow.querySelector('.chip[data-tv-kind="none"]'));
                   revealRow(tvRow);
+                  hideMovieRow();
                   clearResults();
                   return;
                 }
@@ -3280,6 +3378,10 @@ ${adultSelectionRow(adultSelection)}
                   selectOnly(tvRow, tvRow.querySelector('.chip[data-tv-kind="none"]'));
                   revealRow(tvRow);
                 }
+                // The movie-kind facet is movie-only: any other category clears
+                // it and repaints every chip unpressed.
+                if (sel.category === 'movie') el('movie-kind-row').removeAttribute('hidden');
+                else hideMovieRow();
               };
 
               el('tv-kind-row').onclick = function (ev) {
@@ -3295,6 +3397,26 @@ ${adultSelectionRow(adultSelection)}
                 }
                 sel.tv_kind = k === 'none' ? null : k;
                 clearResults();
+              };
+
+              // Movie-kind chips (stage 3): INDEPENDENT multi-select toggles (OR
+              // semantics), so this row deliberately has no chipFocus() focus mode
+              // — sibling-hiding assumes single-select. A toggle refreshes the
+              // current browse so the genre badges update in place.
+              el('movie-kind-row').onclick = function (ev) {
+                var t = ev.target;
+                var k = t && t.getAttribute ? t.getAttribute('data-movie-kind') : null;
+                if (k == null) return;
+                var at = sel.movie_kinds.indexOf(k);
+                if (at === -1) {
+                  sel.movie_kinds.push(k);
+                  t.setAttribute('aria-pressed', 'true');
+                } else {
+                  sel.movie_kinds.splice(at, 1);
+                  t.setAttribute('aria-pressed', 'false');
+                }
+                clearResults();
+                sendBrowse();
               };
 
               // Only wired when the server rendered the row (`adult_mode=tag`); in
@@ -3317,7 +3439,9 @@ ${adultSelectionRow(adultSelection)}
                 if (v === '') { sendBrowse(); return; }
                 send({
                   type: 'search', q: v, category: sel.category,
-                  tv_kind: sel.tv_kind, adult: sel.adult, page: 1
+                  tv_kind: sel.tv_kind,
+                  movie_kinds: sel.movie_kinds && sel.movie_kinds.length ? sel.movie_kinds : null,
+                  adult: sel.adult, page: 1
                 }, false);
               }
 
@@ -3330,7 +3454,9 @@ ${adultSelectionRow(adultSelection)}
                 clearResults();
                 send({
                   type: 'random', category: sel.category,
-                  tv_kind: sel.tv_kind, adult: sel.adult
+                  tv_kind: sel.tv_kind,
+                  movie_kinds: sel.movie_kinds && sel.movie_kinds.length ? sel.movie_kinds : null,
+                  adult: sel.adult
                 }, false);
               };
 
