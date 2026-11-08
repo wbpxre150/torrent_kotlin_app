@@ -1680,6 +1680,7 @@ class ControlServer(
             // disabled one is a client bug and answers bad_request: category).
             allowedCategories = enabledCategories(loadConfig().crawler.saveCategories),
             tvKind = searchField(obj, "tv_kind"),
+            movieKinds = searchStringArray(obj, "movie_kinds"),
             adult = searchField(obj, "adult"),
             page = searchField(obj, "page"),
         )
@@ -1726,6 +1727,18 @@ class ControlServer(
         val v = obj.opt(key) ?: return null
         if (v == JSONObject.NULL) return null
         return v.toString()
+    }
+
+    /**
+     * Reads a string-array field from a parsed frame (the movie-kind facet's
+     * `movie_kinds`): absent, JSON null and non-array values are null, and
+     * elements are coerced like [searchField] (JSON null elements are dropped).
+     */
+    private fun searchStringArray(obj: JSONObject, key: String): List<String>? {
+        val arr = obj.optJSONArray(key) ?: return null
+        return (0 until arr.length()).mapNotNull { i ->
+            arr.opt(i)?.takeIf { it != JSONObject.NULL }?.toString()
+        }
     }
 
     private fun urlEnc(s: String): String = URLEncoder.encode(s, "UTF-8")
@@ -1836,6 +1849,10 @@ class ControlServer(
         // settings form share one source of truth.
         private val SEARCH_CATEGORIES: Set<String> = CrawlerTaxonomy.CATEGORIES.toSet()
         private val SEARCH_TV_KINDS: Set<String> = CrawlerTaxonomy.TV_KINDS.toSet()
+
+        // The movie-kind facet is a multi-select over the 16 manifest genres;
+        // the literal `none` is the extra token the crawler also accepts.
+        private val SEARCH_MOVIE_KINDS: Set<String> = CrawlerTaxonomy.MOVIE_KINDS.toSet()
         private val SEARCH_ADULT_MODES = setOf("hide", "show", "only")
 
         /**
@@ -1881,6 +1898,7 @@ class ControlServer(
             category: String?,
             allowedCategories: Set<String>,
             tvKind: String?,
+            movieKinds: List<String>? = null,
             adult: String?,
             page: String?,
         ): CrawlerQueryResult {
@@ -1895,6 +1913,16 @@ class ControlServer(
             if (tv != null && tv !in SEARCH_TV_KINDS) return CrawlerQueryResult.Bad("tv_kind")
             val ad = adult?.takeIf { it.isNotEmpty() }
             if (ad != null && ad !in SEARCH_ADULT_MODES) return CrawlerQueryResult.Bad("adult")
+            // Movie kinds are a multi-select facet: every token must be one of
+            // the 16 manifest genres or the literal `none`. Dedupe and
+            // canonicalize into manifest order (`none` last) so the URL stays
+            // deterministic for the test pins.
+            val movieTokens = movieKinds.orEmpty().filter { it.isNotEmpty() }
+            if (movieTokens.any { it != "none" && it !in SEARCH_MOVIE_KINDS }) {
+                return CrawlerQueryResult.Bad("movie_kind")
+            }
+            val mks = CrawlerTaxonomy.MOVIE_KINDS.filter { it in movieTokens } +
+                movieTokens.filter { it == "none" }.take(1)
 
             val parts = mutableListOf<String>()
             if (type == "search") {
@@ -1903,6 +1931,8 @@ class ControlServer(
             }
             if (cat != null) parts += "category=$cat"
             if (tv != null) parts += "tv_kind=$tv"
+            // Genre names are URL-safe literals (letters only), like tv_kind.
+            if (mks.isNotEmpty()) parts += "movie_kind=" + mks.joinToString(",")
             if (ad != null) parts += "adult=$ad"
             if (type == "random") parts += "min_peers=10"
             if (type != "random") {

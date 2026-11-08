@@ -220,8 +220,15 @@ class ControlServerWebSocketTest {
         return TokenManager(context)
     }
 
-    /** Minimal raw-socket /stats upstream (stands in for the crawler's CivetWeb). */
-    private fun startStatsUpstream(body: String): ServerSocket {
+    /**
+     * Minimal raw-socket /stats upstream (stands in for the crawler's CivetWeb).
+     * When [requests] is non-null, every received request line is appended to it
+     * so a test can pin the path the server actually forwarded.
+     */
+    private fun startStatsUpstream(
+        body: String,
+        requests: MutableList<String>? = null,
+    ): ServerSocket {
         val server = ServerSocket(0)
         Thread {
             while (true) {
@@ -247,6 +254,7 @@ class ControlServerWebSocketTest {
                                 Thread.sleep(20)
                             }
                         }
+                        requests?.add(header.lineSequence().firstOrNull().orEmpty())
                         val bytes = body.toByteArray()
                         val responseHeaders =
                             "HTTP/1.1 200 OK\r\n" +
@@ -894,6 +902,79 @@ class ControlServerWebSocketTest {
                 assertTrue("expected a reply, got none", reply != null)
                 assertTrue("expected ok despite the stray sort key, got: $reply",
                     reply!!.contains("\"ok\":true"))
+            } finally {
+                ws.close()
+            }
+        } finally {
+            live.stop()
+            upstream.close()
+        }
+    }
+
+    /**
+     * Stage 2: the movie-kind facet rides the frame as a `movie_kinds` array and
+     * leaves as the single csv `movie_kind` crawler param, canonicalized into
+     * manifest order (`scifi,action` -> `action,scifi`).
+     */
+    @Test fun searchWebSocket_movieKindsFrame_forwardsCanonicalMovieKindParam() {
+        val requests = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val upstream = startStatsUpstream("""{"results":[],"has_more":false}""", requests)
+        val live = startTestServer(
+            TOKEN, crawlerRunning = true, crawlerPort = upstream.localPort,
+            pushPeriodMs = 10_000, searchReadTimeoutMs = 15_000,
+        )
+        live.start()
+        try {
+            val ws = connectWithRetry(live.port, "/search/ws?token=$TOKEN")
+            try {
+                ws.sendText(
+                    """{"id":7,"type":"search","q":"Manifest","movie_kinds":["scifi","action"],"page":1}""")
+                val reply = ws.nextText(10_000)
+                assertTrue("expected a reply, got none", reply != null)
+                assertTrue("expected ok, got: $reply", reply!!.contains("\"ok\":true"))
+                val deadline = System.currentTimeMillis() + 5_000
+                var forwarded: String? = null
+                while (forwarded == null && System.currentTimeMillis() < deadline) {
+                    // The server also polls /stats for its own health checks.
+                    forwarded = requests.firstOrNull { it.startsWith("GET /search") }
+                    if (forwarded == null) Thread.sleep(10)
+                }
+                assertEquals(
+                    "GET /search?q=Manifest&movie_kind=action,scifi&page=1 HTTP/1.1",
+                    forwarded,
+                )
+            } finally {
+                ws.close()
+            }
+        } finally {
+            live.stop()
+            upstream.close()
+        }
+    }
+
+    /** Stage 2: an empty `movie_kinds` array means "no facet" — no URL param. */
+    @Test fun searchWebSocket_emptyMovieKinds_forwardsNoParam() {
+        val requests = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val upstream = startStatsUpstream("""{"results":[],"has_more":false}""", requests)
+        val live = startTestServer(
+            TOKEN, crawlerRunning = true, crawlerPort = upstream.localPort,
+            pushPeriodMs = 10_000, searchReadTimeoutMs = 15_000,
+        )
+        live.start()
+        try {
+            val ws = connectWithRetry(live.port, "/search/ws?token=$TOKEN")
+            try {
+                ws.sendText("""{"id":8,"type":"browse","category":"movie","movie_kinds":[]}""")
+                val reply = ws.nextText(10_000)
+                assertTrue("expected a reply, got none", reply != null)
+                assertTrue("expected ok, got: $reply", reply!!.contains("\"ok\":true"))
+                val deadline = System.currentTimeMillis() + 5_000
+                var forwarded: String? = null
+                while (forwarded == null && System.currentTimeMillis() < deadline) {
+                    forwarded = requests.firstOrNull { it.startsWith("GET /browse") }
+                    if (forwarded == null) Thread.sleep(10)
+                }
+                assertEquals("GET /browse?category=movie HTTP/1.1", forwarded)
             } finally {
                 ws.close()
             }

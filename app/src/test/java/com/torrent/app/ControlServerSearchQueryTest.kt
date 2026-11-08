@@ -24,10 +24,11 @@ class ControlServerSearchQueryTest {
         adult: String? = null,
         page: String? = null,
         allowedCategories: Set<String> = CrawlerTaxonomy.CATEGORIES.toSet(),
+        movieKinds: List<String>? = null,
     ) = ControlServer.buildCrawlerQuery(
         type = type, q = q, category = category,
         allowedCategories = allowedCategories,
-        tvKind = tvKind, adult = adult, page = page)
+        tvKind = tvKind, movieKinds = movieKinds, adult = adult, page = page)
 
     private fun okPath(
         type: String?,
@@ -37,8 +38,9 @@ class ControlServerSearchQueryTest {
         adult: String? = null,
         page: String? = null,
         allowedCategories: Set<String> = CrawlerTaxonomy.CATEGORIES.toSet(),
+        movieKinds: List<String>? = null,
     ): String {
-        val r = build(type, q, category, tvKind, adult, page, allowedCategories)
+        val r = build(type, q, category, tvKind, adult, page, allowedCategories, movieKinds)
         return (r as CrawlerQueryResult.Ok).path
     }
 
@@ -50,8 +52,9 @@ class ControlServerSearchQueryTest {
         adult: String? = null,
         page: String? = null,
         allowedCategories: Set<String> = CrawlerTaxonomy.CATEGORIES.toSet(),
+        movieKinds: List<String>? = null,
     ): String {
-        val r = build(type, q, category, tvKind, adult, page, allowedCategories)
+        val r = build(type, q, category, tvKind, adult, page, allowedCategories, movieKinds)
         return (r as CrawlerQueryResult.Bad).field
     }
 
@@ -199,5 +202,72 @@ class ControlServerSearchQueryTest {
         assertEquals(
             setOf("movie", "tv"),
             ControlServer.enabledCategories(listOf("movie", "porn", "tv", "")))
+    }
+
+    // ── the movie-kind facet: canonicalized, deduped, "none" last ──────────
+
+    @Test fun movieKinds_canonicalOrderAndExactUrl() {
+        assertEquals(
+            "/search?q=a+b&category=movie&movie_kind=action,scifi&adult=show&page=2",
+            okPath(
+                type = "search", q = "a b", category = "movie",
+                movieKinds = listOf("scifi", "action"), adult = "show", page = "2"))
+    }
+
+    @Test fun movieKinds_sitBetweenTvKindAndAdult() {
+        assertEquals(
+            "/browse?category=movie&tv_kind=none&movie_kind=action&adult=hide&page=1",
+            okPath(
+                type = "browse", category = "movie", tvKind = "none",
+                movieKinds = listOf("action"), adult = "hide", page = "1"))
+    }
+
+    @Test fun movieKinds_noneSortsLast() {
+        assertEquals(
+            "/browse?movie_kind=action,none",
+            okPath(type = "browse", movieKinds = listOf("none", "action")))
+    }
+
+    @Test fun movieKinds_areDedupedIntoManifestOrder() {
+        assertEquals(
+            "/browse?movie_kind=action,drama,scifi",
+            okPath(type = "browse", movieKinds = listOf("drama", "scifi", "action", "drama")))
+    }
+
+    @Test fun movieKindNamesAreAccepted() {
+        assertEquals(
+            "/browse?movie_kind=" + CrawlerTaxonomy.MOVIE_KINDS.joinToString(","),
+            okPath(type = "browse", movieKinds = CrawlerTaxonomy.MOVIE_KINDS))
+        for (k in CrawlerTaxonomy.MOVIE_KINDS + "none") {
+            assertEquals("/browse?movie_kind=$k", okPath(type = "browse", movieKinds = listOf(k)))
+        }
+    }
+
+    @Test fun badMovieKind() {
+        assertEquals("movie_kind", badField(type = "browse", movieKinds = listOf("bogus")))
+        // The allow-list is exact: case and near-misses are rejected.
+        assertEquals("movie_kind", badField(type = "browse", movieKinds = listOf("Action")))
+        assertEquals(
+            "movie_kind",
+            badField(type = "browse", movieKinds = listOf("action", "sci-fi")))
+    }
+
+    @Test fun emptyOrAbsentMovieKindsAddNoParam() {
+        assertEquals("/browse?category=movie", okPath(type = "browse", category = "movie"))
+        assertEquals(
+            "/browse?category=movie",
+            okPath(type = "browse", category = "movie", movieKinds = emptyList()))
+        assertEquals(
+            "/search?q=hi",
+            okPath(type = "search", q = "hi", movieKinds = listOf("")))
+    }
+
+    @Test fun movieKindLabels_arePrettyAndCoverEveryGenre() {
+        assertEquals("Action", CrawlerTaxonomy.MOVIE_KIND_LABELS["action"])
+        assertEquals("Sci-Fi", CrawlerTaxonomy.MOVIE_KIND_LABELS["scifi"])
+        assertEquals("Documentary", CrawlerTaxonomy.MOVIE_KIND_LABELS["documentary"])
+        assertEquals(
+            CrawlerTaxonomy.MOVIE_KINDS.toSet(),
+            CrawlerTaxonomy.MOVIE_KIND_LABELS.keys)
     }
 }

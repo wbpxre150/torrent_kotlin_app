@@ -26,4 +26,25 @@ object CrawlerTaxonomy {
         "none", "episode", "multi_episode", "season_pack", "multi_season",
         "complete_series", "daily",
     )
+
+    /**
+     * The 16 movie-kind genre names, in the movie-kind manifest order
+     * (`dht_crawler-android/models/v9/manifest.json`), which is also the bit
+     * order of a row's `movie_kind_mask`. The search page renders its chips and
+     * badges in this order, and the crawler's `movie_kind` filter param accepts
+     * exactly these names (plus the literal `none`).
+     */
+    val MOVIE_KINDS: List<String> = listOf(
+        "action", "comedy", "drama", "horror", "thriller", "scifi", "fantasy",
+        "animation", "documentary", "romance", "crime", "adventure", "family",
+        "mystery", "war", "western",
+    )
+
+    /** Display labels for the movie-kind chips/badges, keyed by genre name. */
+    val MOVIE_KIND_LABELS: Map<String, String> = MOVIE_KINDS.associateWith { name ->
+        when (name) {
+            "scifi" -> "Sci-Fi"
+            else -> name.replaceFirstChar { it.uppercase() }
+        }
+    }
 }
