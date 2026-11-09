@@ -557,7 +557,8 @@ tasks.register("prepareDhtCrawlerSrc") {
             "save-categories.patch",
             "search-rows-filtered-name.patch",
             "rebuild-fts-database.patch",
-            "search-movie-kind-facet.patch"
+            "search-movie-kind-facet.patch",
+            "random-facet-pool.patch"
         )) {
             project.exec {
                 commandLine("patch", "-p1", "-d", destDir.absolutePath, "-i", file("$destDir/patches/$patchName").absolutePath)
