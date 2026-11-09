@@ -914,7 +914,9 @@ class ControlServerWebSocketTest {
     /**
      * Stage 2: the movie-kind facet rides the frame as a `movie_kinds` array and
      * leaves as the single csv `movie_kind` crawler param, canonicalized into
-     * manifest order (`scifi,action` -> `action,scifi`).
+     * manifest order (`scifi,action` -> `action,scifi`). The crawler's facet is
+     * conjunctive — it returns only rows carrying ALL the selected genres — so
+     * this URL pins the wire contract, not the row set, and stays unchanged.
      */
     @Test fun searchWebSocket_movieKindsFrame_forwardsCanonicalMovieKindParam() {
         val requests = java.util.Collections.synchronizedList(mutableListOf<String>())

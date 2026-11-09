@@ -2075,7 +2075,8 @@ class ControlServer(
          * The chips are generated from the taxonomy so the page never carries a
          * third hand-written copy of the genre list. The page's JS reads them
          * generically through `data-movie-kind`; unlike the TV-kind row above they
-         * are independent multi-select toggles (OR), not a single-select row.
+         * are independent multi-select toggles — a torrent must carry ALL the
+         * selected genres — not a single-select row.
          */
         private fun movieKindChips(): String {
             val chips = mutableListOf(
@@ -2175,6 +2176,7 @@ ${adultSelectionRow(adultSelection)}
             <div id="banner" class="banner" hidden></div>
             <div id="spinner" hidden aria-hidden="true"></div>
             <div id="results"></div>
+            <div id="results-empty" hidden></div>
             <div id="sentinel"></div>
             <button id="load-more" class="btn secondary" type="button" hidden>Load more</button>
             <div id="toast" class="toast" hidden></div>
@@ -2618,6 +2620,7 @@ ${adultSelectionRow(adultSelection)}
             .seg-row{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:0 0 12px}
             .seg-label{color:var(--muted);font-size:.9rem;font-weight:600}
             #results-status{color:var(--muted);font-size:.9rem;margin:8px 0 4px}
+            #results-empty{color:var(--muted);font-size:.9rem;margin:8px 0 4px;text-align:center}
             #spinner{width:36px;height:36px;margin:24px auto;border:4px solid var(--chip);border-top-color:var(--blue);border-radius:50%;animation:spinseek .9s linear infinite}
             #spinner[hidden]{display:none}
             @keyframes spinseek{to{transform:rotate(360deg)}}
@@ -2672,8 +2675,9 @@ ${adultSelectionRow(adultSelection)}
               // (re)connect; send()/loadMore() write through it.
               var ws = null;
 
-              // `movie_kinds` is the multi-select movie-kind facet (OR semantics);
-              // an empty array means "no facet". MOVIE_KIND_LABELS comes from
+              // `movie_kinds` is the multi-select movie-kind facet: a row must carry
+              // ALL the selected genres (the `none` token is an extra OR arm). An
+              // empty array means "no facet". MOVIE_KIND_LABELS comes from
               // CrawlerTaxonomy.MOVIE_KIND_LABELS so chips and badges stay in step.
               var sel = { category: null, tv_kind: null, movie_kinds: [], adult: 'hide' };
               var MOVIE_KIND_LABELS = ${MOVIE_KIND_LABELS_JS};
@@ -2723,6 +2727,29 @@ ${adultSelectionRow(adultSelection)}
               }
 
               function hideBanner() { el('banner').setAttribute('hidden', ''); }
+
+              // The filter-aware empty state (strict genre facet): shown only for a
+              // fresh query that returned nothing, naming the genres that were
+              // actually sent. `req` is the pendingReq snapshot, never the live
+              // `sel` a chip toggle mutates without refetching; a bare
+              // 'No torrents match these filters' covers the no-genre case.
+              function showEmpty(req) {
+                var kinds = (req && req.movie_kinds) || [];
+                var msg = 'No torrents match these filters';
+                if (kinds.length) {
+                  var labels = [];
+                  for (var i = 0; i < kinds.length; i++) {
+                    var g = String(kinds[i]);
+                    labels.push(g === 'none' ? 'None' : (MOVIE_KIND_LABELS[g] || g));
+                  }
+                  msg = 'No torrents match all of ' + labels.join(' + ');
+                }
+                var e = el('results-empty');
+                e.textContent = msg;
+                e.removeAttribute('hidden');
+              }
+
+              function hideEmpty() { el('results-empty').setAttribute('hidden', ''); }
 
               function toast(msg, isErr) {
                 var t = el('toast');
@@ -2955,6 +2982,7 @@ ${adultSelectionRow(adultSelection)}
                     mode: 'random', q: null, page: 1, has_more: false, statusText: 'Random pick'
                   };
                   save();
+                  if (results.length === 0) showEmpty(req); else hideEmpty();
                   return;
                 }
                 var page = typeof payload.page === 'number' ? payload.page : (req.page || 1);
@@ -2967,6 +2995,7 @@ ${adultSelectionRow(adultSelection)}
                 var txt = n + (n === 1 ? ' result' : ' results');
                 if (req.type === 'search') txt += ' \u00b7 best matches first';
                 statusText(txt);
+                if (!wasAppend && results.length === 0) showEmpty(req); else hideEmpty();
                 lastQuery = {
                   mode: req.type === 'search' ? 'search' : 'browse',
                   q: req.q == null ? null : String(req.q),
@@ -3171,6 +3200,8 @@ ${adultSelectionRow(adultSelection)}
                 current = null;
                 resultsAccum = [];
                 lastQuery = null;
+                hideEmpty();
+                statusText('Pick your filters, then Search or Randomize');
                 try { sessionStorage.removeItem(SAVE_KEY); } catch (e) {}
               }
 
@@ -3409,10 +3440,11 @@ ${adultSelectionRow(adultSelection)}
                 clearResults();
               };
 
-              // Movie-kind chips (stage 3): INDEPENDENT multi-select toggles (OR
-              // semantics), so this row deliberately has no chipFocus() focus mode
-              // — sibling-hiding assumes single-select. A toggle only clears the
-              // stale result set; results load on Search or Randomise.
+              // Movie-kind chips (stage 3): INDEPENDENT multi-select toggles whose
+              // facet is conjunctive (a torrent must carry ALL selected genres), so
+              // this row deliberately has no chipFocus() focus mode — sibling-hiding
+              // assumes single-select. A toggle only clears the stale result set;
+              // results load on Search or Randomise.
               el('movie-kind-row').onclick = function (ev) {
                 var t = ev.target;
                 var k = t && t.getAttribute ? t.getAttribute('data-movie-kind') : null;

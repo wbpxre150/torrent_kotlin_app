@@ -394,10 +394,11 @@ class ControlServerSearchPageTest {
             page.contains("movie_kinds: c.movie_kinds, adult: c.adult, page: c.page + 1"))
     }
 
-    @Test fun js_movieKindChipsAreIndependentToggles() {
-        // Multi-select OR facet: a click toggles the genre in/out of sel.movie_kinds
-        // and flips only that chip. It must NOT use the tv-kind focus mode, whose
-        // sibling-hiding assumes single-select.
+    @Test fun js_movieKindChipsAreMultiSelectToggles() {
+        // Multi-select facet: a click toggles the genre in/out of sel.movie_kinds
+        // and flips only that chip; the facet is conjunctive, so the request it
+        // builds asks for rows carrying ALL the selected genres. It must NOT use
+        // the tv-kind focus mode, whose sibling-hiding assumes single-select.
         val body = handlerBody("el('movie-kind-row').onclick")
         assertFalse("the movie row must not use focus mode", body.contains("chipFocus("))
         assertFalse("the movie row must not hide siblings", body.contains("focusRow("))
@@ -474,6 +475,86 @@ class ControlServerSearchPageTest {
             page.contains("sel.movie_kinds = Array.isArray(saved.sel.movie_kinds)"))
         assertTrue(page.contains("? saved.sel.movie_kinds.map(String) : [];"))
         assertTrue(page.contains("var SAVE_KEY = 'torrent.search.v1';"))
+    }
+
+    // ── filter-aware empty state (strict genre facet) ───────────────────────
+
+    /** The empty-state helpers plus `render()`: from `showEmpty(req)` up to the
+     * next function (`send`), so the helpers and the render tail are one slice. */
+    private fun renderRegion(): String {
+        val start = page.indexOf("function showEmpty(req) {")
+        assertTrue("missing showEmpty(req)", start >= 0)
+        val end = page.indexOf("function send(", start)
+        assertTrue("unterminated render()", end > start)
+        return page.substring(start, end)
+    }
+
+    @Test fun page_hasAFilterAwareEmptyState() {
+        // An always-rendered, `hidden`-by-default message element right below the
+        // results column (the same pattern as the torrent page's tr.tx-empty
+        // rows), with its own style rule.
+        assertTrue(page.contains("<div id=\"results-empty\" hidden></div>"))
+        assertTrue("missing the #results-empty rule", page.contains("#results-empty{"))
+        assertTrue(
+            "the empty state must sit below the results column",
+            page.indexOf("<div id=\"results\"></div>") <
+                page.indexOf("<div id=\"results-empty\" hidden></div>"),
+        )
+    }
+
+    @Test fun js_emptyResultNamesTheStrictFacet() {
+        // The message names the genres of the request that produced the payload
+        // (`req` is the pendingReq snapshot), never the live `sel` a chip toggle
+        // mutates without refetching, and an append page never shows it at all
+        // (an empty load-more page can coexist with has_more, and the message
+        // would break the infinite-scroll sentinel).
+        val body = renderRegion()
+        val helper = body.substring(0, body.indexOf("function hideEmpty("))
+        assertTrue(helper.contains("el('results-empty')"))
+        assertTrue(helper.contains("var kinds = (req && req.movie_kinds) || [];"))
+        assertTrue(helper.contains("'No torrents match all of ' + labels.join(' + ')"))
+        assertTrue("labels come from the chip table",
+            helper.contains("MOVIE_KIND_LABELS[g] || g"))
+        assertTrue("the none token renders as None", helper.contains("g === 'none' ? 'None' :"))
+        assertTrue("the no-genre case keeps a generic message",
+            helper.contains("'No torrents match these filters'"))
+        assertFalse("showEmpty must read the request, not the live selection",
+            helper.contains("sel.movie_kinds"))
+        assertTrue("an append page must never show the message",
+            body.contains("if (!wasAppend && results.length === 0) showEmpty(req); else hideEmpty();"))
+        assertTrue("a non-empty page hides the message", body.contains("else hideEmpty();"))
+    }
+
+    @Test fun js_randomEmptyShowsTheMessageBeforeReturning() {
+        // The random branch nulls `current` and returns early, so it paints the
+        // empty state itself — from `req` only.
+        val body = renderRegion()
+        val start = body.indexOf("if (req.type === 'random') {")
+        assertTrue("missing the random branch", start >= 0)
+        val end = body.indexOf("var page = ", start)
+        assertTrue("unterminated random branch", end > start)
+        val branch = body.substring(start, end)
+        assertTrue(branch.contains("if (results.length === 0) showEmpty(req); else hideEmpty();"))
+        assertTrue("the empty state must be painted before the early return",
+            branch.indexOf("showEmpty(req)") < branch.indexOf("return;"))
+        assertFalse("the random branch must not read the live selection",
+            branch.contains("sel.movie_kinds"))
+        assertTrue("the status line still says Random pick",
+            branch.contains("statusText('Random pick');"))
+    }
+
+    @Test fun js_clearResultsResetsTheStatusLine() {
+        // A chip toggle clears the result set; leaving the old "N results" line
+        // (and a stale empty-state message) behind would describe a set that is
+        // no longer on screen.
+        val start = page.indexOf("function clearResults() {")
+        assertTrue("missing clearResults()", start >= 0)
+        val end = page.indexOf("function rowFocused(", start)
+        assertTrue("unterminated clearResults()", end > start)
+        val body = page.substring(start, end)
+        assertTrue(body.contains("hideEmpty();"))
+        assertTrue(body.contains("statusText('Pick your filters, then Search or Randomize');"))
+        assertFalse("clearResults must not fetch", body.contains("sendBrowse("))
     }
 
     // ── per-card peer refresh on the search results ─────────────────────────
