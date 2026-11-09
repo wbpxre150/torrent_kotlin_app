@@ -36,6 +36,11 @@ enum class MaintenanceAction(val route: String, val flag: String, val needsSpace
  * Observable status of the last/running maintenance action (plan 10 §4).
  * [lines] is the tail of the one-shot's output (a ring buffer capped at
  * [CrawlerMaintenance.MAX_LINES]); the control page polls it with an offset.
+ *
+ * [phase], [percent], [done] and [total] come from the action's machine-readable
+ * `[MPROG]` lines ([MaintenanceProgress], merged by [withProgress]). They stay
+ * null for an action that reports no progress, and [percent] stays null whenever
+ * the action has no denominator: phase-only is the honest state.
  */
 data class MaintenanceStatus(
     val action: MaintenanceAction? = null,
@@ -45,7 +50,20 @@ data class MaintenanceStatus(
     val startedAt: Long? = null,
     val finishedAt: Long? = null,
     val message: String = "",
+    val phase: String? = null,
+    val percent: Int? = null,
+    val done: Long? = null,
+    val total: Long? = null,
 )
+
+/**
+ * Merges one parsed [MaintenanceProgress] line into the status. Only the progress
+ * fields change: the raw line still goes to [MaintenanceStatus.lines] (the
+ * console keeps every line verbatim), and [MaintenanceStatus.message] keeps
+ * describing the process lifecycle.
+ */
+internal fun MaintenanceStatus.withProgress(p: MaintenanceProgress): MaintenanceStatus =
+    copy(phase = p.phase, percent = p.percent, done = p.done, total = p.total)
 
 /**
  * Runs dht_crawler maintenance actions (plan 10 §4) one at a time. Each
@@ -103,11 +121,14 @@ class CrawlerMaintenance(
             }
         }
         // Mark running optimistically so a concurrent start() is refused even
-        // before the executor picks the job up.
+        // before the executor picks the job up. The progress fields are cleared
+        // here so a previous run's `phase=done pct=100` cannot read as this
+        // run's state before its first [MaintenanceProgress] line arrives.
         status = current.copy(
             action = action, running = true, exitCode = null, lines = emptyList(),
             startedAt = System.currentTimeMillis(), finishedAt = null,
-            message = "starting ${action.flag} (stopping crawler)")
+            message = "starting ${action.flag} (stopping crawler)",
+            phase = null, percent = null, done = null, total = null)
         try {
             executor.execute { runAction(action) }
         } catch (e: RejectedExecutionException) {
@@ -126,6 +147,10 @@ class CrawlerMaintenance(
             stopCrawler()
             status = status.copy(message = "running ${action.flag}")
             val exitCode = oneShotRunner.run(argv(action), workDir) { line ->
+                // Parse the machine-readable line first, then keep it verbatim in
+                // the console ring buffer: the raw `[MPROG]` lines are part of
+                // the log the control page streams.
+                parseMaintenanceProgress(line)?.let { status = status.withProgress(it) }
                 pushLine(lines, line)
             }
             val ok = exitCode == 0

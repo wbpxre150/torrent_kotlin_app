@@ -167,4 +167,49 @@ class CrawlerMaintenanceTest {
         assertFalse(st.running)
         assertEquals(0, ex.submitted.get())
     }
+
+    @Test fun withProgress_mergesOnlyTheProgressFields() {
+        val before = MaintenanceStatus(
+            action = MaintenanceAction.REBUILD_BLOOM_FILTER,
+            running = true,
+            exitCode = null,
+            lines = listOf("[MPROG] action=rebuild-bloom-filter phase=scan done=10 total=40 pct=25"),
+            startedAt = 1_000L,
+            finishedAt = null,
+            message = "running --rebuild-bloom-filter",
+        )
+        val after = before.withProgress(
+            MaintenanceProgress("rebuild-bloom-filter", "scan", done = 10, total = 40, percent = 25)
+        )
+        assertEquals("scan", after.phase)
+        assertEquals(25, after.percent)
+        assertEquals(10L, after.done)
+        assertEquals(40L, after.total)
+        // The lifecycle fields and the raw console stay exactly as they were.
+        assertEquals(before.action, after.action)
+        assertTrue(after.running)
+        assertEquals(before.lines, after.lines)
+        assertEquals(1_000L, after.startedAt)
+        assertEquals(before.message, after.message)
+    }
+
+    @Test fun withProgress_phaseOnlyLineLeavesTheDenominatorNull() {
+        val st = MaintenanceStatus(action = MaintenanceAction.CHECK_DATABASE, running = true)
+            .withProgress(MaintenanceProgress("check-database", "integrity_check"))
+        assertEquals("integrity_check", st.phase)
+        assertNull(st.percent)
+        assertNull(st.done)
+        assertNull(st.total)
+    }
+
+    @Test fun start_beginsWithNoProgressFields() {
+        // start() clears the progress fields, so a previous run's terminal
+        // `phase=done pct=100` can never read as this run's state.
+        val st = newMaintenance(CapturingExecutor()).start(MaintenanceAction.CHECK_DATABASE)
+        assertTrue(st.running)
+        assertNull(st.phase)
+        assertNull(st.percent)
+        assertNull(st.done)
+        assertNull(st.total)
+    }
 }
