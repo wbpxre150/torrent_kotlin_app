@@ -122,7 +122,8 @@ class ControlServerAuthRedirectTest {
     }
 
     @Test fun crawlerMaintenancePost_redirectsWithoutToken() {
-        assertSettingsRedirect("/crawler/maintenance/compact", "", "/settings/crawler")
+        // A surviving action: compact/category-filter-update are refused by the route.
+        assertSettingsRedirect("/crawler/maintenance/check-database", "", "/settings/crawler")
     }
 
     @Test fun crawlerBackupUploadPost_redirectsWithoutToken() {

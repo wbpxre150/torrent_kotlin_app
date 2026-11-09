@@ -481,7 +481,13 @@ class ControlServer(
                     // crawler, runs, and restarts it — all off the request thread.
                     post("crawler/maintenance/{action}") {
                         val action = call.parameters["action"] ?: ""
-                        val msg = crawlerMaintenanceStart(action)
+                        // Compact / category-filter-update are CLI-only on the phone:
+                        // refuse them with the same shape as an unmapped segment.
+                        val msg = if (maintenanceRouteAllowed(action)) {
+                            crawlerMaintenanceStart(action)
+                        } else {
+                            "unknown maintenance action: $action"
+                        }
                         val ok = !msg.startsWith("refused") && !msg.startsWith("unknown")
                         redirectAuthed(call, "/settings/crawler?msg=${urlEnc(msg)}&ok=$ok")
                     }
@@ -1255,10 +1261,8 @@ class ControlServer(
               </fieldset>
               <fieldset class="card"><legend>Categories to save</legend>
                 <p class="meta"><strong>Checked categories are saved</strong> to the database;
-                <strong>unchecked categories are dropped</strong> when the crawler finds them. The
-                <em>Category filter update</em> button in the maintenance section below then deletes the
-                existing database rows of every unchecked category, plus every adult-tagged
-                torrent (as tagged by the classifier). Tick at least one category.</p>
+                <strong>unchecked categories are dropped</strong> when the crawler finds them. Tick
+                at least one category.</p>
                 <div class="pick">$categoryToggles</div>
                 <div id="save-tv-kind-row"$tvKindRowHidden>
                   <h3>TV kinds — applies to TV and anime torrents only</h3>
@@ -1411,13 +1415,13 @@ class ControlServer(
     }
 
     /**
-     * The maintenance fieldset on the crawler panel (plan 10 step 4). Each action
-     * renders one button; stage 4 replaced the raw route names with a readable
-     * label + a description of what the action does, so the purge button cannot
-     * be mistaken for a filtered export.
+     * The maintenance fieldset on the crawler panel (plan 10 step 4). Each
+     * [MaintenanceAction.phoneSupported] action renders one button; stage 4
+     * replaced the raw route names with a readable label + a description of what
+     * the action does, so the confirm() cannot be mistaken for a filtered export.
      */
     private fun buildMaintenanceSection(): String {
-        val buttons = MaintenanceAction.entries.joinToString("") { a ->
+        val buttons = MaintenanceAction.entries.filter { it.phoneSupported }.joinToString("") { a ->
             val warn = if (a.needsSpaceCheck) " (needs ~DB size of free internal space)" else ""
             """
               <form method="post" action="/crawler/maintenance/${a.route}"
@@ -1428,12 +1432,8 @@ class ControlServer(
         return """
             <fieldset class="card"><legend>Maintenance (one at a time; crawler stopped while running)</legend>
               <p class="meta">Runs <code>libdhtcrawler.so &lt;flag&gt;</code> as a one-shot in the crawler
-              work dir. compact / recover-database need ~DB size of free internal space. The supervised
+              work dir. recover-database needs ~DB size of free internal space. The supervised
               crawler is stopped first and restarted afterwards if enabled (and wifi is up).</p>
-              <p class="meta"><strong>Category filter update</strong> deletes the database rows of every
-              category you left unchecked in <em>Categories to save</em> above (and of the unchecked TV
-              kinds inside TV/anime rows), plus every adult-tagged torrent, updates the crawler's stats
-              and stops there — it does not compact the database (use <em>Compact database</em> for that).</p>
               <div id="maint-btns">$buttons</div>
               <div id="maint-status" class="meta">Maintenance: idle</div>
               <pre id="maint-log" class="apply-log loglines" style="display:none"></pre>

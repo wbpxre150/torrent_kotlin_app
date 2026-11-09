@@ -20,7 +20,8 @@ import org.mockito.Mockito
  * The crawler settings page's stage-4 category control: the twelve
  * `saveCategories` toggles, the seven `saveTvKinds` toggles revealed for
  * tv/anime, the "checked = saved / unchecked = dropped" help text, and the
- * human-labelled `category-filter-update` maintenance button. Plain JUnit4 +
+ * maintenance buttons — which no longer include the CLI-only `compact` and
+ * `category-filter-update` actions. Plain JUnit4 +
  * Mockito, driving [ControlServer.buildCrawlerPanel] through its injected
  * collaborator lambdas (same harness as [ControlServerPanelsThemeTest]).
  */
@@ -128,12 +129,11 @@ class ControlServerCrawlerCategoriesTest {
         val html = panel(CrawlerSettings())
         assertTrue(html.contains("Checked categories are saved"))
         assertTrue(html.contains("unchecked categories are dropped"))
-        assertTrue(
-            "the help text must say the maintenance button deletes unchecked rows",
-            html.contains("deletes the") &&
-                html.contains("existing database rows of every unchecked category, plus every adult-tagged"))
-        assertTrue("the help text must say adult-tagged rows go too",
-            html.contains("torrent (as tagged by the classifier)"))
+        assertFalse(
+            "the purge button is gone, so the help text must not promise it",
+            html.contains("Category filter update") ||
+                html.contains("maintenance section below then deletes") ||
+                html.contains("plus every adult-tagged"))
         assertFalse("the auto-compact was dropped, so the help text must not promise it",
             html.contains("compacts the database"))
         // The paragraph wraps in the source, so only a single-line fragment matches.
@@ -143,28 +143,28 @@ class ControlServerCrawlerCategoriesTest {
             html.contains("TV kinds — applies to TV and anime torrents only"))
     }
 
-    @Test fun panel_maintenanceNamesTheCategoryPurge() {
+    @Test fun panel_maintenanceHidesTheCliOnlyActions() {
         val html = panel(CrawlerSettings())
-        assertTrue(
-            "the purge button must post to its route",
+        // compact + category-filter-update keep their enum members and CLI flags,
+        // but the phone neither offers nor routes them any more.
+        assertFalse(
+            "the purge button must be gone",
             html.contains("action=\"/crawler/maintenance/category-filter-update\""))
-        assertTrue(
-            "the purge button needs a human label",
-            html.contains(">Category filter update</button>"))
-        assertTrue(
-            "the confirm() must say what is deleted",
-            html.contains(
-                "Delete all torrents in unchecked categories and adult-tagged torrents from the database?"))
-        assertTrue(
-            "the maintenance text must say the adult-tagged rows go too",
-            html.contains("plus every adult-tagged torrent, updates the crawler's stats"))
-        assertFalse("the confirm() must not promise a compaction", html.contains("and compact it?"))
-        assertTrue(
-            "the section must point back at the selection",
-            html.contains("you left unchecked in <em>Categories to save</em> above"))
-        // The other actions keep one button each, with the flag as its tooltip.
-        assertTrue(html.contains("title=\"--compact\""))
-        assertTrue(html.contains(">Compact database</button>"))
+        assertFalse("the purge label must be gone", html.contains(">Category filter update</button>"))
+        assertFalse(
+            "the purge confirm() must be gone",
+            html.contains("Delete all torrents in unchecked categories"))
+        assertFalse("the compact button must be gone", html.contains(">Compact database</button>"))
+        assertFalse("the compact tooltip must be gone", html.contains("title=\"--compact\""))
+        // The five surviving actions keep one button each, with the flag as its tooltip.
+        for (flag in listOf(
+            "--check-database", "--recover-database", "--rebuild-bloom-filter",
+            "--clear-failure-filter", "--movie-kind-bench"
+        )) {
+            assertTrue("missing a button for $flag", html.contains("title=\"$flag\""))
+        }
+        assertTrue(html.contains(">Check database</button>"))
+        assertTrue(html.contains(">Recover database</button>"))
     }
 
     @Test fun panel_hasNoPornFilterLeftovers() {

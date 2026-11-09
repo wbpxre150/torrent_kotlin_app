@@ -9,16 +9,31 @@ import java.util.concurrent.RejectedExecutionException
  * flag understood by the crawler's `main.c`. [needsSpaceCheck] marks the
  * actions that rewrite the database and therefore need roughly a DB-sized
  * amount of free internal space before they can run.
+ *
+ * [phoneSupported] is false for the actions the crawler still accepts on its
+ * command line but the phone no longer offers: the WebUI renders no button for
+ * them and `POST /crawler/maintenance/{route}` refuses them (see
+ * [maintenanceRouteAllowed]). The enum member, its [route], its [flag] and
+ * [CrawlerMaintenance.argv] stay, so the CLI surface is unchanged.
  */
-enum class MaintenanceAction(val route: String, val flag: String, val needsSpaceCheck: Boolean) {
+enum class MaintenanceAction(
+    val route: String,
+    val flag: String,
+    val needsSpaceCheck: Boolean,
+    val phoneSupported: Boolean = true,
+) {
     CHECK_DATABASE("check-database", "--check-database", false),
-    COMPACT("compact", "--compact", true),
+    // CLI-only on the phone: a full DB rewrite is not a WebUI action.
+    COMPACT("compact", "--compact", true, phoneSupported = false),
     RECOVER_DATABASE("recover-database", "--recover-database", true),
     REBUILD_BLOOM_FILTER("rebuild-bloom-filter", "--rebuild-bloom-filter", false),
     CLEAR_FAILURE_FILTER("clear-failure-filter", "--clear-failure-filter", false),
     // The purge only deletes rows (plus a WAL checkpoint): it never rewrites
-    // the database file, so it needs no DB-sized free space.
-    CATEGORY_FILTER_UPDATE("category-filter-update", "--category-filter-update", false),
+    // the database file, so it needs no DB-sized free space. CLI-only on the
+    // phone: the unattended row deletion is gone from the WebUI.
+    CATEGORY_FILTER_UPDATE(
+        "category-filter-update", "--category-filter-update", false, phoneSupported = false
+    ),
     // Read-only bench of the movie-kind encoder over the existing DB rows: it
     // writes nothing, so it is not space-gated either. Unlike every other action
     // it needs the db operand — see [CrawlerMaintenance.argv].
@@ -31,6 +46,19 @@ enum class MaintenanceAction(val route: String, val flag: String, val needsSpace
             entries.firstOrNull { it.route.equals(route, ignoreCase = true) }
     }
 }
+
+/**
+ * True when `POST /crawler/maintenance/{route}` may run the action from the
+ * phone. [MaintenanceAction.COMPACT] and
+ * [MaintenanceAction.CATEGORY_FILTER_UPDATE] keep their enum member, `route`,
+ * `--flag` and argv (the crawler CLI still runs them) but are refused here, so
+ * the route answers with the same refusal shape it gives an unmapped segment.
+ *
+ * The lookup goes through [MaintenanceAction.fromRoute] so the route match
+ * stays case-insensitive exactly as before.
+ */
+fun maintenanceRouteAllowed(route: String): Boolean =
+    MaintenanceAction.fromRoute(route)?.phoneSupported == true
 
 /**
  * Observable status of the last/running maintenance action (plan 10 §4).

@@ -67,6 +67,28 @@ class CrawlerMaintenanceTest {
         assertNull(MaintenanceAction.fromRoute(""))
     }
 
+    @Test fun maintenanceRouteAllowed_refusesTheTwoCliOnlyActions() {
+        // The enum keeps all seven members, so both CLI flags stay reachable…
+        assertEquals(7, MaintenanceAction.entries.size)
+        assertEquals(
+            listOf("compact", "category-filter-update"),
+            MaintenanceAction.entries.filterNot { it.phoneSupported }.map { it.route }
+        )
+        // …but only the phone-supported routes may be posted from the page.
+        for (a in MaintenanceAction.entries) {
+            assertEquals("$a", a.phoneSupported, maintenanceRouteAllowed(a.route))
+        }
+        assertFalse(maintenanceRouteAllowed("compact"))
+        assertFalse(maintenanceRouteAllowed("category-filter-update"))
+        // The route lookup stays case-insensitive, exactly as fromRoute is.
+        assertFalse(maintenanceRouteAllowed("COMPACT"))
+        assertTrue(maintenanceRouteAllowed("check-database"))
+        assertTrue(maintenanceRouteAllowed("Rebuild-Bloom-Filter"))
+        // An unmapped segment is refused exactly like an unknown action.
+        assertFalse(maintenanceRouteAllowed("porn-filter-update"))
+        assertFalse(maintenanceRouteAllowed(""))
+    }
+
     @Test fun flagsMatchMainCArgv() {
         assertEquals("--check-database", MaintenanceAction.CHECK_DATABASE.flag)
         assertEquals("--compact", MaintenanceAction.COMPACT.flag)
