@@ -440,16 +440,29 @@ class ControlServerSearchPageTest {
 
     @Test fun js_cardsShowUpToThreeGenreBadges() {
         // Genre badges use the pretty labels, cap at 3 and summarise the rest as
-        // `+N`; rows without a verdict (null/[]/absent movie_kind) get none.
+        // `+N`; rows without a verdict (null/[]/absent movie_kind) get none. The
+        // active genre facet is pinned ahead of the rest so a matching genre can
+        // never hide behind the overflow badge.
         val start = page.indexOf("function buildCard(r) {")
         assertTrue("missing buildCard()", start >= 0)
         val end = page.indexOf("function render(", start)
         assertTrue("unterminated buildCard()", end > start)
         val body = page.substring(start, end)
         assertTrue(body.contains("if (r.movie_kind && r.movie_kind.length) {"))
-        assertTrue(body.contains("i < r.movie_kind.length && i < 3"))
+        assertTrue("the active facet must be read from sel",
+            body.contains("var act = sel.movie_kinds || [];"))
+        assertTrue("the pinned partition must be an explicit filter",
+            body.contains("return act.indexOf(String(g)) !== -1;"))
+        assertTrue("the rest partition must be the complement filter",
+            body.contains("return act.indexOf(String(g)) === -1;"))
+        assertTrue(body.contains("var kinds = pinned.concat(rest);"))
+        assertFalse("the partition must not rely on sort stability",
+            body.contains(".sort("))
+        assertTrue("the cap loop must iterate the partitioned list",
+            body.contains("i < kinds.length && i < 3"))
         assertTrue(body.contains("MOVIE_KIND_LABELS[genre] || genre"))
-        assertTrue(body.contains("badge('+' + (r.movie_kind.length - 3))"))
+        assertTrue("the overflow must count the partitioned list",
+            body.contains("badge('+' + (kinds.length - 3))"))
     }
 
     @Test fun js_savesAndRestoresTheMovieKindFacet() {

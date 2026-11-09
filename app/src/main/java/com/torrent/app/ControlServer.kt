@@ -2832,13 +2832,23 @@ ${adultSelectionRow(adultSelection)}
                 if (r.tv_kind) meta.appendChild(badge(String(r.tv_kind)));
                 // Movie-kind genre badges (stage 3): at most 3, then a `+N` overflow
                 // badge. Rows without a verdict (`movie_kind` null/[]/absent) get none.
+                // The active genre filter(s) are pinned into the visible slots: with a
+                // 3-badge cap the matching genre could otherwise hide behind `+N`.
                 if (r.movie_kind && r.movie_kind.length) {
-                  for (var i = 0; i < r.movie_kind.length && i < 3; i++) {
-                    var genre = String(r.movie_kind[i]);
+                  var act = sel.movie_kinds || [];
+                  var pinned = r.movie_kind.filter(function (g) {
+                    return act.indexOf(String(g)) !== -1;
+                  });
+                  var rest = r.movie_kind.filter(function (g) {
+                    return act.indexOf(String(g)) === -1;
+                  });
+                  var kinds = pinned.concat(rest);
+                  for (var i = 0; i < kinds.length && i < 3; i++) {
+                    var genre = String(kinds[i]);
                     meta.appendChild(badge(MOVIE_KIND_LABELS[genre] || genre));
                   }
-                  if (r.movie_kind.length > 3) {
-                    meta.appendChild(badge('+' + (r.movie_kind.length - 3)));
+                  if (kinds.length > 3) {
+                    meta.appendChild(badge('+' + (kinds.length - 3)));
                   }
                 }
 
