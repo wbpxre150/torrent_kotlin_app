@@ -5,7 +5,6 @@ import com.torrent.app.s3.S3PutResult
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -43,8 +42,11 @@ class Bep51BackupManagerTest {
         var lastKey: String? = null
         var lastContentType: String? = null
         var lastBody: ByteArray? = null
+        /** Invoked inside [put], i.e. while the upload is still in flight. */
+        var onPut: (() -> Unit)? = null
 
         override fun put(objectKey: String, contentType: String, body: ByteArray): S3PutResult {
+            onPut?.invoke()
             calls++
             lastKey = objectKey
             lastContentType = contentType
@@ -457,9 +459,32 @@ class Bep51BackupManagerTest {
         noop.last!!.run()
         val st = m.status
         assertEquals(BackupState.SUCCESS, st.state)
-        assertNotEquals(BackupState.RUNNING, st.state)
+        // The daily gate must not leave a RUNNING marker behind: Stage 6 sets
+        // RUNNING only once the upload work actually starts (below the gates).
+        assertFalse(st.running)
         assertTrue(st.message, st.message.contains("already uploaded today"))
         assertEquals(1, up.calls)
+    }
+
+    @Test fun publishesRunningAndStartedAtWhileTheUploadIsInFlight() {
+        val up = FakeUploader()
+        var m: Bep51BackupManager? = null
+        var midPut: BackupStatus? = null
+        m = newManager(validCacheFile(), up, clock = { DAY1 })
+        up.onPut = { midPut = m!!.status }
+        val st = m.runCheck(manual = true)
+        // Inside the PUT the manager must already publish RUNNING with the run's
+        // start stamp — this deliberately reverses the old "BackupState.RUNNING
+        // is never assigned" decision (phase-only: one gzip PUT, no denominator).
+        val inFlight = requireNotNull(midPut)
+        assertEquals(BackupState.RUNNING, inFlight.state)
+        assertTrue(inFlight.running)
+        assertEquals(DAY1, inFlight.startedAt!!)
+        assertTrue(inFlight.message, inFlight.message.isNotEmpty())
+        // Terminal: the live flag drops, the start stamp stays visible.
+        assertEquals(BackupState.SUCCESS, st.state)
+        assertFalse(st.running)
+        assertEquals(DAY1, st.startedAt!!)
     }
 
     @Test fun uploadNowAcceptedAfterDailyGateSkip() {

@@ -178,9 +178,60 @@ class ControlServerSettingsFrameTest {
         assertTrue(json.contains("\"bootstrap\":{\"state\":\"OK\",\"message\":\"placed 10 bytes\""))
     }
 
+    @Test fun backupFamilies_carryTheLiveRunFields() {
+        // Stage 6: the managers publish their own running/startedAt truth (plus
+        // the DB drain's per-chunk counters and the bootstrap cache's size).
+        // Phase-only families stay percentage-free by design.
+        val json = frame(
+            bep51 = BackupStatus(
+                state = BackupState.RUNNING,
+                message = "uploading",
+                running = true,
+                startedAt = 11L,
+                configured = true,
+            ),
+            db = DbBackupStatus(
+                state = DbBackupState.RUNNING,
+                message = "uploading",
+                running = true,
+                startedAt = 12L,
+                chunks = 2,
+                totalBytes = 4_096L,
+                totalStatements = 7,
+                configured = true,
+            ),
+            dbInFlight = true,
+            bootstrap = BootstrapStatus(
+                state = BootstrapState.RUNNING,
+                message = "downloading",
+                startedAt = 13L,
+                running = true,
+                lastPlacedNodeCount = 9,
+                lastPlacedBytes = 512L,
+                lastFailureAt = 14L,
+            ),
+        )
+        assertTrue(json.contains("\"bep51\":{\"state\":\"RUNNING\""))
+        assertTrue(json.contains("\"running\":true,\"startedAt\":11}"))
+        assertTrue(json.contains("\"db\":{\"state\":\"RUNNING\""))
+        assertTrue(json.contains("\"chunks\":2"))
+        assertTrue(json.contains("\"totalBytes\":4096"))
+        assertTrue(json.contains("\"totalStatements\":7"))
+        assertTrue(json.contains("\"inFlight\":true"))
+        assertTrue(json.contains("\"bootstrap\":{\"state\":\"RUNNING\""))
+        assertTrue(json.contains("\"nodeCount\":9"))
+        assertTrue(json.contains("\"bytes\":512"))
+        assertTrue(json.contains("\"lastFailureAt\":14}"))
+        // No invented percentage in any backup family: only `maint` may carry
+        // one, and only where its action has a denominator.
+        assertTrue(!json.contains("\"db\":{\"state\":\"RUNNING\",\"running\""))
+        assertTrue(!json.substringAfter("\"db\":").substringBefore("\"restore\":")
+            .contains("percent"))
+    }
+
     @Test fun bootstrap_isIdleWhenNothingIsRecorded() {
-        // The bootstrap download is instrumented in Stage 6; until then the
-        // supplier is null and the key still renders as an honest IDLE object.
+        // A null supplier (no download recorded yet) still renders as an honest
+        // IDLE object carrying the Stage 6 live fields.
         val json = frame(bootstrap = null)
         assertTrue(json.contains("\"bootstrap\":{\"state\":\"IDLE\",\"message\":\"\","))
     }

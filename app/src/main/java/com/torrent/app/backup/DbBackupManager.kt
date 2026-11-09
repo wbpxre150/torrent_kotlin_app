@@ -84,6 +84,27 @@ data class DbBackupStatus(
      * unfinished, so uploads are blocked until a later check completes it.
      */
     val resetPending: Boolean = false,
+    /**
+     * True only while a check's drain loop is actually working (mirrors
+     * [DbRestoreStatus.running]): false while the check is merely queued, while
+     * a gate decides to skip, and after the outcome is recorded.
+     */
+    val running: Boolean = false,
+    /**
+     * Epoch millis at which the current/last drain loop started. Kept after the
+     * check ends, so the frame can still say when the last check ran.
+     */
+    val startedAt: Long? = null,
+    /**
+     * Chunks uploaded by the current/last drain (0 while a fresh check runs, the
+     * final count once it finished). There is no backlog total to divide by —
+     * the cursor is a [DbBookmark] — so this is a counter, never a percentage.
+     */
+    val chunks: Int? = null,
+    /** Bytes (SQL artifact + class-index sidecar) uploaded by those chunks. */
+    val totalBytes: Long? = null,
+    /** SQL statements contained in those chunks. */
+    val totalStatements: Int? = null,
 )
 
 /**
@@ -193,10 +214,11 @@ class DbBackupManager(
     /**
      * Live "a check is in flight" signal for the busy predicates: true
      * from acceptance in [uploadNow] (including the time it is queued on
-     * [executor]) until the check completes. [status.state] deliberately
-     * never becomes [DbBackupState.RUNNING] (the previous state is
-     * preserved while queued/in-flight), so this is the only way another
-     * operator can observe a running DB backup check.
+     * [executor]) until the check completes. It is deliberately BROADER than
+     * [DbBackupStatus.running]: a queued or gated check is in flight but not yet
+     * running. [status.state] only becomes [DbBackupState.RUNNING] while the
+     * drain loop actually works, so the previous real outcome is preserved
+     * through the gates and a skip never reports RUNNING.
      */
     val inFlight: Boolean
         get() = inFlightFlag
@@ -269,8 +291,9 @@ class DbBackupManager(
                 false
             } else {
                 inFlightFlag = true
-                // No RUNNING marker here: runCheck's daily gate "preserves the
-                // previous state", which must be the last real outcome.
+                // No RUNNING marker here: runCheck's gates "preserve the
+                // previous state", which must be the last real outcome. RUNNING
+                // is published by runCheck itself once the drain loop starts.
                 status = status.copy(message = queuedMessage)
                 true
             }
@@ -290,6 +313,7 @@ class DbBackupManager(
                     status = status.copy(
                         state = DbBackupState.FAILED,
                         message = "upload failed: ${e.message ?: e.javaClass.simpleName}",
+                        running = false,
                     )
                 } finally {
                     inFlightFlag = false
@@ -297,7 +321,11 @@ class DbBackupManager(
             }
         } catch (e: RejectedExecutionException) {
             inFlightFlag = false
-            status = status.copy(state = DbBackupState.FAILED, message = "refused: service is shutting down")
+            status = status.copy(
+                state = DbBackupState.FAILED,
+                message = "refused: service is shutting down",
+                running = false,
+            )
         }
         return status
     }
@@ -446,6 +474,20 @@ class DbBackupManager(
         // check's wall time bounded; if it runs out while still capped the
         // next check continues from the advanced bookmark.
         var cursor: DbBookmark = DbBookmark.readOrNull(bookmarkFile()) ?: DbBookmark.FIRST_RUN
+        // Every gate passed and a dump is about to run: this is where the check
+        // actually starts working, so publish the truthful RUNNING state and
+        // reset the drain counters. Deliberately AFTER the gates — the daily
+        // gate above preserves status.state, so an earlier RUNNING marker would
+        // survive a "skipped: already uploaded today" as a stale running job.
+        status = status.copy(
+            state = DbBackupState.RUNNING,
+            message = "uploading",
+            running = true,
+            startedAt = clock(),
+            chunks = 0,
+            totalBytes = 0L,
+            totalStatements = 0,
+        )
         var chunks = 0
         var totalBytes = 0L
         var totalStatements = 0
@@ -501,6 +543,16 @@ class DbBackupManager(
             // Only the last chunk's dump is retained (for the status fields);
             // the earlier chunks' byte arrays are released as the loop runs.
             lastDump = dump
+            // Publish the drain's own counters after every chunk, so a 1 Hz
+            // observer sees them advance between "queued" and the terminal
+            // message. No percentage: a DbBookmark cursor has no backlog total.
+            status = status.copy(
+                state = DbBackupState.RUNNING,
+                running = true,
+                chunks = chunks,
+                totalBytes = totalBytes,
+                totalStatements = totalStatements,
+            )
             if (!dump.capped) {
                 // Uncapped final chunk: the backlog is drained for today, so
                 // the daily date is persisted (the periodic gate then stops
@@ -768,6 +820,14 @@ class DbBackupManager(
             // Read from the marker file, not carried over: the flag must stay
             // truthful even after a restart that left a purge unfinished.
             resetPending = resetPending,
+            // The drain's live signal ends with this outcome; the run's start
+            // stamp and its counters stay visible so a frame can still say when
+            // the last check ran and how much it moved.
+            running = false,
+            startedAt = status.startedAt,
+            chunks = status.chunks,
+            totalBytes = status.totalBytes,
+            totalStatements = status.totalStatements,
         )
         status = st
         return st

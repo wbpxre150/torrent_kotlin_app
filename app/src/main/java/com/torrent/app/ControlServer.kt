@@ -103,8 +103,8 @@ class ControlServer(
     // in-flight signal for the DB family.
     private val dbBackupInFlight: () -> Boolean = { false },
     // BEP51 bootstrap-cache download state for the frame's `bootstrap` family;
-    // null means "nothing recorded yet" and renders as IDLE. Wired for real in
-    // DaemonService by Stage 6 (the download is instrumented there).
+    // null means "nothing recorded yet" and renders as IDLE. DaemonService
+    // wires its BootstrapStatusHolder here (Stage 6).
     private val bootstrapStatus: () -> com.torrent.app.backup.BootstrapStatus? = { null },
     private val port: Int = 8090,
     // Search-dashboard stage 2: same-origin POST /api/transmission/add (mirrors
@@ -709,7 +709,10 @@ class ControlServer(
                 } catch (e: Exception) {
                     // One bad frame must not stop the feed.
                 }
-                delay(wsPushPeriodMs)
+                // Per-loop period, NOT the dashboard default: the settings feed
+                // runs at settingsPushPeriodMs (1 s), everything else at
+                // wsPushPeriodMs (10 s).
+                delay(periodMs)
             }
         }
     }
@@ -4550,7 +4553,12 @@ ${adultSelectionRow(adultSelection)}
             append(",\"lastSuccess\":").append(st.lastSuccess?.toString() ?: "null")
             append(",\"bytes\":").append(st.uploadedBytes?.toString() ?: "null")
             append(",\"uploadEnabled\":").append(st.uploadEnabled)
-            append(",\"configured\":").append(st.configured).append("}")
+            append(",\"configured\":").append(st.configured)
+            // Stage 6: the manager's own live signal. Phase-only — the whole
+            // cache body is one gzip PUT, so there is no denominator.
+            append(",\"running\":").append(st.running)
+            append(",\"startedAt\":").append(st.startedAt?.toString() ?: "null")
+            append("}")
         }
 
         /**
@@ -4576,6 +4584,14 @@ ${adultSelectionRow(adultSelection)}
             append(",\"uploadEnabled\":").append(st.uploadEnabled)
             append(",\"resetPending\":").append(st.resetPending)
             append(",\"configured\":").append(st.configured)
+            // Stage 6: the drain loop's live signal and its own counters. No
+            // percent: the cursor is a DbBookmark, so there is no backlog total
+            // to divide by — counters are the honest progress here.
+            append(",\"running\":").append(st.running)
+            append(",\"startedAt\":").append(st.startedAt?.toString() ?: "null")
+            append(",\"chunks\":").append(st.chunks?.toString() ?: "null")
+            append(",\"totalBytes\":").append(st.totalBytes?.toString() ?: "null")
+            append(",\"totalStatements\":").append(st.totalStatements?.toString() ?: "null")
             if (inFlight != null) append(",\"inFlight\":").append(inFlight)
             append("}")
         }
@@ -4659,6 +4675,12 @@ ${adultSelectionRow(adultSelection)}
             append(",\"message\":").append(jsonStr(st?.message ?: ""))
             append(",\"startedAt\":").append(st?.startedAt?.toString() ?: "null")
             append(",\"finishedAt\":").append(st?.finishedAt?.toString() ?: "null")
+            // Stage 6: the downloader's live signal and the last placed cache's
+            // size. Phase-only: the body is buffered, no Content-Length exists.
+            append(",\"running\":").append(st?.running ?: false)
+            append(",\"nodeCount\":").append(st?.lastPlacedNodeCount?.toString() ?: "null")
+            append(",\"bytes\":").append(st?.lastPlacedBytes?.toString() ?: "null")
+            append(",\"lastFailureAt\":").append(st?.lastFailureAt?.toString() ?: "null")
             append("}")
         }
 

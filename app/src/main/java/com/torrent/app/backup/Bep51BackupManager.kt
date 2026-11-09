@@ -50,6 +50,17 @@ data class BackupStatus(
     val uploadedBytes: Long? = null,
     val uploadEnabled: Boolean = false,
     val configured: Boolean = false,
+    /**
+     * True only while the upload's work runs (cache read → validate → gzip →
+     * PUT); false while the check is queued, while a gate skips it, and after
+     * the outcome is recorded.
+     */
+    val running: Boolean = false,
+    /**
+     * Epoch millis at which the current/last upload started. Kept after the
+     * check ends, so the frame can still say when the last check ran.
+     */
+    val startedAt: Long? = null,
 )
 
 /**
@@ -123,8 +134,9 @@ class Bep51BackupManager(
                 false
             } else {
                 inFlight = true
-                // No RUNNING marker here: runCheck's daily gate "preserves the
-                // previous state", which must be the last real outcome.
+                // No RUNNING marker here: runCheck's gates "preserve the
+                // previous state", which must be the last real outcome. RUNNING
+                // is published by runCheck once the upload work actually starts.
                 status = status.copy(message = "upload queued")
                 true
             }
@@ -143,6 +155,7 @@ class Bep51BackupManager(
                     status = status.copy(
                         state = BackupState.FAILED,
                         message = "upload failed: ${e.message ?: e.javaClass.simpleName}",
+                        running = false,
                     )
                 } finally {
                     inFlight = false
@@ -150,7 +163,11 @@ class Bep51BackupManager(
             }
         } catch (e: RejectedExecutionException) {
             inFlight = false
-            status = status.copy(state = BackupState.FAILED, message = "refused: service is shutting down")
+            status = status.copy(
+                state = BackupState.FAILED,
+                message = "refused: service is shutting down",
+                running = false,
+            )
         }
         return status
     }
@@ -247,6 +264,17 @@ class Bep51BackupManager(
             return finish(BackupState.SKIPPED_NO_FILE, "skipped: cache file is missing",
                 uploadEnabled = true, configured = true)
         }
+        // Every gate passed and the upload work starts here: publish the
+        // truthful RUNNING state. Deliberately AFTER the gates — the daily gate
+        // above preserves status.state, so a RUNNING marker set earlier would
+        // survive a "skipped: already uploaded today" as a stale running job.
+        // Phase-only: read → validate → gzip → one PUT has no denominator.
+        status = status.copy(
+            state = BackupState.RUNNING,
+            message = "uploading",
+            running = true,
+            startedAt = clock(),
+        )
         val bytes = try {
             file.readBytes()
         } catch (e: Exception) {
@@ -358,6 +386,10 @@ class Bep51BackupManager(
             uploadedBytes = uploadedBytes ?: status.uploadedBytes,
             uploadEnabled = uploadEnabled,
             configured = configured,
+            // The upload's live signal ends with this outcome; the run's start
+            // stamp stays visible so a frame can still say when it ran.
+            running = false,
+            startedAt = status.startedAt,
         )
         status = st
         return st

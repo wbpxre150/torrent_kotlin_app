@@ -1004,6 +1004,46 @@ class DbBackupManagerTest {
         assertEquals(DAY1, st.lastSuccess)
     }
 
+    @Test fun publishesRunningAndAdvancingChunkCounters() {
+        val up = FakeUploader()
+        val d = FakeDumper(outcomes = mutableListOf(
+            chunkDump(DbBookmark(4, 2), "db/incremental_20231114_1-4.sql.gz",
+                capped = true, statements = 3),
+            chunkDump(DbBookmark(8, 2), "db/incremental_20231114_5-8.sql.gz",
+                capped = true, statements = 5),
+            chunkDump(DbBookmark(10, 2), "db/incremental_20231114_9-10.sql.gz",
+                capped = false, statements = 2),
+        ))
+        val bookmarkFile = File(tmp.root, "db_bookmark.txt")
+        DbBookmark.write(bookmarkFile, DbBookmark.FIRST_RUN)
+        val m = newManager(dbFile(), d, up, bookmarkFile = bookmarkFile)
+        // Read the live status at the start of every chunk's SQL PUT: the
+        // counters banked by the previous chunks must already be published
+        // (Stage 6), so a 1 Hz observer sees them advance between two reads.
+        val midRun = mutableListOf<DbBackupStatus>()
+        up.onPut = { key -> if (key.endsWith(".sql.gz")) midRun += m.status }
+        val st = m.runCheck(manual = false)
+        assertEquals(DbBackupState.SUCCESS, st.state)
+        assertEquals(3, midRun.size)
+        // First chunk: RUNNING published, counters still zero, no percentage.
+        assertEquals(DbBackupState.RUNNING, midRun[0].state)
+        assertTrue(midRun[0].running)
+        assertEquals(DAY1, midRun[0].startedAt!!)
+        assertEquals(0, midRun[0].chunks!!)
+        assertEquals(0L, midRun[0].totalBytes!!)
+        // The second and third reads see the earlier chunks' counters.
+        assertEquals(1, midRun[1].chunks!!)
+        assertEquals(3, midRun[1].totalStatements!!)
+        assertTrue(midRun[1].totalBytes!! > 0L)
+        assertEquals(2, midRun[2].chunks!!)
+        assertEquals(8, midRun[2].totalStatements!!)
+        assertTrue(midRun[2].totalBytes!! > midRun[1].totalBytes!!)
+        // Terminal: the live flag drops, the counters and start stamp stay.
+        assertFalse(st.running)
+        assertEquals(3, st.chunks!!)
+        assertEquals(10, st.totalStatements!!)
+    }
+
     @Test fun finalUncappedChunkWritesDailyDateWithinSameCheck() {
         val up = FakeUploader()
         val d = FakeDumper(outcomes = mutableListOf(

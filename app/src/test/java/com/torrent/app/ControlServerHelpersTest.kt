@@ -209,7 +209,8 @@ class ControlServerHelpersTest {
         val json = ControlServer.backupStatusJson(com.torrent.app.backup.BackupStatus())
         assertEquals(
             "{\"state\":\"IDLE\",\"message\":\"\",\"lastAttempt\":null,\"lastSuccess\":null,"
-                + "\"bytes\":null,\"uploadEnabled\":false,\"configured\":false}",
+                + "\"bytes\":null,\"uploadEnabled\":false,\"configured\":false,"
+                + "\"running\":false,\"startedAt\":null}",
             json)
     }
 
@@ -228,7 +229,8 @@ class ControlServerHelpersTest {
             "{\"state\":\"SUCCESS\","
                 + "\"message\":\"uploaded 123 bytes to \\\"bep51/bep51_cache.dat.gz\\\"\","
                 + "\"lastAttempt\":111,\"lastSuccess\":222,\"bytes\":123,"
-                + "\"uploadEnabled\":true,\"configured\":true}",
+                + "\"uploadEnabled\":true,\"configured\":true,"
+                + "\"running\":false,\"startedAt\":null}",
             json)
     }
 
@@ -237,7 +239,9 @@ class ControlServerHelpersTest {
         assertEquals(
             "{\"state\":\"IDLE\",\"message\":\"\",\"lastAttempt\":null,\"lastSuccess\":null,"
                 + "\"bytes\":null,\"sqlBytes\":null,\"statementCount\":null,\"objectKey\":null,"
-                + "\"uploadEnabled\":false,\"resetPending\":false,\"configured\":false}",
+                + "\"uploadEnabled\":false,\"resetPending\":false,\"configured\":false,"
+                + "\"running\":false,\"startedAt\":null,\"chunks\":null,"
+                + "\"totalBytes\":null,\"totalStatements\":null}",
             json)
     }
 
@@ -260,7 +264,9 @@ class ControlServerHelpersTest {
                 + "\"message\":\"uploaded 123 bytes to \\\"db/incremental_20231114_0-10.sql.gz\\\" (3 statements)\","
                 + "\"lastAttempt\":111,\"lastSuccess\":222,\"bytes\":123,\"sqlBytes\":123,"
                 + "\"statementCount\":3,\"objectKey\":\"db/incremental_20231114_0-10.sql.gz\","
-                + "\"uploadEnabled\":true,\"resetPending\":false,\"configured\":true}",
+                + "\"uploadEnabled\":true,\"resetPending\":false,\"configured\":true,"
+                + "\"running\":false,\"startedAt\":null,\"chunks\":null,"
+                + "\"totalBytes\":null,\"totalStatements\":null}",
             json)
     }
 

@@ -45,6 +45,7 @@ import com.torrent.app.config.effectiveCrawlerSettingsAfterMigration
 import com.torrent.app.backup.Bep51BackupManager
 import com.torrent.app.backup.Bep51BootstrapDownloader
 import com.torrent.app.backup.BootstrapResult
+import com.torrent.app.backup.BootstrapStatusHolder
 import com.torrent.app.backup.CrawlerDbDumper
 import com.torrent.app.backup.DbBackupManager
 import com.torrent.app.backup.DbRestoreManager
@@ -173,9 +174,12 @@ class DaemonService : Service() {
     // and resets the bookmark only on success. Runs on the crawler-control
     // executor; the busy predicates of maintenance/backup include its state.
     private lateinit var dbRestore: DbRestoreManager
-    // Stage 5: in-memory rate limit for failed BEP51 bootstrap attempts —
-    // a failure is not retried (on a later start) for at least one hour.
-    @Volatile private var bep51BootstrapFailureAt: Long? = null
+    // Stage 6: the BEP51 bootstrap download's live status holder. It also
+    // carries the in-memory retry gate (a failure is not retried on a later
+    // start for at least one hour) as [BootstrapStatus.lastFailureAt], and it
+    // feeds the settings frame's `bootstrap` family — wired here because this
+    // is the composition point (invariant 12).
+    private val bootstrapStatusHolder = BootstrapStatusHolder()
     // Search-dashboard stage 2: one add handler shared by the :8090
     // /api/transmission/add route and the crawler-proxy route; built once in
     // onCreate (needs configStore + gateway).
@@ -405,12 +409,14 @@ class DaemonService : Service() {
             crawlerBackupDbStatus = { dbBackup.status },
             crawlerBackupDbReset = { dbBackup.resetNow().message },
             crawlerRestoreDb = { dbRestore.restoreNow().message },
-            // Settings feed (Stage 4): the DB backup's in-flight flag. Until
-            // Stage 6 publishes DbBackupStatus.running this is the only honest
-            // source for "an upload is running right now".
-            dbBackupInFlight = {
-                dbBackup.status.state == com.torrent.app.backup.DbBackupState.RUNNING
-            },
+            // Settings feed: the DB backup's in-flight flag (queued or
+            // running — broader than DbBackupStatus.running, which is only true
+            // while the drain loop works).
+            dbBackupInFlight = { dbBackup.inFlight },
+            // The bootstrap download's live status (Stage 6): a holder, never
+            // null, so the frame's `bootstrap` family is IDLE before the first
+            // download attempt.
+            bootstrapStatus = { bootstrapStatusHolder.status },
             addHandler = crawlerAddHandler,
             crawlerRestoreDbStatus = { dbRestore.status },
 )
@@ -1571,24 +1577,32 @@ class DaemonService : Service() {
         if (!Bep51BootstrapDownloader.shouldBootstrap(
             settings = settings,
             cacheExists = cacheFile.exists(),
-            lastFailureAt = bep51BootstrapFailureAt,
+            lastFailureAt = bootstrapStatusHolder.status.lastFailureAt,
             now = System.currentTimeMillis(),
         )) return
+        // Publish the download's live state: RUNNING here, then the terminal
+        // outcome below — never a percentage (the whole body is buffered).
+        bootstrapStatusHolder.markRunning()
         val result = Bep51BootstrapDownloader().bootstrap(
             url = settings.bootstrapUrl,
             dest = cacheFile,
             tempDir = crawlerConfig.dataDir,
         )
         when (result) {
-            is BootstrapResult.Placed ->
+            is BootstrapResult.Placed -> {
+                bootstrapStatusHolder.markPlaced(result.nodeCount, result.bytes)
                 android.util.Log.i(
                     "DaemonService",
                     "BEP51 bootstrap: placed ${result.bytes} bytes (${result.nodeCount} nodes) " +
                         "from ${hostOf(settings.bootstrapUrl)}")
-            is BootstrapResult.SkippedExists ->
+            }
+            is BootstrapResult.SkippedExists -> {
+                bootstrapStatusHolder.markSkipped("cache file already present")
                 android.util.Log.i("DaemonService", "BEP51 bootstrap: cache file already present")
+            }
             is BootstrapResult.Failed -> {
-                bep51BootstrapFailureAt = System.currentTimeMillis()
+                // Also stamps the retry gate (BootstrapStatus.lastFailureAt).
+                bootstrapStatusHolder.markFailed(result.reason)
                 android.util.Log.w(
                     "DaemonService",
                     "BEP51 bootstrap from ${hostOf(settings.bootstrapUrl)} failed; " +
