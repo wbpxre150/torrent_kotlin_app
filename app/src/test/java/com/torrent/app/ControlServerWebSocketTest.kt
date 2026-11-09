@@ -315,6 +315,12 @@ class ControlServerWebSocketTest {
         crawlerPort: Int,
         pushPeriodMs: Long,
         searchReadTimeoutMs: Int = ControlServer.SEARCH_READ_TIMEOUT_MS,
+        // Settings feed (Stage 4): its own period, plus the in-memory status
+        // suppliers the frame is built from (no network, no disk).
+        settingsPushPeriodMs: Long = 1_000L,
+        crawlerApply: CrawlerApplyStatus = CrawlerApplyStatus(),
+        maint: MaintenanceStatus = MaintenanceStatus(),
+        dbInFlight: Boolean = false,
         // Default: the one crawler daemon whose state follows [crawlerRunning].
         // Tests that need pid/uptime/restart/log fixtures pass their own list.
         daemons: List<ProcessStatus> = listOf(
@@ -356,8 +362,12 @@ class ControlServerWebSocketTest {
                 applyTransmission = { _, _ -> notWired },
                 applyFtp = { notWired },
                 crawlerHttpPort = { crawlerPort },
+                crawlerApplyStatus = { crawlerApply },
+                crawlerMaintenanceStatus = { maint },
+                dbBackupInFlight = { dbInFlight },
                 port = port,
                 wsPushPeriodMs = pushPeriodMs,
+                settingsPushPeriodMs = settingsPushPeriodMs,
                 searchReadTimeoutMs = searchReadTimeoutMs,
             ),
             port,
@@ -428,6 +438,63 @@ class ControlServerWebSocketTest {
         } finally {
             live.stop()
             upstream.close()
+        }
+    }
+
+    // ── settings feed (Stage 4) ────────────────────────────────────────────
+
+    @Test fun settingsWebSocket_withToken_firstFrameIsAFullSnapshot() {
+        // No crawler upstream: the settings feed must not depend on the
+        // crawler's HTTP API at all (it is down during apply/maintenance).
+        val live = startTestServer(
+            TOKEN, crawlerRunning = true, crawlerPort = 1, pushPeriodMs = 150,
+            settingsPushPeriodMs = 150)
+        live.start()
+        try {
+            val ws = connectWithRetry(live.port, "/settings/crawler/ws?token=$TOKEN")
+            try {
+                assertTrue("expected a 101 upgrade, got: ${ws.statusLine}", ws.upgraded)
+                // (a) one frame carries the whole page state.
+                val first = ws.nextText(10_000)
+                assertTrue("first settings frame did not arrive", first != null)
+                for (key in listOf(
+                    "\"ts\":", "\"apply\":{", "\"maint\":{", "\"bep51\":{",
+                    "\"db\":{", "\"restore\":{", "\"bootstrap\":{",
+                )) {
+                    assertTrue("frame is missing $key: $first", first!!.contains(key))
+                }
+                // (b) and the feed keeps ticking.
+                val second = ws.nextText(10_000)
+                assertTrue("second settings frame did not arrive within 10s", second != null)
+                assertTrue(second!!.contains("\"ts\":"))
+            } finally {
+                ws.close()
+            }
+        } finally {
+            live.stop()
+        }
+    }
+
+    @Test fun settingsWebSocket_withoutToken_isRejectedAndDeliversNoFrame() {
+        val live = startTestServer(
+            TOKEN, crawlerRunning = true, crawlerPort = 1, pushPeriodMs = 150,
+            settingsPushPeriodMs = 150)
+        live.start()
+        try {
+            val ws = connectWithRetry(live.port, "/settings/crawler/ws")
+            try {
+                // Same gate as /stats/ws, /dashboard/ws and /search/ws
+                // (AGENTS.md invariant 8): rejected before a frame is sent.
+                assertTrue(
+                    "expected the unauthenticated upgrade to be rejected, got: ${ws.statusLine}",
+                    !ws.upgraded,
+                )
+                assertEquals(401, ws.status)
+            } finally {
+                ws.close()
+            }
+        } finally {
+            live.stop()
         }
     }
 

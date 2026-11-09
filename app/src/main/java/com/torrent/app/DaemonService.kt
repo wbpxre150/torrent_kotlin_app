@@ -405,6 +405,12 @@ class DaemonService : Service() {
             crawlerBackupDbStatus = { dbBackup.status },
             crawlerBackupDbReset = { dbBackup.resetNow().message },
             crawlerRestoreDb = { dbRestore.restoreNow().message },
+            // Settings feed (Stage 4): the DB backup's in-flight flag. Until
+            // Stage 6 publishes DbBackupStatus.running this is the only honest
+            // source for "an upload is running right now".
+            dbBackupInFlight = {
+                dbBackup.status.state == com.torrent.app.backup.DbBackupState.RUNNING
+            },
             addHandler = crawlerAddHandler,
             crawlerRestoreDbStatus = { dbRestore.status },
 )
@@ -856,6 +862,12 @@ class DaemonService : Service() {
         if (errors.isNotEmpty()) {
             return com.torrent.app.config.ApplyResult(false, errors.joinToString("; "), false)
         }
+        // Stamp STOPPING BEFORE the enqueue: the job body's first write must
+        // not be regressed by a status write that lands after it. The old
+        // order wrote it after `execute`, so a fast run could be overwritten
+        // by "apply started…" while already WRITING/STARTING (explorer-4 §1).
+        setCrawlerApplyStatus(
+            CrawlerApplyPhase.STOPPING, "apply started; stopping crawler first (up to 60 s)")
         try {
             crawlerControlExecutor.execute {
                 try {
@@ -866,9 +878,12 @@ class DaemonService : Service() {
                 }
             }
         } catch (e: RejectedExecutionException) {
+            // Still through the single write point: the page must not be left
+            // showing a STOPPING that will never progress.
+            setCrawlerApplyStatus(
+                CrawlerApplyPhase.IDLE, "apply not started: service is shutting down")
             return com.torrent.app.config.ApplyResult(false, "service is shutting down", false)
         }
-        setCrawlerApplyStatus(CrawlerApplyPhase.STOPPING, "apply started; stopping crawler first (up to 60 s)")
         return com.torrent.app.config.ApplyResult(true, "apply started", false)
     }
 
@@ -1067,12 +1082,33 @@ class DaemonService : Service() {
             tail)
     }
 
+    /**
+     * The single write point for [crawlerApplyStatus]. Every field the settings
+     * websocket feed needs is derived here and nowhere else: [seq] is bumped on
+     * each write, [CrawlerApplyStatus.startedAt] is stamped on the first phase
+     * of a run (from IDLE, or from the terminal phase of the previous run),
+     * and [CrawlerApplyStatus.finishedAt]/[CrawlerApplyStatus.terminal] are
+     * stamped only on OK/ROLLED_BACK/FAILED. A non-terminal write clears the
+     * terminal markers, so a new apply never inherits the previous one's.
+     */
     private fun setCrawlerApplyStatus(
         phase: CrawlerApplyPhase,
         message: String,
         logTail: List<String> = emptyList(),
     ) {
-        crawlerApplyStatus = CrawlerApplyStatus(phase, message, logTail)
+        val prev = crawlerApplyStatus
+        val now = System.currentTimeMillis()
+        val startsRun = phase.isActive && (prev.phase == CrawlerApplyPhase.IDLE || prev.terminal)
+        crawlerApplyStatus = CrawlerApplyStatus(
+            phase = phase,
+            message = message,
+            logTail = logTail,
+            seq = prev.seq + 1,
+            startedAt = if (startsRun) now else (prev.startedAt ?: now),
+            finishedAt = if (phase.isTerminal) now else null,
+            terminal = phase.isTerminal,
+            pausedNoWifi = crawlerPausedNoWifi,
+        )
     }
 
     /**

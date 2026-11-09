@@ -60,6 +60,10 @@ class ControlServer(
     private val crawlerHttpPort: () -> Int = { 8081 },
     // Stats websocket push period (webui stage 1); injectable for tests.
     private val wsPushPeriodMs: Long = 10_000L,
+    // Crawler settings websocket push period (Stage 4). Separate from
+    // [wsPushPeriodMs] because the page it replaces polls maintenance at
+    // 1.5 s: 10 s would be far too coarse for apply/maintenance progress.
+    private val settingsPushPeriodMs: Long = 1_000L,
     // Read timeout for /search/ws queries while the crawler daemon is RUNNING
     // (search-dashboard): search/browse over a big torrents DB can take quite
     // a long time, so this is much longer than the 15 s default. A crawler that
@@ -94,6 +98,14 @@ class ControlServer(
     private val crawlerRestoreDb: () -> String = { "DB restore is not wired" },
     private val crawlerRestoreDbStatus: () -> com.torrent.app.backup.DbRestoreStatus =
         { com.torrent.app.backup.DbRestoreStatus() },
+    // Settings feed (Stage 4): "a DB backup upload is running right now". Until
+    // Stage 6 publishes DbBackupStatus.running this is the frame's only
+    // in-flight signal for the DB family.
+    private val dbBackupInFlight: () -> Boolean = { false },
+    // BEP51 bootstrap-cache download state for the frame's `bootstrap` family;
+    // null means "nothing recorded yet" and renders as IDLE. Wired for real in
+    // DaemonService by Stage 6 (the download is instrumented there).
+    private val bootstrapStatus: () -> com.torrent.app.backup.BootstrapStatus? = { null },
     private val port: Int = 8090,
     // Search-dashboard stage 2: same-origin POST /api/transmission/add (mirrors
     // CrawlerProxyServer's route); null = the route answers 503.
@@ -119,6 +131,10 @@ class ControlServer(
     private val statsFrames = MutableSharedFlow<String>(
         replay = 1, extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     private val dashboardFrames = MutableSharedFlow<String>(
+        replay = 1, extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    // Crawler settings page feed (Stage 4): one full-state snapshot per tick,
+    // same replay/DROP_OLDEST policy as the two above.
+    private val settingsFrames = MutableSharedFlow<String>(
         replay = 1, extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
 
     fun start() {
@@ -476,6 +492,21 @@ class ControlServer(
                         }
                     }
 
+                    // Crawler settings feed (Stage 4): one full-state snapshot
+                    // per settingsPushPeriodMs — apply status, maintenance
+                    // progress + console, and the four backup families. Auth is
+                    // the same requireWsAuth() gate as the three feeds above.
+                    webSocket("settings/crawler/ws") {
+                        if (!requireWsAuth()) return@webSocket
+                        try {
+                            settingsFrames.collect { frame -> send(Frame.Text(frame)) }
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e // coroutine cancelled (client gone); exit cleanly
+                        } catch (e: Exception) {
+                            // the socket went away; stop pushing
+                        }
+                    }
+
                     // Maintenance (plan 10 step 4): queue a one-shot action by name.
                     // The page confirms via JS confirm(); the action stops the
                     // crawler, runs, and restarts it — all off the request thread.
@@ -633,15 +664,42 @@ class ControlServer(
                 runCatching { rpcSummary() }.getOrNull()
             }
         }
+        // Loop D — crawler settings page (Stage 4). In-memory status suppliers
+        // ONLY: no loopback /stats, no transmission RPC, no disk. The feed must
+        // keep working while the crawler's HTTP API is down (apply stops it;
+        // maintenance stops it), so routing it through refreshCrawlerStats()
+        // would blank the page exactly when it matters (explorer-4).
+        tickerLoop(scope, settingsPushPeriodMs) {
+            settingsFrames.emit(
+                crawlerSettingsFrameJson(
+                    now = System.currentTimeMillis(),
+                    // The wifi gate flips the pause flag between status writes,
+                    // so the frame refreshes it from the live supplier (a pure
+                    // read — no status write, so seq stays the single writer's).
+                    apply = crawlerApplyStatus().copy(pausedNoWifi = crawlerPausedNoWifi()),
+                    maint = crawlerMaintenanceStatus(),
+                    bep51 = crawlerBackupStatus(),
+                    db = crawlerBackupDbStatus(),
+                    dbInFlight = dbBackupInFlight(),
+                    restore = crawlerRestoreDbStatus(),
+                    bootstrap = bootstrapStatus(),
+                )
+            )
+        }
     }
 
     /**
-     * Runs [body] once per [wsPushPeriodMs] until the scope is cancelled.
+     * Runs [body] once per [periodMs] (default [wsPushPeriodMs]) until the
+     * scope is cancelled.
      * A [kotlinx.coroutines.CancellationException] propagates (scope cancel /
      * shutdown); every other exception is swallowed so the loop keeps its
      * cadence instead of dying on one bad frame.
      */
-    private fun tickerLoop(scope: CoroutineScope, body: suspend () -> Unit) {
+    private fun tickerLoop(
+        scope: CoroutineScope,
+        periodMs: Long = wsPushPeriodMs,
+        body: suspend () -> Unit,
+    ) {
         scope.launch {
             while (true) {
                 try {
@@ -4199,7 +4257,12 @@ ${adultSelectionRow(adultSelection)}
          * the last successful upload's object key / SQL bytes / statement
          * count and the config flags. Secrets never appear here.
          */
-        internal fun dbBackupStatusJson(st: com.torrent.app.backup.DbBackupStatus): String = buildString {
+        internal fun dbBackupStatusJson(
+            st: com.torrent.app.backup.DbBackupStatus,
+            // Only the settings frame passes this (Stage 4). The GET route calls
+            // with one argument, so its body stays byte-identical to before.
+            inFlight: Boolean? = null,
+        ): String = buildString {
             append("{\"state\":\"").append(st.state.name).append("\"")
             append(",\"message\":").append(jsonStr(st.message))
             append(",\"lastAttempt\":").append(st.lastAttempt?.toString() ?: "null")
@@ -4210,7 +4273,9 @@ ${adultSelectionRow(adultSelection)}
             append(",\"objectKey\":").append(jsonStr(st.objectKey))
             append(",\"uploadEnabled\":").append(st.uploadEnabled)
             append(",\"resetPending\":").append(st.resetPending)
-            append(",\"configured\":").append(st.configured).append("}")
+            append(",\"configured\":").append(st.configured)
+            if (inFlight != null) append(",\"inFlight\":").append(inFlight)
+            append("}")
         }
 
         /**
@@ -4235,6 +4300,94 @@ ${adultSelectionRow(adultSelection)}
             append(",\"startedAt\":").append(st.startedAt?.toString() ?: "null")
             append(",\"finishedAt\":").append(st.finishedAt?.toString() ?: "null")
             append(",\"configured\":").append(st.configured).append("}")
+        }
+
+        /**
+         * The settings frame's `apply` sub-object (Stage 4): the apply phase,
+         * its write counter, the message and log tail, plus the run's
+         * timestamps and terminal/paused flags. The GET /api/crawler/apply-status
+         * body stays its own (smaller) shape for the no-JS fallback.
+         */
+        internal fun applyStatusFrameJson(st: CrawlerApplyStatus): String = buildString {
+            append("{\"phase\":\"").append(st.phase.name).append("\"")
+            append(",\"seq\":").append(st.seq)
+            append(",\"message\":").append(jsonStr(st.message))
+            append(",\"logTail\":[").append(
+                st.logTail.joinToString(",") { jsonStr(it) }).append("]")
+            append(",\"startedAt\":").append(st.startedAt?.toString() ?: "null")
+            append(",\"finishedAt\":").append(st.finishedAt?.toString() ?: "null")
+            append(",\"terminal\":").append(st.terminal)
+            append(",\"pausedNoWifi\":").append(st.pausedNoWifi).append("}")
+        }
+
+        /**
+         * The settings frame's `maint` sub-object (Stage 4): the whole ring
+         * buffer plus the parsed `[MPROG]` progress. Unlike the `?offset=` GET
+         * route this is a full snapshot, so a reconnecting client needs no
+         * offset bookkeeping. `percent` stays null when the action has no
+         * denominator — phase-only is the honest state.
+         */
+        internal fun maintenanceStatusFrameJson(st: MaintenanceStatus): String = buildString {
+            append("{\"action\":").append(jsonStr(st.action?.route))
+            append(",\"running\":").append(st.running)
+            append(",\"exitCode\":").append(st.exitCode?.toString() ?: "null")
+            append(",\"startedAt\":").append(st.startedAt?.toString() ?: "null")
+            append(",\"finishedAt\":").append(st.finishedAt?.toString() ?: "null")
+            append(",\"message\":").append(jsonStr(st.message))
+            append(",\"phase\":").append(jsonStr(st.phase))
+            append(",\"percent\":").append(st.percent?.toString() ?: "null")
+            append(",\"done\":").append(st.done?.toString() ?: "null")
+            append(",\"total\":").append(st.total?.toString() ?: "null")
+            append(",\"totalLines\":").append(st.lines.size)
+            append(",\"lines\":[").append(
+                st.lines.joinToString(",") { jsonStr(it) }).append("]")
+            append("}")
+        }
+
+        /**
+         * The settings frame's `bootstrap` sub-object (BEP51 bootstrap-cache
+         * download). A null status means "nothing recorded yet" and renders as
+         * IDLE, so the key is always present and a client never has to branch.
+         */
+        internal fun bootstrapStatusJson(
+            st: com.torrent.app.backup.BootstrapStatus?,
+        ): String = buildString {
+            val state = st?.state ?: com.torrent.app.backup.BootstrapState.IDLE
+            append("{\"state\":\"").append(state.name).append("\"")
+            append(",\"message\":").append(jsonStr(st?.message ?: ""))
+            append(",\"startedAt\":").append(st?.startedAt?.toString() ?: "null")
+            append(",\"finishedAt\":").append(st?.finishedAt?.toString() ?: "null")
+            append("}")
+        }
+
+        /**
+         * One frame of the /settings/crawler/ws feed (Stage 4): a FULL-STATE
+         * snapshot of everything the crawler settings page renders, with a `ts`
+         * epoch-ms stamp so a client can tell a live feed from a stalled one.
+         *
+         * Deliberately pure and Android-free (plain-JUnit testable, house
+         * style), and deliberately additive: the four backup family objects
+         * reuse [backupStatusJson]/[dbBackupStatusJson]/[restoreStatusJson], so
+         * Stage 6 can publish more fields there without touching this builder.
+         */
+        internal fun crawlerSettingsFrameJson(
+            now: Long,
+            apply: CrawlerApplyStatus,
+            maint: MaintenanceStatus,
+            bep51: com.torrent.app.backup.BackupStatus,
+            db: com.torrent.app.backup.DbBackupStatus,
+            dbInFlight: Boolean,
+            restore: com.torrent.app.backup.DbRestoreStatus,
+            bootstrap: com.torrent.app.backup.BootstrapStatus?,
+        ): String = buildString {
+            append("{\"ts\":").append(now)
+            append(",\"apply\":").append(applyStatusFrameJson(apply))
+            append(",\"maint\":").append(maintenanceStatusFrameJson(maint))
+            append(",\"bep51\":").append(backupStatusJson(bep51))
+            append(",\"db\":").append(dbBackupStatusJson(db, dbInFlight))
+            append(",\"restore\":").append(restoreStatusJson(restore))
+            append(",\"bootstrap\":").append(bootstrapStatusJson(bootstrap))
+            append("}")
         }
 
         /**
