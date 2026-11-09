@@ -3401,8 +3401,8 @@ ${adultSelectionRow(adultSelection)}
 
               // Movie-kind chips (stage 3): INDEPENDENT multi-select toggles (OR
               // semantics), so this row deliberately has no chipFocus() focus mode
-              // — sibling-hiding assumes single-select. A toggle refreshes the
-              // current browse so the genre badges update in place.
+              // — sibling-hiding assumes single-select. A toggle only clears the
+              // stale result set; results load on Search or Randomise.
               el('movie-kind-row').onclick = function (ev) {
                 var t = ev.target;
                 var k = t && t.getAttribute ? t.getAttribute('data-movie-kind') : null;
@@ -3416,7 +3416,6 @@ ${adultSelectionRow(adultSelection)}
                   t.setAttribute('aria-pressed', 'false');
                 }
                 clearResults();
-                sendBrowse();
               };
 
               // Only wired when the server rendered the row (`adult_mode=tag`); in

@@ -224,8 +224,8 @@ class ControlServerSearchPageTest {
 
     @Test fun js_restoreOnlyRepaintsAndNeverRefiresTheQuery() {
         // restore() re-renders the saved cards through buildCard(); it must not
-        // touch the feed. The page carries two sendBrowse(); calls: doSearch()'s and
-        // the movie-kind chip row's refresh (movie-kind facet stage 3).
+        // touch the feed. The page carries exactly one sendBrowse(); call: doSearch()'s
+        // (filter chips only clear stale results, they never fetch).
         val start = page.indexOf("function restore()")
         assertTrue("missing restore()", start >= 0)
         val end = page.indexOf("function applySel(", start)
@@ -236,7 +236,7 @@ class ControlServerSearchPageTest {
         assertTrue("restore must repaint through buildCard", body.contains("buildCard("))
         assertEquals(
             "the page keeps exactly one sendBrowse(); call per refresh path",
-            2, page.split("sendBrowse();").size - 1,
+            1, page.split("sendBrowse();").size - 1,
         )
     }
 
@@ -259,11 +259,11 @@ class ControlServerSearchPageTest {
     @Test fun js_chipControlsDoNotAutoLoad() {
         // webui-ux stage 3: the category/tv-kind chip controls only update in-page
         // selection state; results load only on Search (button/Enter) or Randomize.
-        // Movie-kind facet stage 3 adds one deliberate exception: the multi-select
-        // movie-kind row refreshes the current browse on every toggle, so the page
-        // carries two sendBrowse(); calls — doSearch()'s and that row's.
+        // The multi-select movie-kind row follows the same rule (a toggle only
+        // clears the stale result set), so the page carries a single
+        // sendBrowse(); call — doSearch()'s.
         val sends = page.split("sendBrowse();").size - 1
-        assertTrue("expected exactly two sendBrowse(); calls, found $sends", sends == 2)
+        assertTrue("expected exactly one sendBrowse(); call, found $sends", sends == 1)
         assertTrue(
             "doSearch()'s sendBrowse(); must sit inside doSearch()",
             page.indexOf("function doSearch()") < page.lastIndexOf("sendBrowse();"),
@@ -405,7 +405,16 @@ class ControlServerSearchPageTest {
         assertTrue(body.contains("sel.movie_kinds.push(k)"))
         assertTrue(body.contains("sel.movie_kinds.splice(at, 1)"))
         assertTrue("a toggle clears the stale result set", body.contains("clearResults();"))
-        assertTrue("a toggle refreshes the browse", body.contains("sendBrowse();"))
+        assertFalse("a toggle must not fetch", body.contains("sendBrowse("))
+        // Every filter chip only clears; Search and Randomise are the load triggers.
+        for (marker in listOf(
+            "el('category-grid').onclick",
+            "el('tv-kind-row').onclick",
+            "el('adult-control').onclick",
+            "el('movie-kind-row').onclick",
+        )) {
+            assertFalse("$marker must not fetch", handlerBody(marker).contains("sendBrowse("))
+        }
     }
 
     @Test fun js_movieKindRowIsMovieOnlyAndClearsOnSwitch() {
