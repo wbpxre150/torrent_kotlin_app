@@ -11,6 +11,7 @@ import com.torrent.app.config.TransmissionSettings
 import com.torrent.app.ftp.FtpStatus
 import com.torrent.app.storage.SafStatus
 import kotlinx.coroutines.flow.MutableStateFlow
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -49,6 +50,8 @@ class ControlServerPanelsThemeTest {
         backup: BackupSettings = BackupSettings(),
         crawlerBackupDbStatus: () -> com.torrent.app.backup.DbBackupStatus =
             { com.torrent.app.backup.DbBackupStatus() },
+        crawlerMaintenanceStatus: () -> MaintenanceStatus = { MaintenanceStatus() },
+        crawlerApplyStatus: () -> CrawlerApplyStatus = { CrawlerApplyStatus() },
     ): ControlServer {
         val config = AppConfig(
             wizardCompleted = true,
@@ -77,6 +80,8 @@ class ControlServerPanelsThemeTest {
             applyTransmission = { _, _ -> notWired },
             applyFtp = { notWired },
             crawlerBackupDbStatus = crawlerBackupDbStatus,
+            crawlerMaintenanceStatus = crawlerMaintenanceStatus,
+            crawlerApplyStatus = crawlerApplyStatus,
         )
     }
 
@@ -85,6 +90,10 @@ class ControlServerPanelsThemeTest {
     private fun transmissionPanel() = server.buildTransmissionPanel(null, false)
     private fun ftpPanel() = server.buildFtpPanel(null, false)
     private fun storagePanel() = server.buildStoragePanel()
+    /** Counts non-overlapping occurrences of a literal needle. */
+    private fun occurrences(html: String, needle: String): Int =
+        Regex(Regex.escape(needle)).findAll(html).count()
+
     private fun crawlerPanel() = server.buildCrawlerPanel(null, false, false)
 
     /** Every panel must carry the shared theme token and no external assets. */
@@ -139,6 +148,86 @@ class ControlServerPanelsThemeTest {
             "maintenance one-shot buttons must use the secondary pill",
             html.contains("class=\"btn secondary\"")
         )
+    }
+
+    /**
+     * Stage 5: three tabs over one websocket. The five `setInterval` pollers are
+     * gone, and the two actions removed in Stage 2 must not come back.
+     */
+    @Test fun crawlerPanel_threeTabsOneSocketNoPollers() {
+        val html = crawlerPanel()
+        assertEquals("exactly three tab buttons", 3, occurrences(html, "role=\"tab\""))
+        assertEquals("exactly three tab panels", 3, occurrences(html, "role=\"tabpanel\""))
+        for (id in listOf("tab-backup", "tab-settings", "tab-maintenance")) {
+            assertTrue("missing panel #$id", html.contains("id=\"$id\""))
+        }
+        // The Backup & Bootstrap fieldset must stay inside the Settings form:
+        // moving it would break crawlerSettingsFromForm's category validation.
+        val settingsPanel = html.substringAfter("id=\"tab-settings\"", "")
+            .substringBefore("id=\"tab-maintenance\"")
+        assertTrue(
+            "the settings form must live in the Settings tab",
+            settingsPanel.contains("action=\"/settings/crawler\"")
+        )
+        assertTrue(
+            "the Backup & Bootstrap fieldset must stay in the Settings tab",
+            settingsPanel.contains("Backup &amp; Bootstrap")
+        )
+        assertEquals("no setInterval pollers may remain", 0, occurrences(html, "setInterval("))
+        assertEquals(
+            "exactly one settings socket",
+            1,
+            occurrences(html, "connectSocket('/settings/crawler/ws'")
+        )
+        assertFalse("the compact action must not reappear", html.contains("Compact database"))
+        assertFalse("the category purge must not reappear", html.contains("Category filter update"))
+        // The duplicate rebuild-bloom-filter button is gone; the query param only
+        // renders a hint pointing at the Maintenance tab's own button.
+        val hinted = server.buildCrawlerPanel(null, false, true)
+        assertFalse("no second rebuild button", hinted.contains("Run --rebuild-bloom-filter"))
+        assertTrue("the hint must point at the Maintenance tab", hinted.contains("href=\"#maintenance\""))
+    }
+
+    /**
+     * Stage 5: the served markup must agree with the first websocket frame. The
+     * old page hardcoded "Maintenance: idle" / "Apply status: IDLE" and lied for
+     * as long as a one-shot or an apply was in flight (triage found both).
+     */
+    @Test fun crawlerPanel_initialStatusComesFromTheLiveStatus() {
+        val live = MaintenanceStatus(
+            action = MaintenanceAction.REBUILD_BLOOM_FILTER,
+            running = true,
+            startedAt = 1_000L,
+            message = "running --rebuild-bloom-filter",
+            phase = "scan",
+            percent = 42,
+            done = 42L,
+            total = 100L,
+            lines = listOf("[MPROG] action=rebuild-bloom-filter phase=scan done=42 total=100 pct=42"),
+        )
+        val html = newServer(
+            crawlerMaintenanceStatus = { live },
+            crawlerApplyStatus = {
+                CrawlerApplyStatus(
+                    phase = CrawlerApplyPhase.ROLLED_BACK, message = "boom", terminal = true)
+            },
+        ).buildCrawlerPanel(null, false, false)
+        val status = html.substringAfter("id=\"maint-status\"", "").substringBefore("</div>")
+        assertTrue("served status must carry the live action: $status", status.contains("rebuild-bloom-filter"))
+        assertTrue("served status must carry the live phase: $status", status.contains("scan"))
+        assertTrue("served status must carry the live percent: $status", status.contains("42%"))
+        assertFalse("served status must not be the idle literal: $status", status.contains("Maintenance: idle"))
+        assertTrue(
+            "the percent bar must be rendered from the live status",
+            html.contains("id=\"maint-progress-bar\" style=\"width:42%\"")
+        )
+        assertTrue(
+            "the console must be server-rendered from the ring buffer",
+            html.contains("[MPROG] action=rebuild-bloom-filter phase=scan done=42 total=100 pct=42")
+        )
+        val apply = html.substringAfter("id=\"apply-status\"", "").substringBefore("</div>")
+        assertTrue("served apply status must be the live phase: $apply", apply.contains("ROLLED_BACK"))
+        assertFalse("served apply status must not be the idle literal: $apply", apply.contains("Apply status: IDLE"))
     }
 
     /**

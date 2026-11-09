@@ -466,6 +466,7 @@ class ControlServerDashboardTest {
             "/" to html,
             "/stats" to ControlServer.buildStatsPage(),
             "/search" to ControlServer.buildSearchPage(),
+            "/settings/crawler" to newServer().buildCrawlerPanel(null, false, false),
         )
         for ((route, page) in pages) {
             assertTrue("$route must inline the shared client", page.contains("connectSocket"))
@@ -546,16 +547,16 @@ class ControlServerDashboardTest {
      * bare total. `objectsDone` is null before the count publishes, and the
      * fragment degrades to "(N objects imported)" then.
      */
-    @Test fun crawlerPanel_dbRestorePoll_showsNofMObjectsImported() {
+    @Test fun crawlerPanel_dbRestoreStatus_showsNofMObjectsImported() {
         val page = newServer().buildCrawlerPanel(null, true, false)
         assertTrue(
-            "the restore poll must read objectsDone",
-            page.contains("st.objectsDone"))
+            "the restore render must read objectsDone",
+            page.contains("r.objectsDone"))
         assertTrue(
-            "the restore poll must label the progress as imported",
+            "the restore render must label the progress as imported",
             page.contains("objects imported"))
-        assertTrue(
-            "the 5 s restore poll must stay wired",
-            page.contains("setInterval(pollDbRestore, 5000)"))
+        assertFalse(
+            "the 5 s restore poll must be gone (one websocket feeds the page)",
+            page.contains("setInterval(pollDbRestore"))
     }
 }

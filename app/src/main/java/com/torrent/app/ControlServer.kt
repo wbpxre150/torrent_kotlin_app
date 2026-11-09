@@ -1260,14 +1260,26 @@ class ControlServer(
         val adultModeOptions = CrawlerKeys.ADULT_MODES.joinToString("") { m ->
             """<option value="$m"${if (m == s.adultMode.trim().lowercase()) " selected" else ""}>$m</option>"""
         }
-        val rebuildBox = if (rebuildBloom) """
+        // Stage 5: the duplicate Rebuild-bloom-filter button is gone (the plan
+        // decided it) — the Maintenance tab owns that action, so the query param
+        // now only renders a hint that links to the tab. No second button, no
+        // second form, one place to trigger the rebuild.
+        val rebuildHint = if (rebuildBloom) """
             <div class="warn">Bloom filter settings changed — the persisted filters are now stale.
-            <form method="post" action="/crawler/maintenance/rebuild-bloom-filter"
-                  onsubmit="return confirm('Rebuild the bloom filter? The crawler is stopped while it runs (a few minutes).')">
-            <button type="submit" class="btn">Run --rebuild-bloom-filter</button></form></div>""" else ""
+            Rebuild them from the <a href="#maintenance">Maintenance tab</a>'s
+            <em>Rebuild bloom filter</em> button.</div>""" else ""
         val maintenanceSection = buildMaintenanceSection()
         val backupSection = buildBackupSection()
         val dbBackupSection = buildDbBackupSection()
+        val bootstrapSection = buildBootstrapSection()
+        // Stage 5: the served page must not contradict the first websocket frame,
+        // so every status div starts from the live status instead of a literal.
+        val applyStatus = crawlerApplyStatus()
+        val applyText = esc(applyStatusText(applyStatus))
+        val applyBusy = applyStatus.phase != CrawlerApplyPhase.IDLE && !applyStatus.phase.isTerminal
+        val applyClass = if (applyBusy) " class=\"busy\"" else ""
+        val applyLogText = esc(applyStatus.logTail.joinToString("\n"))
+        val applyLogStyle = if (applyStatus.logTail.isEmpty()) " style=\"display:none\"" else ""
         // Stage 4: the category selection. An empty stored list means "save all"
         // (the CrawlerSettings convention), so the toggles all render checked.
         val savedCategories = savedSelection(s.saveCategories, CrawlerTaxonomy.CATEGORIES)
@@ -1294,9 +1306,33 @@ class ControlServer(
             .pick label{display:inline-flex;align-items:center;width:auto;margin:.2em 1em .2em 0}
             #save-tv-kind-row h3{margin:10px 0 2px;font-size:.85rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
             #save-tv-kind-row[hidden]{display:none}
+            .tabs{display:flex;gap:6px;margin:12px 0 6px}
+            .tabs button{flex:1;margin:0;padding:.55em .7em;border:1px solid #dadce0;background:#fff;color:var(--blue);border-radius:8px;font:inherit;font-size:.9rem;cursor:pointer}
+            .tabs button[aria-selected="true"]{background:var(--chip);border-color:var(--blue);font-weight:700}
+            .tabpanel[hidden]{display:none}
+            #maint-progress{height:10px;background:var(--chip);border-radius:999px;overflow:hidden;margin:8px 0 4px}
+            #maint-progress-bar{height:100%;width:0;background:var(--blue);transition:width .3s ease}
+            #maint-progress[hidden],#maint-progress-label[hidden]{display:none}
+            #maint-log{max-height:40vh;overflow:auto}
             </style></head><body>
-            <h1>DHT crawler</h1>$banner
-            <form method="post" action="/settings/crawler">
+            <h1>DHT crawler</h1>
+            <div id="page-banner">$banner</div>
+            <p class="meta">Feed: <span id="live" class="live bad">connecting…</span></p>
+            <div class="tabs" role="tablist">
+              <button type="button" role="tab" id="tabbtn-backup" data-tab="backup"
+                      aria-controls="tab-backup" aria-selected="false">Backup</button>
+              <button type="button" role="tab" id="tabbtn-settings" data-tab="settings"
+                      aria-controls="tab-settings" aria-selected="true">Settings</button>
+              <button type="button" role="tab" id="tabbtn-maintenance" data-tab="maintenance"
+                      aria-controls="tab-maintenance" aria-selected="false">Maintenance</button>
+            </div>
+            <div id="tab-backup" class="tabpanel" role="tabpanel" aria-labelledby="tabbtn-backup" hidden>
+            $backupSection
+            $dbBackupSection
+            $bootstrapSection
+            </div>
+            <div id="tab-settings" class="tabpanel" role="tabpanel" aria-labelledby="tabbtn-settings">
+            <form id="settings-form" method="post" action="/settings/crawler">
               <fieldset class="card"><legend>General</legend>
                 <label class="row"><input type="checkbox" name="enabled" ${checked(s.enabled)}> Enabled (start with the service)</label>
                 <label class="row"><input type="checkbox" name="wifiOnly" ${checked(s.wifiOnly)}> WiFi only (pause when wifi is down)</label>
@@ -1366,15 +1402,60 @@ class ControlServer(
               </fieldset>
               <button type="submit" class="btn">Apply</button>
             </form>
-            $rebuildBox
-            <div id="apply-status">Apply status: IDLE</div>
-            <pre id="apply-log" class="apply-log loglines" style="display:none"></pre>
+            $rebuildHint
+            <div id="apply-status"$applyClass>$applyText</div>
+            <pre id="apply-log" class="apply-log loglines"$applyLogStyle>$applyLogText</pre>
+            </div>
+            <div id="tab-maintenance" class="tabpanel" role="tabpanel" aria-labelledby="tabbtn-maintenance" hidden>
             $maintenanceSection
-            $backupSection
-            $dbBackupSection
+            </div>
             <p><a href="/">Back to dashboard</a></p>
             <script>
+            $WEBSOCKET_CLIENT_JS
             (function () {
+              function el(id) { return document.getElementById(id); }
+              function pad2(n) { return n < 10 ? '0' + n : '' + n; }
+              // Same shape as the server's fmtEpoch() so the served text and the
+              // first frame agree character for character.
+              function fmtTime(ms) {
+                if (ms === null || ms === undefined) return '';
+                var d = new Date(ms);
+                return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) +
+                  ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+              }
+              function setText(id, text, cls) {
+                var n = el(id);
+                if (!n) return;
+                n.textContent = text;
+                if (cls !== undefined) n.className = cls;
+              }
+              // ── tabs: hash-switched, no navigation, no reload ─────────────
+              var tabButtons = Array.prototype.slice.call(document.querySelectorAll('.tabs button'));
+              function showTab(name) {
+                for (var i = 0; i < tabButtons.length; i++) {
+                  var b = tabButtons[i];
+                  var on = b.getAttribute('data-tab') === name;
+                  b.setAttribute('aria-selected', on ? 'true' : 'false');
+                  var panel = el('tab-' + b.getAttribute('data-tab'));
+                  if (panel) {
+                    if (on) panel.removeAttribute('hidden'); else panel.setAttribute('hidden', '');
+                  }
+                }
+              }
+              function tabFromHash() {
+                var h = (location.hash || '').replace('#', '');
+                return h === 'backup' || h === 'maintenance' ? h : 'settings';
+              }
+              tabButtons.forEach(function (b) {
+                b.addEventListener('click', function () {
+                  var name = b.getAttribute('data-tab');
+                  if (location.hash !== '#' + name) location.hash = name;
+                  showTab(name);
+                });
+              });
+              window.addEventListener('hashchange', function () { showTab(tabFromHash()); });
+              showTab(tabFromHash());
+              // ── form helpers (re-bound after a terminal-apply reconcile) ──
               var ids = ['numTrees','treeFindNodeWorkers','treeBep51Workers','treeGetPeersWorkers','treeMetadataWorkers'];
               function v(id) { var n = parseInt(document.getElementById(id).value, 10); return isNaN(n) ? 0 : n; }
               function updateEst() {
@@ -1385,8 +1466,14 @@ class ControlServer(
                 el.className = n > ${CrawlerKeys.THREAD_WARN_THRESHOLD} ? 'warn-num' : '';
                 document.getElementById('est-warn').style.display = n > ${CrawlerKeys.THREAD_WARN_THRESHOLD} ? '' : 'none';
               }
-              ids.forEach(function (id) { document.getElementById(id).addEventListener('input', updateEst); });
-              updateEst();
+              function bindForm() {
+                ids.forEach(function (id) {
+                  var n = el(id);
+                  if (n) n.addEventListener('input', updateEst);
+                });
+                updateEst();
+              }
+              bindForm();
               // TV kinds only apply to tv/anime rows, so the row is revealed whenever
               // one of those categories is ticked. Its boxes stay checked while
               // hidden, so switching tv/anime off and back on keeps the selection.
@@ -1399,73 +1486,169 @@ class ControlServer(
                 var row = document.getElementById('save-tv-kind-row');
                 if (on) row.removeAttribute('hidden'); else row.setAttribute('hidden', '');
               }
-              for (var ci = 0; ci < catBoxes.length; ci++) catBoxes[ci].addEventListener('change', syncTvKindRow);
-              syncTvKindRow();
-              function pollApply() {
-                fetch('/api/crawler/apply-status').then(function (r) { return r.json(); }).then(function (st) {
-                  var box = document.getElementById('apply-status');
-                  box.textContent = 'Apply status: ' + st.phase + (st.message ? ' — ' + st.message : '');
-                  box.className = ['IDLE','OK','ROLLED_BACK','FAILED'].indexOf(st.phase) >= 0 ? '' : 'busy';
-                  var tail = document.getElementById('apply-log');
-                  tail.style.display = st.logTail.length ? '' : 'none';
-                  tail.textContent = st.logTail.join('\\n');
-                }).catch(function () {});
+              function bindCategories() {
+                catBoxes = document.querySelectorAll('input[name="saveCategories"]');
+                for (var ci = 0; ci < catBoxes.length; ci++) catBoxes[ci].addEventListener('change', syncTvKindRow);
+                syncTvKindRow();
               }
-              setInterval(pollApply, 2000); pollApply();
-              var maintOffset = 0;
-              var maintSeenAction = null;
-              function pollMaint() {
-                fetch('/api/crawler/maintenance?offset=' + maintOffset).then(function (r) { return r.json(); }).then(function (st) {
-                  var box = document.getElementById('maint-status');
-                  var log = document.getElementById('maint-log');
-                  var skip = false;
-                  if (st.action !== maintSeenAction) {
-                    maintSeenAction = st.action;
-                    maintOffset = 0;
-                    log.textContent = '';
-                    skip = true;  // st.lines was sliced with the old offset; refetch from 0 next round
-                  } else if (st.lines && st.lines.length) {
-                    log.textContent += (log.textContent ? '\n' : '') + st.lines.join('\n');
-                    log.scrollTop = log.scrollHeight;
+              bindCategories();
+              // ── live render: one frame carries the full state ─────────────
+              var lastApplyTerminal = ${applyStatus.terminal};
+              var lastMaintSig = null;
+
+              // A terminal apply means the submitted values may have been rejected
+              // or rolled back: re-render the form from server config so the page
+              // never shows settings that are not in effect.
+              function reconcileForm() {
+                fetch(location.pathname + location.search, {credentials: 'same-origin'})
+                  .then(function (r) { return r.text(); })
+                  .then(function (html) {
+                    var doc = new DOMParser().parseFromString(html, 'text/html');
+                    var freshForm = doc.getElementById('settings-form');
+                    var form = el('settings-form');
+                    if (freshForm && form) {
+                      form.innerHTML = freshForm.innerHTML;
+                      bindForm();
+                      bindCategories();
+                    }
+                    var freshBanner = doc.getElementById('page-banner');
+                    var banner = el('page-banner');
+                    if (freshBanner && banner) banner.innerHTML = freshBanner.innerHTML;
+                  }).catch(function () {});
+              }
+
+              function renderApply(a) {
+                var text = 'Apply status: ' + a.phase;
+                if (a.message) text += ' \u2014 ' + a.message;
+                if (a.pausedNoWifi) text += ' (paused: no wifi)';
+                if (a.seq) text += ' [#' + a.seq + ']';
+                setText('apply-status', text, (a.phase !== 'IDLE' && !a.terminal) ? 'busy' : '');
+                var tail = el('apply-log');
+                if (tail) {
+                  var lines = a.logTail || [];
+                  tail.style.display = lines.length ? '' : 'none';
+                  tail.textContent = lines.join('\n');
+                }
+                if (lastApplyTerminal === false && a.terminal === true) reconcileForm();
+                lastApplyTerminal = !!a.terminal;
+              }
+
+              function renderMaint(m) {
+                var text, cls;
+                if (m.action) {
+                  var state = m.running ? 'running\u2026'
+                    : ((m.exitCode === null || m.exitCode === undefined) ? 'idle' : 'exit ' + m.exitCode);
+                  text = 'Maintenance: ' + m.action + ' \u2014 ' + state;
+                  if (m.message) text += ' (' + m.message + ')';
+                  if (m.phase) text += ' \u00b7 ' + m.phase;
+                  if (m.percent !== null && m.percent !== undefined) text += ' ' + m.percent + '%';
+                  else if (m.done !== null && m.done !== undefined) {
+                    text += ' \u00b7 ' + m.done;
+                    if (m.total !== null && m.total !== undefined) text += ' / ' + m.total;
                   }
-                  if (!skip) maintOffset = st.totalLines;
-                  var state = st.running ? 'running\u2026' : (st.exitCode === null ? 'idle' : 'exit ' + st.exitCode);
-                  box.textContent = st.action ? ('Maintenance: ' + st.action + ' \u2014 ' + state + (st.message ? ' (' + st.message + ')' : '')) : 'Maintenance: idle';
-                  box.className = st.running ? 'busy' : 'meta';
-                  log.style.display = st.totalLines ? '' : 'none';
-                }).catch(function () {});
+                  cls = m.running ? 'busy' : 'meta';
+                } else {
+                  text = 'Maintenance: idle';
+                  cls = 'meta';
+                }
+                setText('maint-status', text, cls);
+                // A bar only where the crawler reported a denominator: a
+                // phase-only action must never render a fake percentage.
+                var hasPct = m.percent !== null && m.percent !== undefined;
+                var wrap = el('maint-progress');
+                var label = el('maint-progress-label');
+                var bar = el('maint-progress-bar');
+                if (hasPct) {
+                  var pct = Math.max(0, Math.min(100, m.percent));
+                  if (wrap) wrap.removeAttribute('hidden');
+                  if (label) {
+                    label.removeAttribute('hidden');
+                    label.textContent = pct + '%' + ((m.done !== null && m.done !== undefined)
+                      ? ' (' + m.done + ((m.total !== null && m.total !== undefined) ? ' / ' + m.total : '') + ')'
+                      : '');
+                  }
+                  if (bar) bar.style.width = pct + '%';
+                } else {
+                  if (wrap) wrap.setAttribute('hidden', '');
+                  if (label) label.setAttribute('hidden', '');
+                  if (bar) bar.style.width = '0%';
+                }
+                // Full re-render of the raw console, but only when the buffer
+                // moved: joining 2000 lines every second is wasted work.
+                var lines = m.lines || [];
+                // (length, first, last) is exact for an append-with-evict-from-front
+                // ring buffer: a plain length:last signature would miss a duplicate
+                // line appended exactly at the cap.
+                var sig = lines.length
+                  ? lines.length + ':' + lines[0] + ':' + lines[lines.length - 1]
+                  : '0';
+                var log = el('maint-log');
+                if (log && sig !== lastMaintSig) {
+                  lastMaintSig = sig;
+                  var atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 8;
+                  log.style.display = lines.length ? '' : 'none';
+                  log.textContent = lines.slice(-2000).join('\n');
+                  if (atBottom) log.scrollTop = log.scrollHeight;
+                }
               }
-              setInterval(pollMaint, 1500); pollMaint();
-              function pollBackup() {
-                fetch('/api/crawler/backup').then(function (r) { return r.json(); }).then(function (st) {
-                  var box = document.getElementById('backup-status');
-                  var text = 'Backup: ' + st.state + (st.message ? ' \u2014 ' + st.message : '');
-                  if (st.bytes != null) text += ' (' + st.bytes + ' bytes uploaded)';
-                  if (st.lastSuccess != null) text += ' (last success ' + new Date(st.lastSuccess).toLocaleString() + ')';
-                  box.textContent = text;
-                }).catch(function () {});
+
+              function renderFamilies(f) {
+                var b = f.bep51 || {};
+                var t = 'Backup: ' + b.state;
+                if (b.message) t += ' \u2014 ' + b.message;
+                if (b.running) t += ' (running since ' + fmtTime(b.startedAt) + ')';
+                if (b.bytes !== null && b.bytes !== undefined) t += ' (' + b.bytes + ' bytes uploaded)';
+                if (b.lastSuccess !== null && b.lastSuccess !== undefined) t += ' (last success ' + fmtTime(b.lastSuccess) + ')';
+                setText('backup-status', t);
+                var d = f.db || {};
+                var dt = 'DB backup: ' + d.state;
+                if (d.message) dt += ' \u2014 ' + d.message;
+                if (d.inFlight) dt += ' (upload in flight)';
+                if (d.resetPending) dt += ' \u2014 reset pending';
+                if (d.running) dt += ' (running since ' + fmtTime(d.startedAt) + ')';
+                if (d.chunks !== null && d.chunks !== undefined) {
+                  dt += ' (' + d.chunks + ' chunks';
+                  if (d.totalBytes !== null && d.totalBytes !== undefined) dt += ', ' + d.totalBytes + ' bytes';
+                  dt += ')';
+                }
+                if (d.bytes !== null && d.bytes !== undefined) dt += ' (' + d.bytes + ' bytes uploaded)';
+                if (d.lastSuccess !== null && d.lastSuccess !== undefined) dt += ' (last success ' + fmtTime(d.lastSuccess) + ')';
+                setText('db-backup-status', dt);
+                var r = f.restore || {};
+                var rt = 'DB restore: ' + r.state;
+                if (r.message) rt += ' \u2014 ' + r.message;
+                if (r.objectCount !== null && r.objectCount !== undefined) {
+                  rt += ' (' + ((r.objectsDone !== null && r.objectsDone !== undefined)
+                    ? r.objectsDone + ' of ' : '') + r.objectCount + ' objects imported)';
+                }
+                if (r.lastSuccess !== null && r.lastSuccess !== undefined) rt += ' (last success ' + fmtTime(r.lastSuccess) + ')';
+                setText('db-restore-status', rt);
+                var bs = f.bootstrap || {};
+                var bt = 'Bootstrap: ' + bs.state;
+                if (bs.message) bt += ' \u2014 ' + bs.message;
+                if (bs.startedAt !== null && bs.startedAt !== undefined) bt += ' (started ' + fmtTime(bs.startedAt) + ')';
+                if (bs.finishedAt !== null && bs.finishedAt !== undefined) bt += ' (finished ' + fmtTime(bs.finishedAt) + ')';
+                setText('bootstrap-status', bt);
               }
-              setInterval(pollBackup, 5000); pollBackup();
-              function pollDbBackup() {
-                fetch('/api/crawler/backup/db').then(function (r) { return r.json(); }).then(function (st) {
-                  var box = document.getElementById('db-backup-status');
-                  var text = 'DB backup: ' + st.state + (st.message ? ' \u2014 ' + st.message : '') + (st.resetPending ? ' \u2014 reset pending' : '');
-                  if (st.bytes != null) text += ' (' + st.bytes + ' bytes uploaded)';
-                  if (st.lastSuccess != null) text += ' (last success ' + new Date(st.lastSuccess).toLocaleString() + ')';
-                  box.textContent = text;
-                }).catch(function () {});
+
+              function render(f) {
+                if (!f) return;
+                renderApply(f.apply || {});
+                renderMaint(f.maint || {});
+                renderFamilies(f);
               }
-              setInterval(pollDbBackup, 5000); pollDbBackup();
-              function pollDbRestore() {
-                fetch('/api/crawler/restore').then(function (r) { return r.json(); }).then(function (st) {
-                  var box = document.getElementById('db-restore-status');
-                  var text = 'DB restore: ' + st.state + (st.message ? ' \u2014 ' + st.message : '');
-                  if (st.objectCount != null) text += ' (' + (st.objectsDone != null ? st.objectsDone + ' of ' : '') + st.objectCount + ' objects imported)';
-                  if (st.lastSuccess != null) text += ' (last success ' + new Date(st.lastSuccess).toLocaleString() + ')';
-                  box.textContent = text;
-                }).catch(function () {});
-              }
-              setInterval(pollDbRestore, 5000); pollDbRestore();
+
+              // One socket, one full-state frame per second. `wsUrl` appends
+              // location.search, so a `?token=` page authenticates the upgrade.
+              WS.connectSocket('/settings/crawler/ws', {
+                onopen: function () { WS.setLive('ok', 'live'); },
+                onmessage: function (ev) {
+                  var f;
+                  try { f = JSON.parse(ev.data); } catch (e) { return; }
+                  render(f);
+                },
+                onclose: function () { WS.setLive('bad', 'reconnecting\u2026'); }
+              });
             })();
             </script>
             </body></html>
@@ -1479,6 +1662,24 @@ class ControlServer(
      * the action does, so the confirm() cannot be mistaken for a filtered export.
      */
     private fun buildMaintenanceSection(): String {
+        // Stage 5: interpolate the live status so the served page agrees with the
+        // first websocket frame (the old markup hardcoded "Maintenance: idle").
+        val st = crawlerMaintenanceStatus()
+        val maintText = esc(maintStatusText(st))
+        val maintClass = if (st.running) "busy" else "meta"
+        val pct = st.percent
+        val progressHidden = if (pct == null) " hidden" else ""
+        val progressPct = (pct ?: 0).coerceIn(0, 100)
+        val progressLabel = if (pct == null) "" else buildString {
+            append(pct).append('%')
+            if (st.done != null) {
+                append(" (").append(st.done)
+                st.total?.let { append(" / ").append(it) }
+                append(')')
+            }
+        }
+        val logText = esc(st.lines.joinToString("\n"))
+        val logStyle = if (st.lines.isEmpty()) " style=\"display:none\"" else ""
         val buttons = MaintenanceAction.entries.filter { it.phoneSupported }.joinToString("") { a ->
             val warn = if (a.needsSpaceCheck) " (needs ~DB size of free internal space)" else ""
             """
@@ -1493,8 +1694,10 @@ class ControlServer(
               work dir. recover-database needs ~DB size of free internal space. The supervised
               crawler is stopped first and restarted afterwards if enabled (and wifi is up).</p>
               <div id="maint-btns">$buttons</div>
-              <div id="maint-status" class="meta">Maintenance: idle</div>
-              <pre id="maint-log" class="apply-log loglines" style="display:none"></pre>
+              <div id="maint-status" class="$maintClass">$maintText</div>
+              <div id="maint-progress"$progressHidden><div id="maint-progress-bar" style="width:$progressPct%"></div></div>
+              <div id="maint-progress-label" class="meta"$progressHidden>$progressLabel</div>
+              <pre id="maint-log" class="apply-log loglines"$logStyle>$logText</pre>
             </fieldset>
         """.trimIndent()
     }
@@ -1538,7 +1741,7 @@ class ControlServer(
               <form method="post" action="/crawler/backup/upload"
                     onsubmit="return confirm('Upload the BEP51 cache to R2 now?')">
               <button type="submit" class="btn">Upload now</button></form>
-              <div id="backup-status" class="meta">Backup: ${st.state.name}</div>
+              <div id="backup-status" class="meta">${esc(backupStatusText(st))}</div>
             </fieldset>
         """.trimIndent()
     }
@@ -1576,7 +1779,7 @@ class ControlServer(
               <form method="post" action="/crawler/backup/db"
                     onsubmit="return confirm('Upload the crawler DB dump to R2 now?')">
               <button type="submit" class="btn">Upload now</button></form>
-              <div id="db-backup-status" class="meta">DB backup: ${st.state.name}</div>
+              <div id="db-backup-status" class="meta">${esc(dbBackupStatusText(st, dbBackupInFlight()))}</div>
               <p class="meta"><strong>Reset backup from zero</strong> deletes every object under
               <code>${esc(dbPrefix)}/</code> in the R2 DB bucket, resets the upload bookmark, and re-uploads the whole
               database in the background (many hours for a large DB). Uploads are blocked until the delete completes;
@@ -1595,9 +1798,108 @@ class ControlServer(
               <form method="post" action="/crawler/restore/db"
                     onsubmit="return confirm('Restore the crawler DB from R2 now? This replaces torrents.db and the crawler is stopped while it runs.')">
               <button type="submit" class="btn">Restore now</button></form>
-              <div id="db-restore-status" class="meta">DB restore: ${rst.state.name}</div>
+              <div id="db-restore-status" class="meta">${esc(restoreStatusText(rst))}</div>
             </fieldset>
         """.trimIndent()
+    }
+
+    /**
+     * The BEP51 bootstrap-cache download card (Stage 5). The downloader itself is
+     * instrumented in Stage 6; until then the frame carries IDLE and this card
+     * renders that honestly rather than inventing progress.
+     */
+    private fun buildBootstrapSection(): String {
+        val st = bootstrapStatus()
+        return """
+            <fieldset class="card"><legend>Bootstrap cache download</legend>
+              <p class="meta">Downloads the BEP51 bootstrap cache from R2 before the crawler starts,
+              when <em>Enable bootstrap download</em> is ticked on the Settings tab.</p>
+              <div id="bootstrap-status" class="meta">${esc(bootstrapStatusText(st))}</div>
+            </fieldset>
+        """.trimIndent()
+    }
+
+    // ── server-rendered status text (Stage 5) ────────────────────────────────
+    // Each helper below mirrors the page's render() formatter one-for-one: the
+    // served markup and the first websocket frame must say the same thing, or a
+    // page loaded mid-run lies until the next tick (triage found the old markup
+    // hardcoding "Maintenance: idle" while a one-shot was running).
+
+    /** `yyyy-MM-dd HH:mm` in the device zone — the shape the page's `fmtTime` emits. */
+    private fun fmtEpoch(ms: Long): String =
+        java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US)
+            .format(java.util.Date(ms))
+
+    private fun applyStatusText(st: CrawlerApplyStatus): String = buildString {
+        append("Apply status: ").append(st.phase.name)
+        if (st.message.isNotEmpty()) append(" — ").append(st.message)
+        if (st.pausedNoWifi) append(" (paused: no wifi)")
+        if (st.seq > 0) append(" [#").append(st.seq).append(']')
+    }
+
+    private fun maintStatusText(st: MaintenanceStatus): String {
+        val action = st.action ?: return "Maintenance: idle"
+        val sb = StringBuilder("Maintenance: ").append(action.route).append(" — ")
+        sb.append(
+            when {
+                st.running -> "running…"
+                st.exitCode == null -> "idle"
+                else -> "exit ${st.exitCode}"
+            }
+        )
+        if (st.message.isNotEmpty()) sb.append(" (").append(st.message).append(')')
+        if (!st.phase.isNullOrEmpty()) sb.append(" · ").append(st.phase)
+        val pct = st.percent
+        if (pct != null) {
+            sb.append(' ').append(pct).append('%')
+        } else {
+            st.done?.let { done ->
+                sb.append(" · ").append(done)
+                st.total?.let { sb.append(" / ").append(it) }
+            }
+        }
+        return sb.toString()
+    }
+
+    private fun backupStatusText(st: com.torrent.app.backup.BackupStatus): String = buildString {
+        append("Backup: ").append(st.state.name)
+        if (st.message.isNotEmpty()) append(" — ").append(st.message)
+        st.uploadedBytes?.let { append(" (").append(it).append(" bytes uploaded)") }
+        st.lastSuccess?.let { append(" (last success ").append(fmtEpoch(it)).append(')') }
+    }
+
+    private fun dbBackupStatusText(
+        st: com.torrent.app.backup.DbBackupStatus,
+        inFlight: Boolean,
+    ): String = buildString {
+        append("DB backup: ").append(st.state.name)
+        if (st.message.isNotEmpty()) append(" — ").append(st.message)
+        if (inFlight) append(" (upload in flight)")
+        if (st.resetPending) append(" — reset pending")
+        st.uploadedBytes?.let { append(" (").append(it).append(" bytes uploaded)") }
+        st.lastSuccess?.let { append(" (last success ").append(fmtEpoch(it)).append(')') }
+    }
+
+    private fun restoreStatusText(st: com.torrent.app.backup.DbRestoreStatus): String = buildString {
+        append("DB restore: ").append(st.state.name)
+        if (st.message.isNotEmpty()) append(" — ").append(st.message)
+        st.objectCount?.let { count ->
+            append(" (")
+            st.objectsDone?.let { append(it).append(" of ") }
+            append(count).append(" objects imported)")
+        }
+        st.lastSuccess?.let { append(" (last success ").append(fmtEpoch(it)).append(')') }
+    }
+
+    private fun bootstrapStatusText(st: com.torrent.app.backup.BootstrapStatus?): String {
+        val state = st?.state ?: com.torrent.app.backup.BootstrapState.IDLE
+        val sb = StringBuilder("Bootstrap: ").append(state.name)
+        if (st != null) {
+            if (st.message.isNotEmpty()) sb.append(" — ").append(st.message)
+            st.startedAt?.let { sb.append(" (started ").append(fmtEpoch(it)).append(')') }
+            st.finishedAt?.let { sb.append(" (finished ").append(fmtEpoch(it)).append(')') }
+        }
+        return sb.toString()
     }
 
     /**
