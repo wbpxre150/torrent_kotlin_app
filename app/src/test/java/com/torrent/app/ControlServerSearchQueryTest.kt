@@ -234,6 +234,16 @@ class ControlServerSearchQueryTest {
             okPath(type = "browse", movieKinds = listOf("drama", "scifi", "action", "drama")))
     }
 
+    @Test fun movieKinds_surviveOnRandom() {
+        // Randomise is a load trigger too: the genre facet must ride the
+        // `/random` URL (the crawler only fills a narrow pool when it sees
+        // `movie_kind`), while random still always adds `min_peers=10` and
+        // never a `page`.
+        assertEquals(
+            "/random?category=movie&movie_kind=action,scifi&min_peers=10",
+            okPath(type = "random", category = "movie", movieKinds = listOf("action", "scifi")))
+    }
+
     @Test fun movieKindNamesAreAccepted() {
         assertEquals(
             "/browse?movie_kind=" + CrawlerTaxonomy.MOVIE_KINDS.joinToString(","),

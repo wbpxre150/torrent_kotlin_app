@@ -984,6 +984,47 @@ class ControlServerWebSocketTest {
         }
     }
 
+    /**
+     * Randomise must not drop the genre facet: a `random` frame carries its
+     * `movie_kinds` through to `/random` as the csv `movie_kind` param, and the
+     * builder always appends `min_peers=10` (and never a `page`).
+     */
+    @Test fun searchWebSocket_randomFrame_forwardsGenreOnRandomPath() {
+        val requests = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val upstream = startStatsUpstream("""{"results":[],"has_more":false}""", requests)
+        val live = startTestServer(
+            TOKEN, crawlerRunning = true, crawlerPort = upstream.localPort,
+            pushPeriodMs = 10_000, searchReadTimeoutMs = 15_000,
+        )
+        live.start()
+        try {
+            val ws = connectWithRetry(live.port, "/search/ws?token=$TOKEN")
+            try {
+                ws.sendText(
+                    """{"id":11,"type":"random","category":"movie","movie_kinds":["western"]}""")
+                val reply = ws.nextText(10_000)
+                assertTrue("expected a reply, got none", reply != null)
+                assertTrue("expected ok, got: $reply", reply!!.contains("\"ok\":true"))
+                val deadline = System.currentTimeMillis() + 5_000
+                var forwarded: String? = null
+                while (forwarded == null && System.currentTimeMillis() < deadline) {
+                    // The server also polls /stats for its own health checks.
+                    forwarded = requests.firstOrNull { it.startsWith("GET /random") }
+                    if (forwarded == null) Thread.sleep(10)
+                }
+                assertEquals(
+                    "GET /random?category=movie&movie_kind=western&min_peers=10 HTTP/1.1",
+                    forwarded,
+                )
+            } finally {
+                ws.close()
+            }
+        } finally {
+            live.stop()
+            upstream.close()
+        }
+    }
+
     private fun assertFixture(frame: String) {
         for (key in listOf(
             "\"version\"", "\"torrents_indexed\": 123456", "\"files_indexed\": 654321",
