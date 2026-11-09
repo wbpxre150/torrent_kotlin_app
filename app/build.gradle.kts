@@ -559,7 +559,8 @@ tasks.register("prepareDhtCrawlerSrc") {
             "rebuild-fts-database.patch",
             "search-movie-kind-facet.patch",
             "random-facet-pool.patch",
-            "movie-kind-conjunctive.patch"
+            "movie-kind-conjunctive.patch",
+            "maintenance-progress.patch"
         )) {
             project.exec {
                 commandLine("patch", "-p1", "-d", destDir.absolutePath, "-i", file("$destDir/patches/$patchName").absolutePath)
