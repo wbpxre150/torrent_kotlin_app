@@ -474,6 +474,41 @@ class ControlServerDashboardTest {
         }
     }
 
+    /**
+     * Stage 1: every server-rendered page wears the one shared header (Dashboard /
+     * Crawler stats / Search) inside a `.wrap` column, and the old per-page
+     * "Back to dashboard" links plus the dashboard's duplicate `.cfg` buttons are
+     * gone — the header is the only navigation.
+     */
+    @Test fun allPages_shareTheHeaderNav() {
+        val pages = mapOf(
+            "/" to html,
+            "/stats" to ControlServer.buildStatsPage(),
+            "/search" to ControlServer.buildSearchPage(),
+            "/torrent" to ControlServer.buildTorrentPage(),
+            "/settings/crawler" to newServer().buildCrawlerPanel(null, false, false),
+            "/settings/transmission" to newServer().buildTransmissionPanel(null, true),
+            "/settings/ftp" to newServer().buildFtpPanel(null, true),
+            "/settings/storage" to newServer().buildStoragePanel(),
+        )
+        for ((route, page) in pages) {
+            assertTrue("$route must wear the shared header", page.contains("<header>"))
+            assertTrue("$route must link the dashboard", page.contains("href=\"/\""))
+            assertTrue("$route must link the crawler stats", page.contains("href=\"/stats\""))
+            assertTrue("$route must link search", page.contains("href=\"/search\""))
+            assertFalse("$route keeps a duplicate back link", page.contains("Back to dashboard"))
+        }
+        assertTrue("the dashboard keeps the wide column", html.contains("class=\"wrap wide\""))
+        assertFalse(html.contains("<a class=\"cfg\" href=\"/stats\">"))
+        assertFalse(html.contains("<a class=\"cfg\" href=\"/search\">"))
+        assertFalse(ControlServer.buildStatsPage().contains("<a class=\"cfg\" href=\"/\">"))
+        for (route in listOf("/stats", "/search", "/torrent", "/settings/crawler",
+                "/settings/transmission", "/settings/ftp", "/settings/storage")) {
+            val page = pages.getValue(route)
+            assertTrue("$route must sit in the .wrap column", page.contains("class=\"wrap\""))
+        }
+    }
+
     @Test fun dashboardScript_neverNavigatesOrRebuildsMarkup() {
         val script = inlineScript(html)
         // Scroll position and card open/closed state survive a push because the

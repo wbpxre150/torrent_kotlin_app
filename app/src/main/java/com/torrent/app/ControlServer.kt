@@ -830,7 +830,7 @@ class ControlServer(
               .daemon-log{overflow:auto}
             </style></head><body>
             <div class="wrap wide">
-            <header><h1>Torrent App Control</h1><nav><a href="/">Dashboard</a><a href="/stats">Crawler stats</a><a href="/search">Search</a></nav></header>
+            ${pageHeader("Torrent App Control")}
             <p class="meta">Service: <span id="service-state" class="state $state">$state</span> <span id="live" class="live wait">connecting…</span></p>
             <div id="rollback-banner" class="warn"$rollbackHidden>Transmission config was rolled back after a crash-loop. Review settings.</div>
             <p>
@@ -838,8 +838,6 @@ class ControlServer(
               <a class="cfg" href="/settings/ftp">FTP settings</a>
               <a class="cfg" href="/settings/storage">Storage</a>
               <a class="cfg" href="/settings/crawler">Crawler</a>
-              <a class="cfg" href="/stats">Crawler Stats</a>
-              <a class="cfg" href="/search">Search</a>
             </p>
             <h2>Daemons</h2>
             $daemonCards
@@ -1156,7 +1154,8 @@ class ControlServer(
             <!DOCTYPE html><html><head><title>Transmission settings</title>
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <style>$WEBUI_CSS</style></head><body>
-            <h1>Transmission settings</h1>$banner
+            <div class="wrap">
+            ${pageHeader("Transmission settings")}$banner
             <form method="post" action="/settings/transmission">
               <label>RPC username<input name="username" value="${esc(s.username)}"></label>
               <label>RPC password (leave blank to keep)<input type="password" name="password" placeholder="unchanged"></label>
@@ -1171,7 +1170,7 @@ class ControlServer(
               <button type="submit" class="btn">Apply</button>
             </form>
             <p class="meta">Any change here, including speed limits, restarts transmission so settings.json is rewritten and the change persists.</p>
-            <p><a href="/">Back to dashboard</a></p>
+            </div>
             </body></html>
         """.trimIndent()
     }
@@ -1185,7 +1184,8 @@ class ControlServer(
             <!DOCTYPE html><html><head><title>FTP settings</title>
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <style>$WEBUI_CSS</style></head><body>
-            <h1>FTP settings</h1>$banner
+            <div class="wrap">
+            ${pageHeader("FTP settings")}$banner
             <form method="post" action="/settings/ftp">
               <fieldset class="card">
                 <label>Username<input name="username" value="${esc(s.username)}"></label>
@@ -1197,7 +1197,7 @@ class ControlServer(
                 <button type="submit" class="btn">Apply</button>
               </fieldset>
             </form>
-            <p><a href="/">Back to dashboard</a></p>
+            </div>
             </body></html>
         """.trimIndent()
     }
@@ -1210,7 +1210,8 @@ class ControlServer(
             <!DOCTYPE html><html><head><title>Storage</title>
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <style>$WEBUI_CSS</style></head><body>
-            <h1>USB storage</h1>
+            <div class="wrap">
+            ${pageHeader("USB storage")}
             <div class="card">
               <p class="meta">Granted: <strong>${s.granted}</strong></p>
               <p class="meta">Tree: <code>${esc(s.treeUri ?: "—")}</code></p>
@@ -1220,7 +1221,7 @@ class ControlServer(
             <div class="warn">To re-grant or change the USB drive, open the Torrent App on the
             Android device and tap <strong>Grant USB</strong>. The data directory is set in
             <a href="/settings/transmission">Transmission settings</a>.</div>
-            <p><a href="/">Back to dashboard</a></p>
+            </div>
             </body></html>
         """.trimIndent()
     }
@@ -1318,7 +1319,8 @@ class ControlServer(
             #maint-progress[hidden],#maint-progress-label[hidden]{display:none}
             #maint-log{max-height:40vh;overflow:auto}
             </style></head><body>
-            <h1>DHT crawler</h1>
+            <div class="wrap">
+            ${pageHeader("DHT crawler")}
             <div id="page-banner">$banner</div>
             <p class="meta">Feed: <span id="live" class="live bad">connecting…</span></p>
             <div class="tabs" role="tablist">
@@ -1412,7 +1414,7 @@ class ControlServer(
             <div id="tab-maintenance" class="tabpanel" role="tabpanel" aria-labelledby="tabbtn-maintenance" hidden>
             $maintenanceSection
             </div>
-            <p><a href="/">Back to dashboard</a></p>
+            </div>
             <script>
             $WEBSOCKET_CLIENT_JS
             (function () {
@@ -2158,6 +2160,23 @@ class ControlServer(
             .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
 
     companion object {
+        /**
+         * The shared page shell every server-rendered page wears (webui stage 1):
+         * one `<header>` carrying the Dashboard / Crawler stats / Search links plus
+         * any page-specific trailing markup ([extraNav]).
+         *
+         * Pure string, no JS and no `<script>` tag — the live pages keep exactly one
+         * inline script so `ControlServerDashboardTest.inlineScript()` keeps slicing
+         * the right block. The hrefs are plain and relative: the `control_token`
+         * cookie set by the first `?token=` hit authenticates every later navigation.
+         *
+         * A companion member so both the instance page builders (dashboard, the
+         * settings panels) and the object builders ([buildStatsPage],
+         * [buildSearchPage], [buildTorrentPage]) can call it.
+         */
+        internal fun pageHeader(title: String, extraNav: String = ""): String =
+            "<header><h1>$title</h1><nav><a href=\"/\">Dashboard</a><a href=\"/stats\">Crawler stats</a><a href=\"/search\">Search</a>$extraNav</nav></header>"
+
         /** HTML-escapes a value for embedding in dashboard markup. */
         internal fun esc(s: String): String =
             s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -2521,6 +2540,7 @@ class ControlServer(
               <nav>
                 <a href="/">Dashboard</a>
                 <a href="/stats">Crawler stats</a>
+                <a href="/search">Search</a>
                 <span id="live" aria-label="live" title="live"></span>
               </nav>
             </header>
@@ -3923,7 +3943,7 @@ ${adultSelectionRow(adultSelection)}
             <!-- Torrent detail shell: the info hash rides in location.search, so the
                  server renders nothing torrent-specific here. -->
             <div class="wrap">
-            <header><h1 id="name">Torrent</h1><nav><a id="back" href="/">&larr; Back</a></nav></header>
+            <header><h1 id="name">Torrent</h1><nav><a href="/">Dashboard</a><a href="/stats">Crawler stats</a><a href="/search">Search</a></nav></header>
             <div id="banner" class="banner red" hidden></div>
             <div id="detail" hidden>
               <div class="meta" id="meta"></div>
@@ -4218,10 +4238,6 @@ ${adultSelectionRow(adultSelection)}
                 return map[d.error] || 'Add failed';
               }
 
-              el('back').onclick = function (ev) {
-                if (history.length > 1) { ev.preventDefault(); history.back(); }
-              };
-
               el('imdb-btn').onclick = function () {
                 var a = document.createElement('a');
                 a.href = 'https://www.imdb.com/find/?q=' + encodeURIComponent(selectedWords().join(' '));
@@ -4320,7 +4336,6 @@ ${adultSelectionRow(adultSelection)}
             <!DOCTYPE html><html><head><title>Torrent App — Crawler Stats</title>
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <style>$WEBUI_CSS
-              body{max-width:640px;margin:0 auto;padding:0 12px}
               a.cfg{display:inline-block;margin:.5em .5em .5em 0;padding:.4em .8em;background:var(--card);border-radius:8px;text-decoration:none;border:1px solid #dadce0;color:var(--blue);font-weight:600}
               .strip{display:flex;flex-wrap:wrap;gap:.5em;margin:1em 0}
               .strip div{background:var(--card);border:1px solid #e3e7ee;border-radius:12px;padding:.5em .8em;box-shadow:0 1px 3px rgba(0,0,0,.06);font-size:.95em}
@@ -4339,9 +4354,9 @@ ${adultSelectionRow(adultSelection)}
               .row .k{color:var(--muted);min-width:11em;flex-shrink:0}
               .row .v{overflow-wrap:anywhere;color:var(--text)}
             </style></head><body>
-            <h1>Crawler Stats</h1>
+            <div class="wrap">
+            ${pageHeader("Crawler Stats")}
             <p>
-              <a class="cfg" href="/">Dashboard</a>
               <a class="cfg" href="/settings/crawler">Crawler settings</a>
             </p>
             <p class="meta">Feed: <span id="live" class="live bad">connecting…</span>
@@ -4356,6 +4371,7 @@ ${adultSelectionRow(adultSelection)}
             </div>
             <div id="banner" class="banner stop">Waiting for the first stats push…</div>
             <div id="tree"></div>
+            </div>
             <script>
             $WEBSOCKET_CLIENT_JS
             (function () {

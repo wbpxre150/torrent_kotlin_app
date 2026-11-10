@@ -123,7 +123,9 @@ class ControlServerTorrentPageTest {
         val second = ControlServer.buildTorrentPage()
         assertEquals(first, second)
         assertTrue(first.contains("new URLSearchParams(location.search).get('hash')"))
-        // Back link degrades to / when there is no history.
-        assertTrue(first.contains("history.length > 1"))
+        // The shared header replaces the old history-based back link.
+        assertTrue(first.contains("<a href=\"/stats\">Crawler stats</a>"))
+        assertTrue(first.contains("<a href=\"/search\">Search</a>"))
+        assertFalse(first.contains("id=\"back\""))
     }
 }
