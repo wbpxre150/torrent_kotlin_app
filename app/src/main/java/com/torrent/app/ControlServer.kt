@@ -1318,11 +1318,15 @@ class ControlServer(
             #maint-progress-bar{height:100%;width:0;background:var(--blue);transition:width .3s ease}
             #maint-progress[hidden],#maint-progress-label[hidden]{display:none}
             #maint-log{max-height:40vh;overflow:auto}
+            #live{width:auto;height:auto;padding:2px 8px;border-radius:10px;font-size:.85em;font-weight:600}
+            #live.on{background:#e6f4ea;color:#137333}
+            #live.wait{background:#fef7e0;color:#7a5900}
+            #live.bad{background:#fce8e6;color:#c5221f}
             </style></head><body>
             <div class="wrap">
             ${pageHeader("DHT crawler")}
             <div id="page-banner">$banner</div>
-            <p class="meta">Feed: <span id="live" class="live bad">connecting…</span></p>
+            <p class="meta">Feed: <span id="live" class="live wait">connecting…</span></p>
             <div class="tabs" role="tablist">
               <button type="button" role="tab" id="tabbtn-backup" data-tab="backup"
                       aria-controls="tab-backup" aria-selected="false">Backup</button>
@@ -1660,7 +1664,7 @@ class ControlServer(
               // One socket, one full-state frame per second. `wsUrl` appends
               // location.search, so a `?token=` page authenticates the upgrade.
               WS.connectSocket('/settings/crawler/ws', {
-                onopen: function () { WS.setLive('ok', 'live'); },
+                onopen: function () { WS.setLive('on', 'live'); },
                 onmessage: function (ev) {
                   var f;
                   try { f = JSON.parse(ev.data); } catch (e) { return; }
@@ -2614,6 +2618,9 @@ ${adultSelectionRow(adultSelection)}
             #live{display:inline-block;width:10px;height:10px;border-radius:50%;background:#c5221f}
             #live.on{background:#188038}
             #live.wait{background:#f9ab00}
+            #live.ok{background:#188038}
+            #live.bad{background:#c5221f}
+            #live.down{background:#c5221f}
             .btn{display:inline-flex;align-items:center;justify-content:center;min-height:44px;min-width:44px;padding:0 18px;font-size:.95rem;font-weight:600;color:#fff;background:var(--blue);border:none;border-radius:22px;cursor:pointer;touch-action:manipulation}
             .btn:hover{background:var(--blue-dark)}
             .btn.secondary{background:var(--chip);color:var(--blue)}

@@ -373,4 +373,34 @@ class ControlServerPanelsThemeTest {
             idle.contains("var lastReconciledApplySeq = false")
         )
     }
+
+    /**
+     * Stage 2: the crawler page's Feed line is the dashboard's chip, not a bare
+     * 10px dot. It must open in the amber "connecting…" state, use the
+     * dashboard's `on`/`bad` vocabulary, and carry the chip override in its own
+     * <style> block (the shared theme only styles the plain dot).
+     */
+    @Test fun crawlerPanel_feedChipMatchesDashboard() {
+        val html = crawlerPanel()
+        assertTrue(
+            "the Feed line must be the dashboard's chip in its initial wait state",
+            html.contains(
+                "<p class=\"meta\">Feed: <span id=\"live\" class=\"live wait\">connecting…</span></p>")
+        )
+        assertTrue(
+            "the crawler page must carry the chip override",
+            html.contains("#live{width:auto;height:auto;")
+        )
+        for (rule in listOf("#live.on{", "#live.wait{", "#live.bad{")) {
+            assertTrue("the crawler page must carry the chip override $rule", html.contains(rule))
+        }
+        assertTrue(
+            "an open socket must use the dashboard's `on` state",
+            html.contains("setLive('on', 'live')")
+        )
+        assertFalse(
+            "the crawler page must not keep the unstyled `ok` state",
+            html.contains("setLive('ok'")
+        )
+    }
 }

@@ -57,4 +57,16 @@ class ControlServerWebuiThemeTest {
         assertFalse(stats.contains("<link "))
         assertFalse(stats.contains("cdn."))
     }
+
+    /**
+     * Stage 2: the base `#live` dot is red, so every state the shared client can
+     * write needs an explicit colour. `ok`/`bad`/`down` are the /stats and
+     * /search vocabularies; the dashboard and the crawler page override the dot
+     * with a text chip of their own.
+     */
+    @Test fun theme_hasLiveChipStateColours() {
+        for (rule in listOf("#live.ok{", "#live.bad{", "#live.down{")) {
+            assertTrue("missing live-chip state rule $rule", css.contains(rule))
+        }
+    }
 }
