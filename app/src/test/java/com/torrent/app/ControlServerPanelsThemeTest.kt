@@ -295,4 +295,82 @@ class ControlServerPanelsThemeTest {
             crawlerPanel().contains("A backup reset is pending")
         )
     }
+
+    /**
+     * Stage 7: the terminal-frame reconcile is keyed on the apply `seq`, not on a
+     * terminal edge. A page loaded while the apply status is *already* terminal
+     * used to seed `lastApplyTerminal = true`, so the false→true transition never
+     * happened for the next apply's terminal frame and the form was never
+     * re-rendered from server config (tester-c6 run 2: no page fetch at the
+     * seq-12 terminal; after a ROLLED_BACK such a page keeps showing the rejected
+     * values).
+     *
+     * The served page JS is not JUnit-executable, so this pins the shape of the
+     * script that is served: the named predicate keeps the decision greppable, so
+     * a revert to an edge trigger cannot pass silently.
+     */
+    @Test fun crawlerPanel_reconcileIsKeyedOnApplySeq() {
+        val html = crawlerPanel()
+        assertTrue(
+            "the page must track the last reconciled apply seq",
+            html.contains("var lastReconciledApplySeq = ")
+        )
+        assertTrue(
+            "the reconcile decision must be the named predicate",
+            html.contains("function applyNeedsReconcile(lastReconciledSeq, a) {")
+        )
+        assertTrue(
+            "the predicate must require a terminal frame with a newer seq",
+            html.contains("return !!a.terminal && a.seq > lastReconciledSeq;")
+        )
+        assertTrue(
+            "the reconcile call must be gated on the predicate",
+            html.contains("if (applyNeedsReconcile(lastReconciledApplySeq, a)) {")
+        )
+        assertTrue(
+            "the tracked seq must advance only when reconciling",
+            html.contains("lastReconciledApplySeq = a.seq;")
+        )
+        // The edge trigger is exactly what skipped the reconcile; it must not return.
+        assertFalse("the terminal edge flag must be gone", html.contains("lastApplyTerminal"))
+        assertFalse(
+            "the terminal edge condition must be gone",
+            html.contains("a.terminal === true) reconcileForm()")
+        )
+        assertFalse("the reconcile must never reload the page", html.contains("location.reload"))
+    }
+
+    /**
+     * Stage 7: the seed is the seq the page was rendered at, for a terminal status
+     * (a page loaded mid-terminal must not treat that apply as unreconciled) and
+     * for a non-terminal one (a fresh page is ready for the first terminal frame).
+     */
+    @Test fun crawlerPanel_reconcileSeedIsTheRenderedApplySeq() {
+        val midTerminal = newServer(
+            crawlerApplyStatus = {
+                CrawlerApplyStatus(
+                    phase = CrawlerApplyPhase.ROLLED_BACK, message = "boom",
+                    seq = 7L, terminal = true)
+            },
+        ).buildCrawlerPanel(null, false, false)
+        assertTrue(
+            "a page rendered mid-terminal must seed the live seq: $midTerminal",
+            midTerminal.contains("var lastReconciledApplySeq = 7;")
+        )
+        assertFalse(
+            "the seed must not be a boolean",
+            midTerminal.contains("var lastReconciledApplySeq = true")
+        )
+        val idle = newServer(
+            crawlerApplyStatus = { CrawlerApplyStatus(seq = 0L, terminal = false) },
+        ).buildCrawlerPanel(null, false, false)
+        assertTrue(
+            "an idle page must seed the live seq",
+            idle.contains("var lastReconciledApplySeq = 0;")
+        )
+        assertFalse(
+            "the seed must not be a boolean",
+            idle.contains("var lastReconciledApplySeq = false")
+        )
+    }
 }

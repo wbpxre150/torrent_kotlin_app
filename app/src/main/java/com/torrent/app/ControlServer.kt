@@ -1496,12 +1496,24 @@ class ControlServer(
               }
               bindCategories();
               // ── live render: one frame carries the full state ─────────────
-              var lastApplyTerminal = ${applyStatus.terminal};
+              // Seeded with the seq this page was rendered at (Stage 7): a page
+              // loaded while an apply is already terminal must not refetch on
+              // load, yet must still reconcile the next apply's terminal frame.
+              var lastReconciledApplySeq = ${applyStatus.seq};
               var lastMaintSig = null;
 
               // A terminal apply means the submitted values may have been rejected
               // or rolled back: re-render the form from server config so the page
               // never shows settings that are not in effect.
+              // Reconcile only when a terminal frame carries a seq newer than the
+              // one this page last reconciled at. Keying on the seq (not on a
+              // terminal edge) means a page loaded while an apply is already
+              // terminal still reconciles the next apply's terminal frame, while
+              // repeated terminal frames at the same seq never re-fetch.
+              function applyNeedsReconcile(lastReconciledSeq, a) {
+                return !!a.terminal && a.seq > lastReconciledSeq;
+              }
+
               function reconcileForm() {
                 fetch(location.pathname + location.search, {credentials: 'same-origin'})
                   .then(function (r) { return r.text(); })
@@ -1532,8 +1544,10 @@ class ControlServer(
                   tail.style.display = lines.length ? '' : 'none';
                   tail.textContent = lines.join('\n');
                 }
-                if (lastApplyTerminal === false && a.terminal === true) reconcileForm();
-                lastApplyTerminal = !!a.terminal;
+                if (applyNeedsReconcile(lastReconciledApplySeq, a)) {
+                  lastReconciledApplySeq = a.seq;
+                  reconcileForm();
+                }
               }
 
               function renderMaint(m) {
