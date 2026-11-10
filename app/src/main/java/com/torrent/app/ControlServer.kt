@@ -1321,7 +1321,7 @@ class ControlServer(
             #live.on{background:#e6f4ea;color:#137333}
             #live.wait{background:#fef7e0;color:#7a5900}
             #live.bad{background:#fce8e6;color:#c5221f}
-            .info{display:inline-block;margin-left:.3em;padding:0 .45em;border:1px solid var(--chip);border-radius:50%;background:var(--card);color:var(--blue);font:inherit;font-size:.8em;line-height:1.4;cursor:pointer;vertical-align:baseline}
+            button.info:not(.btn):not(.chip){display:inline-flex;align-items:center;justify-content:center;width:1.3em;height:1.3em;min-width:0;min-height:0;margin:0 0 0 .35em;padding:0;border:1px solid #dadce0;border-radius:50%;background:var(--card);color:var(--blue);font:inherit;font-size:.72em;font-weight:600;line-height:1;cursor:pointer;vertical-align:middle;touch-action:manipulation}
             .info-text{background:var(--chip);color:var(--text);padding:.5em .8em;border-radius:8px;margin:.4em 0;font-size:.9rem}
             .info-text[hidden]{display:none}
             </style></head><body>
