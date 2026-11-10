@@ -1275,7 +1275,6 @@ class ControlServer(
         val maintenanceSection = buildMaintenanceSection()
         val backupSection = buildBackupSection()
         val dbBackupSection = buildDbBackupSection()
-        val bootstrapSection = buildBootstrapSection()
         // Stage 5: the served page must not contradict the first websocket frame,
         // so every status div starts from the live status instead of a literal.
         val applyStatus = crawlerApplyStatus()
@@ -1338,7 +1337,6 @@ class ControlServer(
             <div id="tab-backup" class="tabpanel" role="tabpanel" aria-labelledby="tabbtn-backup" hidden>
             $backupSection
             $dbBackupSection
-            $bootstrapSection
             </div>
             <div id="tab-settings" class="tabpanel" role="tabpanel" aria-labelledby="tabbtn-settings">
             <form id="settings-form" method="post" action="/settings/crawler">
@@ -1396,7 +1394,7 @@ class ControlServer(
                 <label>Crawler HTTP port (loopback)<input name="crawlerHttpPort" value="${s.crawlerHttpPort}"></label>
                 <label class="row"><input type="checkbox" name="lanDirect" ${checked(s.lanDirect)}> LAN direct (bind 0.0.0.0, no proxy, no auth)</label>
               </fieldset>
-              <fieldset class="card"><legend>Backup &amp; Bootstrap (app-side only; not written to the crawler config)</legend>
+              <fieldset class="card"><legend>Backup</legend>
                 <label class="row"><input type="checkbox" name="uploadEnabled" ${checked(sBackup.uploadEnabled)}> Enable R2 upload</label>
                 <label>R2 endpoint (https://…)<input name="r2Endpoint" value="${esc(sBackup.r2Endpoint)}"></label>
                 <label>R2 bucket<input name="r2Bucket" value="${esc(sBackup.r2Bucket)}"></label>
@@ -1406,8 +1404,6 @@ class ControlServer(
                 <label class="row"><input type="checkbox" name="dbBackupEnabled" ${checked(sBackup.dbBackupEnabled)}> Enable daily DB dump upload (uses the R2 credentials above)</label>
                 <label>R2 DB bucket<input name="r2DbBucket" value="${esc(sBackup.r2DbBucket)}"></label>
                 <label>R2 DB object prefix<input name="r2DbObjectPrefix" value="${esc(sBackup.r2DbObjectPrefix)}"></label>
-                <label class="row"><input type="checkbox" name="bootstrapEnabled" ${checked(sBackup.bootstrapEnabled)}> Enable bootstrap download</label>
-                <label>Bootstrap URL (https://…)<input name="bootstrapUrl" value="${esc(sBackup.bootstrapUrl)}"></label>
               </fieldset>
               <button type="submit" class="btn">Apply</button>
             </form>
@@ -1646,12 +1642,6 @@ class ControlServer(
                 }
                 if (r.lastSuccess !== null && r.lastSuccess !== undefined) rt += ' (last success ' + fmtTime(r.lastSuccess) + ')';
                 setText('db-restore-status', rt);
-                var bs = f.bootstrap || {};
-                var bt = 'Bootstrap: ' + bs.state;
-                if (bs.message) bt += ' \u2014 ' + bs.message;
-                if (bs.startedAt !== null && bs.startedAt !== undefined) bt += ' (started ' + fmtTime(bs.startedAt) + ')';
-                if (bs.finishedAt !== null && bs.finishedAt !== undefined) bt += ' (finished ' + fmtTime(bs.finishedAt) + ')';
-                setText('bootstrap-status', bt);
               }
 
               function render(f) {
@@ -1822,22 +1812,6 @@ class ControlServer(
                     onsubmit="return confirm('Restore the crawler DB from R2 now? This replaces torrents.db and the crawler is stopped while it runs.')">
               <button type="submit" class="btn">Restore now</button></form>
               <div id="db-restore-status" class="meta">${esc(restoreStatusText(rst))}</div>
-            </fieldset>
-        """.trimIndent()
-    }
-
-    /**
-     * The BEP51 bootstrap-cache download card (Stage 5). The downloader itself is
-     * instrumented in Stage 6; until then the frame carries IDLE and this card
-     * renders that honestly rather than inventing progress.
-     */
-    private fun buildBootstrapSection(): String {
-        val st = bootstrapStatus()
-        return """
-            <fieldset class="card"><legend>Bootstrap cache download</legend>
-              <p class="meta">Downloads the BEP51 bootstrap cache from R2 before the crawler starts,
-              when <em>Enable bootstrap download</em> is ticked on the Settings tab.</p>
-              <div id="bootstrap-status" class="meta">${esc(bootstrapStatusText(st))}</div>
             </fieldset>
         """.trimIndent()
     }
@@ -4949,7 +4923,7 @@ ${adultSelectionRow(adultSelection)}
             dbBackupEnabled = form.containsKey("dbBackupEnabled"),
             r2DbBucket = form["r2DbBucket"] ?: current.r2DbBucket,
             r2DbObjectPrefix = form["r2DbObjectPrefix"]?.takeIf { it.isNotEmpty() } ?: current.r2DbObjectPrefix,
-            bootstrapEnabled = form.containsKey("bootstrapEnabled"),
+            bootstrapEnabled = current.bootstrapEnabled,
             bootstrapUrl = form["bootstrapUrl"] ?: current.bootstrapUrl,
         )
     }

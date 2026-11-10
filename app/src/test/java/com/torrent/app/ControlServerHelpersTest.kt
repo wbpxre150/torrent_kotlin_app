@@ -394,11 +394,23 @@ class ControlServerHelpersTest {
         val current = backupSettingsForFormTest()
         val off = ControlServer.backupSettingsFromForm(emptyMap(), current)
         assertFalse(off.uploadEnabled)
-        assertFalse(off.bootstrapEnabled)
         val on = ControlServer.backupSettingsFromForm(
-            mapOf("uploadEnabled" to "", "bootstrapEnabled" to ""), current)
+            mapOf("uploadEnabled" to ""), current)
         assertTrue(on.uploadEnabled)
-        assertTrue(on.bootstrapEnabled)
+    }
+
+    @Test fun backupSettingsFromForm_preservesBootstrapWhenFieldsAbsent() {
+        // The Settings form no longer carries the bootstrap fields, so a save from the
+        // smaller form must never silently disable the boot-time download.
+        val current = backupSettingsForFormTest()
+        val s = ControlServer.backupSettingsFromForm(emptyMap(), current)
+        assertTrue(s.bootstrapEnabled)
+        assertEquals("https://example.com/c.gz", s.bootstrapUrl)
+        // Even a stray stale key must not flip it: the form no longer controls bootstrap.
+        assertTrue(
+            ControlServer.backupSettingsFromForm(mapOf("bootstrapEnabled" to ""), current)
+                .bootstrapEnabled
+        )
     }
 
     @Test fun backupSettingsFromForm_blankObjectKeyKeepsCurrentValue() {

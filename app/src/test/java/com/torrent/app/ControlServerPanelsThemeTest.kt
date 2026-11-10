@@ -161,8 +161,9 @@ class ControlServerPanelsThemeTest {
         for (id in listOf("tab-backup", "tab-settings", "tab-maintenance")) {
             assertTrue("missing panel #$id", html.contains("id=\"$id\""))
         }
-        // The Backup & Bootstrap fieldset must stay inside the Settings form:
-        // moving it would break crawlerSettingsFromForm's category validation.
+        // The Backup fieldset (R2 credentials + daily DB dump) must stay inside the
+        // Settings form: moving it would break crawlerSettingsFromForm's category
+        // validation. Only the bootstrap lines are gone from the UI, not the config.
         val settingsPanel = html.substringAfter("id=\"tab-settings\"", "")
             .substringBefore("id=\"tab-maintenance\"")
         assertTrue(
@@ -170,9 +171,12 @@ class ControlServerPanelsThemeTest {
             settingsPanel.contains("action=\"/settings/crawler\"")
         )
         assertTrue(
-            "the Backup & Bootstrap fieldset must stay in the Settings tab",
-            settingsPanel.contains("Backup &amp; Bootstrap")
+            "the Backup fieldset must stay in the Settings tab",
+            settingsPanel.contains("<legend>Backup</legend>")
         )
+        assertFalse("the bootstrap checkbox must be gone", html.contains("bootstrapEnabled"))
+        assertFalse("the bootstrap card must be gone", html.contains("Bootstrap cache download"))
+        assertFalse("the bootstrap status div must be gone", html.contains("bootstrap-status"))
         assertEquals("no setInterval pollers may remain", 0, occurrences(html, "setInterval("))
         assertEquals(
             "exactly one settings socket",
