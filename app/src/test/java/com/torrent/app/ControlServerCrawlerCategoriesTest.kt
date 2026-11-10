@@ -11,6 +11,7 @@ import com.torrent.app.config.TransmissionSettings
 import com.torrent.app.ftp.FtpStatus
 import com.torrent.app.storage.SafStatus
 import kotlinx.coroutines.flow.MutableStateFlow
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -173,5 +174,33 @@ class ControlServerCrawlerCategoriesTest {
         assertTrue("the ingest-time classifier toggle survives",
             html.contains("name=\"classifierEnabled\""))
         assertTrue("the adult fieldset survives", html.contains("<legend>Adult content handling</legend>"))
+    }
+
+    /**
+     * Stage 4: every bracketed explanation on the crawler page is a ⓘ toggle —
+     * 21 buttons, 21 paired explanation paragraphs that stay in the DOM while
+     * collapsed, and none of the old parenthetical label text left behind.
+     */
+    @Test fun crawlerPanel_explanationsAreInfoIcons() {
+        val html = panel(CrawlerSettings())
+        assertEquals(21, occurrences(html, "class=\"info\""))
+        assertEquals(21, occurrences(html, "aria-expanded=\"false\""))
+        assertEquals(21, occurrences(html, "class=\"info-text\" id=\"info-"))
+        assertTrue(
+            "the toggle must be one delegated listener",
+            html.contains("document.addEventListener('click'")
+        )
+        // spot pairs: a legend, a numeric range, and a credential hint
+        assertTrue(html.contains(">Bloom filters <button"))
+        assertTrue(html.contains("changing these invalidates the persisted filters"))
+        assertTrue(html.contains("id=\"info-btn-tree-count\""))
+        assertTrue(html.contains("id=\"info-tree-count\" hidden"))
+        // the bracketed forms are gone
+        assertFalse(html.contains("Tree count (1..64)"))
+        assertFalse(html.contains("Bloom filters ("))
+        assertFalse(html.contains("Nice level ("))
+        // the non-bracketed legends are untouched
+        assertTrue(html.contains("<legend>Categories to save</legend>"))
+        assertTrue(html.contains("<legend>Adult content handling</legend>"))
     }
 }

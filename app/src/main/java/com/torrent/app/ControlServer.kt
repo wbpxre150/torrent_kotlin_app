@@ -1321,6 +1321,9 @@ class ControlServer(
             #live.on{background:#e6f4ea;color:#137333}
             #live.wait{background:#fef7e0;color:#7a5900}
             #live.bad{background:#fce8e6;color:#c5221f}
+            .info{display:inline-block;margin-left:.3em;padding:0 .45em;border:1px solid var(--chip);border-radius:50%;background:var(--card);color:var(--blue);font:inherit;font-size:.8em;line-height:1.4;cursor:pointer;vertical-align:baseline}
+            .info-text{background:var(--chip);color:var(--text);padding:.5em .8em;border-radius:8px;margin:.4em 0;font-size:.9rem}
+            .info-text[hidden]{display:none}
             </style></head><body>
             <div class="wrap">
             ${pageHeader("DHT crawler")}
@@ -1341,14 +1344,18 @@ class ControlServer(
             <div id="tab-settings" class="tabpanel" role="tabpanel" aria-labelledby="tabbtn-settings">
             <form id="settings-form" method="post" action="/settings/crawler">
               <fieldset class="card"><legend>General</legend>
-                <label class="row"><input type="checkbox" name="enabled" ${checked(s.enabled)}> Enabled (start with the service)</label>
-                <label class="row"><input type="checkbox" name="wifiOnly" ${checked(s.wifiOnly)}> WiFi only (pause when wifi is down)</label>
+                <label class="row"><input type="checkbox" name="enabled" ${checked(s.enabled)}> ${infoBtn("Enabled", "enabled")}</label>
+                ${infoText("enabled", "start with the service")}
+                <label class="row"><input type="checkbox" name="wifiOnly" ${checked(s.wifiOnly)}> ${infoBtn("WiFi only", "wifi-only")}</label>
+                ${infoText("wifi-only", "pause when wifi is down")}
                 <label>Log level<select name="logLevel">$levelOptions</select></label>
                 <label>DHT port<input name="dhtPort" value="${s.dhtPort}"></label>
-                <label>Nice level (-20..19)<input name="niceLevel" value="${s.niceLevel}"></label>
+                <label>${infoBtn("Nice level", "nice-level")}<input name="niceLevel" value="${s.niceLevel}"></label>
+                ${infoText("nice-level", "-20..19")}
               </fieldset>
               <fieldset class="card"><legend>Resources</legend>
-                <label>Tree count (1..64)<input id="numTrees" name="numTrees" value="${s.numTrees}"></label>
+                <label>${infoBtn("Tree count", "tree-count")}<input id="numTrees" name="numTrees" value="${s.numTrees}"></label>
+                ${infoText("tree-count", "1..64")}
                 <label>Find-node workers<input id="treeFindNodeWorkers" name="treeFindNodeWorkers" value="${s.treeFindNodeWorkers}"></label>
                 <label>BEP51 workers<input id="treeBep51Workers" name="treeBep51Workers" value="${s.treeBep51Workers}"></label>
                 <label>Get-peers workers<input id="treeGetPeersWorkers" name="treeGetPeersWorkers" value="${s.treeGetPeersWorkers}"></label>
@@ -1358,7 +1365,8 @@ class ControlServer(
                 <p class="meta">Estimated worker threads: <span id="est-threads"></span><span id="est-warn" style="display:none;color:#c5221f"> — above ${CrawlerKeys.THREAD_WARN_THRESHOLD}; the default config uses ~1216</span></p>
               </fieldset>
               <fieldset class="card"><legend>Filters</legend>
-                <label>Non-Latin language threshold (0..100)<input name="languageFilterNonLatinThreshold" value="${s.languageFilterNonLatinThreshold}"></label>
+                <label>${infoBtn("Non-Latin language threshold", "nonlatin-threshold")}<input name="languageFilterNonLatinThreshold" value="${s.languageFilterNonLatinThreshold}"></label>
+                ${infoText("nonlatin-threshold", "0..100")}
               </fieldset>
               <fieldset class="card"><legend>Categories to save</legend>
                 <p class="meta"><strong>Checked categories are saved</strong> to the database;
@@ -1373,35 +1381,47 @@ class ControlServer(
                 </div>
               </fieldset>
               <fieldset class="card"><legend>Adult content handling</legend>
-                <label class="row"><input type="checkbox" name="classifierEnabled" ${checked(s.classifierEnabled)}> Ingest-time classifier (on by default)</label>
+                <label class="row"><input type="checkbox" name="classifierEnabled" ${checked(s.classifierEnabled)}> ${infoBtn("Ingest-time classifier", "classifier")}</label>
+                ${infoText("classifier", "on by default")}
                 <label>Adult mode<select name="adultMode">$adultModeOptions</select></label>
-                <label>Adult hide threshold (0..1)<input type="number" step="any" name="adultHideThreshold" value="${s.adultHideThreshold}"></label>
+                <label>${infoBtn("Adult hide threshold", "adult-hide-threshold")}<input type="number" step="any" name="adultHideThreshold" value="${s.adultHideThreshold}"></label>
+                ${infoText("adult-hide-threshold", "0..1")}
                 <p class="meta">The hard-block list (<code>hard_block.txt</code>) always drops matching names. <em>tag</em> stores
                 adult rows (hidden at or above the hide threshold); <em>drop</em> discards every adult-tagged row, i.e.
                 everything at or above the hide threshold.</p>
               </fieldset>
-              <fieldset class="card"><legend>Bloom filters (changing these invalidates the persisted filters)</legend>
+              <fieldset class="card"><legend>${infoBtn("Bloom filters", "bloom-filters")}</legend>
+                ${infoText("bloom-filters", "changing these invalidates the persisted filters")}
                 <label>Bloom capacity<input name="bloomCapacity" value="${s.bloomCapacity}"></label>
                 <label>Failure bloom capacity<input name="failureBloomCapacity" value="${s.failureBloomCapacity}"></label>
-                <label>Bloom error rate (0..1)<input name="bloomErrorRate" value="${s.bloomErrorRate}"></label>
+                <label>${infoBtn("Bloom error rate", "bloom-error-rate")}<input name="bloomErrorRate" value="${s.bloomErrorRate}"></label>
+                ${infoText("bloom-error-rate", "0..1")}
               </fieldset>
-              <fieldset class="card"><legend>Advanced overrides (key=value, one per line)</legend>
+              <fieldset class="card"><legend>${infoBtn("Advanced overrides", "advanced-overrides")}</legend>
+                ${infoText("advanced-overrides", "key=value, one per line")}
                 <textarea name="advancedOverrides" rows="6" placeholder="# key=value">${esc(s.advancedOverrides)}</textarea>
                 <p class="meta">Path and backup keys are not allowed; form-managed keys must use the fields above.</p>
               </fieldset>
               <fieldset class="card"><legend>Access</legend>
-                <label>Proxy port (LAN, authenticated)<input name="proxyPort" value="${s.proxyPort}"></label>
-                <label>Crawler HTTP port (loopback)<input name="crawlerHttpPort" value="${s.crawlerHttpPort}"></label>
-                <label class="row"><input type="checkbox" name="lanDirect" ${checked(s.lanDirect)}> LAN direct (bind 0.0.0.0, no proxy, no auth)</label>
+                <label>${infoBtn("Proxy port", "proxy-port")}<input name="proxyPort" value="${s.proxyPort}"></label>
+                ${infoText("proxy-port", "LAN, authenticated")}
+                <label>${infoBtn("Crawler HTTP port", "crawler-http-port")}<input name="crawlerHttpPort" value="${s.crawlerHttpPort}"></label>
+                ${infoText("crawler-http-port", "loopback")}
+                <label class="row"><input type="checkbox" name="lanDirect" ${checked(s.lanDirect)}> ${infoBtn("LAN direct", "lan-direct")}</label>
+                ${infoText("lan-direct", "bind 0.0.0.0, no proxy, no auth")}
               </fieldset>
-              <fieldset class="card"><legend>Backup</legend>
+              <fieldset class="card"><legend>${infoBtn("Backup", "backup")}</legend>
+                ${infoText("backup", "app-side only; not written to the crawler config")}
                 <label class="row"><input type="checkbox" name="uploadEnabled" ${checked(sBackup.uploadEnabled)}> Enable R2 upload</label>
-                <label>R2 endpoint (https://…)<input name="r2Endpoint" value="${esc(sBackup.r2Endpoint)}"></label>
+                <label>${infoBtn("R2 endpoint", "r2-endpoint")}<input name="r2Endpoint" value="${esc(sBackup.r2Endpoint)}"></label>
+                ${infoText("r2-endpoint", "https://…")}
                 <label>R2 bucket<input name="r2Bucket" value="${esc(sBackup.r2Bucket)}"></label>
                 <label>R2 object key<input name="r2ObjectKey" value="${esc(sBackup.r2ObjectKey)}"></label>
                 <label>R2 access key ID<input name="r2AccessKeyId" value="${esc(sBackup.r2AccessKeyId)}"></label>
-                <label>R2 secret access key (leave blank to keep)<input type="password" name="r2SecretAccessKey" placeholder="unchanged"></label>
-                <label class="row"><input type="checkbox" name="dbBackupEnabled" ${checked(sBackup.dbBackupEnabled)}> Enable daily DB dump upload (uses the R2 credentials above)</label>
+                <label>${infoBtn("R2 secret access key", "r2-secret")}<input type="password" name="r2SecretAccessKey" placeholder="unchanged"></label>
+                ${infoText("r2-secret", "leave blank to keep")}
+                <label class="row"><input type="checkbox" name="dbBackupEnabled" ${checked(sBackup.dbBackupEnabled)}> ${infoBtn("Enable daily DB dump upload", "db-dump-upload")}</label>
+                ${infoText("db-dump-upload", "uses the R2 credentials above")}
                 <label>R2 DB bucket<input name="r2DbBucket" value="${esc(sBackup.r2DbBucket)}"></label>
                 <label>R2 DB object prefix<input name="r2DbObjectPrefix" value="${esc(sBackup.r2DbObjectPrefix)}"></label>
               </fieldset>
@@ -1435,6 +1455,23 @@ class ControlServer(
                 if (cls !== undefined) n.className = cls;
               }
               // ── tabs: hash-switched, no navigation, no reload ─────────────
+              // Stage 4: one delegated click listener for the ⓘ toggles — delegation,
+              // not per-button binding, is what keeps them working after
+              // reconcileForm() swaps the settings form's innerHTML.
+              document.addEventListener('click', function (e) {
+                var b = e.target;
+                while (b && b !== document && !(b.tagName === 'BUTTON' && b.classList.contains('info'))) b = b.parentNode;
+                if (!b || b === document) return;
+                var p = document.getElementById(b.getAttribute('aria-controls') || '');
+                if (!p) return;
+                if (b.getAttribute('aria-expanded') === 'true') {
+                  b.setAttribute('aria-expanded', 'false');
+                  p.setAttribute('hidden', '');
+                } else {
+                  b.setAttribute('aria-expanded', 'true');
+                  p.removeAttribute('hidden');
+                }
+              });
               var tabButtons = Array.prototype.slice.call(document.querySelectorAll('.tabs button'));
               function showTab(name) {
                 for (var i = 0; i < tabButtons.length; i++) {
@@ -1702,7 +1739,8 @@ class ControlServer(
             """.trimIndent()
         }
         return """
-            <fieldset class="card"><legend>Maintenance (one at a time; crawler stopped while running)</legend>
+            <fieldset class="card"><legend>${infoBtn("Maintenance", "maintenance")}</legend>
+              ${infoText("maintenance", "one at a time; crawler stopped while running")}
               <p class="meta">Runs <code>libdhtcrawler.so &lt;flag&gt;</code> as a one-shot in the crawler
               work dir. recover-database needs ~DB size of free internal space. The supervised
               crawler is stopped first and restarted afterwards if enabled (and wifi is up).</p>
@@ -1740,13 +1778,34 @@ class ControlServer(
             "Bench the movie-kind encoder over the database rows (read-only)"
     }
 
+    /**
+     * Stage 4: a caption (field label or legend) followed by its ⓘ toggle button.
+     *
+     * The button is `type="button"` so a click inside the settings form can never
+     * submit it, and a `<button>` is an interactive descendant, so it does not
+     * activate the `<label>` it sits in. The explanation is emitted by [infoText]
+     * as the caption's sibling.
+     */
+    private fun infoBtn(label: String, key: String): String =
+        "$label <button type=\"button\" class=\"info\" id=\"info-btn-$key\"" +
+            " aria-expanded=\"false\" aria-controls=\"info-$key\" title=\"More info\">&#9432;</button>"
+
+    /**
+     * Stage 4: the explanation paired with [infoBtn]'s button. It is a sibling of
+     * the label/legend — never a child, since `<p>` is flow content — and it stays
+     * in the DOM while collapsed (`hidden`), so no text is injected on click.
+     */
+    private fun infoText(key: String, text: String): String =
+        "<p class=\"info-text\" id=\"info-$key\" hidden>$text</p>"
+
     /** The BEP51 cache backup section on the crawler panel (Stage 4). */
     private fun buildBackupSection(): String {
         val st = crawlerBackupStatus()
         val enabledNote = if (st.uploadEnabled) "" else
             "<p class=\"warn\">R2 upload is disabled — tick <em>Enable R2 upload</em> above and apply first.</p>"
         return """
-            <fieldset class="card"><legend>Cache backup (upload the crawler's BEP51 bootstrap cache to R2)</legend>
+            <fieldset class="card"><legend>${infoBtn("Cache backup", "cache-backup")}</legend>
+              ${infoText("cache-backup", "upload the crawler's BEP51 bootstrap cache to R2")}
               <p class="meta">Uploads <code>bep51_cache.dat</code> (validated + gzip-compressed) to the R2
               object key above — at most once per day, on Wi-Fi, and only when no apply/maintenance
               job is running. <em>Upload now</em> bypasses the daily gate only.</p>
@@ -1782,7 +1841,8 @@ class ControlServer(
                 <button type="submit" class="btn">Reset backup from zero</button></form>
         """.trimIndent()
         return """
-            <fieldset class="card"><legend>DB backup (upload the crawler's incremental SQLite dump to the R2 DB bucket)</legend>
+            <fieldset class="card"><legend>${infoBtn("DB backup", "db-backup")}</legend>
+              ${infoText("db-backup", "upload the crawler's incremental SQLite dump to the R2 DB bucket")}
               <p class="meta">Dumps new torrents (<code>torrents.db</code>) as gzip-compressed SQL to
               <code>&lt;db-prefix&gt;/incremental_&lt;date&gt;_&lt;start&gt;-&lt;end&gt;.sql.gz</code> — at most once per day, on
               Wi-Fi, and only when no apply/maintenance job is running. The upload bookmark advances only
@@ -1800,7 +1860,8 @@ class ControlServer(
               $resetPendingNote
               $resetForm
             </fieldset>
-            <fieldset class="card"><legend>DB restore (stream the R2 dump chain into a fresh database)</legend>
+            <fieldset class="card"><legend>${infoBtn("DB restore", "db-restore")}</legend>
+              ${infoText("db-restore", "stream the R2 dump chain into a fresh database")}
               <p class="meta">Stops the crawler, then streams every dump object in the DB bucket
               (in chain order) from R2 and imports it into a fresh <code>torrents.db</code> — one
               transaction per chunk, so the import is resumable per chunk and memory stays flat

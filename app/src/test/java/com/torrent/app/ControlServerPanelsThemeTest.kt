@@ -172,7 +172,7 @@ class ControlServerPanelsThemeTest {
         )
         assertTrue(
             "the Backup fieldset must stay in the Settings tab",
-            settingsPanel.contains("<legend>Backup</legend>")
+            settingsPanel.contains("<legend>Backup <button")
         )
         assertFalse("the bootstrap checkbox must be gone", html.contains("bootstrapEnabled"))
         assertFalse("the bootstrap card must be gone", html.contains("Bootstrap cache download"))
