@@ -114,7 +114,7 @@ prefix is required by the packaging step — they are **exec'd as PIE binaries, 
 | Output | Source | Built by | Role |
 |---|---|---|---|
 | `libtransmissiond.so` | transmission **4.1.2** tarball + `src/main/cpp/transmission-fork/` | `buildTransmission` → `apply_fork.py` → CMake/NDK | BitTorrent daemon; disk I/O routed to SAF gateway via `/saf/usb` sentinel path |
-| `libdhtcrawler.so` | vendored `src/main/cpp/dht_crawler/` | `buildDhtCrawler` → `prepareDhtCrawlerSrc` (copy + 3 patches) → CMake | DHT keyspace crawler; SQLite DB; civetweb HTTP API; bloom-filter dedup |
+| `libdhtcrawler.so` | vendored `src/main/cpp/dht_crawler/` | `buildDhtCrawler` → `prepareDhtCrawlerSrc` (copy + 15 patches) → CMake | DHT keyspace crawler; SQLite DB; civetweb HTTP API; bloom-filter dedup |
 | `libftpserver.so` | `src/main/cpp/ftp-server/` (C11) | `buildFtpServer` → CMake/NDK | FTP server for media clients; posix or SAF backend (SAF talks to `SafIpcServer`) |
 
 **Task graph:** `buildMbedtls` (mbedTLS **3.6.6**) → `buildCurl` (curl **8.20.0**) → `buildTransmission`;
@@ -123,26 +123,51 @@ prefix is required by the packaging step — they are **exec'd as PIE binaries, 
 sha256 `34bd70e229bf0439575b7865e986209d23584bd35274d95c256f9ccf398ab46a`) → `buildLlama` →
 `buildDhtCrawler`;
 `buildFtpServer` (leaf). `copyDhtCrawlerAssets` copies the crawler's keyword files and both model
-generations (~179 MB, ~6 s) into
+generations (~504 MiB, ~6 s) into
 `build/generated/assets/dht_crawler/` (wired into merge assets). `afterEvaluate` makes
 `mergeDebugJniLibFolders` depend on all three build tasks. `-PdhtCrawlerSrc=<path>` overrides the
 crawler source root. Native build inputs/outputs land under `app/build/native/`.
 
-**Movie-kind classifier (v9).** The crawler links a CPU-only llama.cpp (`buildLlama`) and the vendored
+**Movie-kind classifier (v10).** The crawler links a CPU-only llama.cpp (`buildLlama`) and the vendored
 `dht_crawler-android/utf8proc/` (**2.12.0**); the NDK wrapper defines `MK_ENABLED` and
 `MK_NFC_ENABLED` only when `LLAMA_INSTALL` is set, so a plain host configure stays plain C99. Two
 model generations ship side by side: `models/v6` (fastText, pinned by `classifier_model_dir`) and
-`models/v9` (JEV backbone Q8_0 + head, pinned by `movie_kind_model_dir`). `ensureAssets` stages both,
-the sweep keeps the active *set* `{v6, v9}` and removes retired dirs, and `.assets_version` is
-`<versionCode>|models/v6|models/v9` — a stamp change is what triggers restaging, no versionCode bump.
+`models/v10` (Qwen3.5-0.8B nemotron arm decoder — Q4_0 backbone 501,452,416 B / 478.2 MiB, sha256
+`02555750…`, plus the JEVH head 65,712 B, 1024×16, sha256 `077aaf11…`, hidden 1024 — pinned by
+`movie_kind_model_dir`). `ensureAssets` stages both, the sweep keeps the active *set* `{v6, v10}` and
+removes retired dirs, and `.assets_version` is `<versionCode>|models/v6|models/v10` — a stamp change is
+what triggers restaging, no versionCode bump required; the staged models total 528,149,134 B (~504 MiB)
+and the debug APK measures 541,786,478 B at `versionCode` 2 / `versionName` "0.2.0".
+Pooling is last-token: `src/movie_kind.c` sets `context_params.pooling_type = LLAMA_POOLING_TYPE_LAST`,
+the read stays `llama_get_embeddings_seq(ctx, 0)`, and `embd_normalize` is not set — at the llama.cpp
+pin the pooled vector comes back unnormalised, which is what the v10 head was fitted on. v9 shipped the
+CLS/`llama_get_embeddings()` pairing, whose P0 (one constant mask on every name) was invisible to host
+tests, review and `/stats`, so the on-device mask-parity spot check is mandatory before any production
+write is trusted.
+Classification happens inline at ingest: `movie_kind_classify()` is called in
+`tree_metadata_worker_func` between the survivor classification block and the adult drop — outside
+`db->mutex` and outside `batch_writer_add` — for movie category + `adult = 0` + `movie_kind_enabled()`
+rows only. The verdict rides `torrent_metadata_t` (`movie_kind_mask`, `has_movie_kind`,
+`movie_kind_clf_ver`) into the 14-column `torrent_class` INSERT, stamped `movie_kind_clf_ver` = 10; a
+classify failure stores the row unlabelled (both columns NULL) and is non-fatal. The backfill daemon is
+**not** started in production — only the `movie_backfill_daemon_start` call in `src/main.c` was removed,
+while `request_shutdown`/`destroy` stay and are no-op-safe when never started; the engine,
+`--movie-kind-backfill`, `--reset`, `--movie-kind-bench`, the tests and the `/stats
+movie_kind_backfill` block stay compiled, so that block reads `idle`/disabled permanently and the
+dashboard panel is left as-is on purpose.
 `/stats` carries `movie_kind` (enabled/status/rows/model shas) and `movie_kind_backfill`
 (state/rows_processed/rows_total/failures/thermal_pauses) beside the unchanged fastText
 `classifier`/`classifier_backfill`. The `movie-kind-bench` maintenance action runs
 `--movie-kind-bench data/torrents.db` (every maintenance action stops the supervised crawler first);
-the reset one-shot is `--movie-kind-backfill <db> --reset` with the app force-stopped.
+the reset one-shot is `--movie-kind-backfill <db> --reset` with the app force-stopped. G6 bars are
+median ≤ 300 ms, p95 ≤ 600 ms, peak RSS ≤ 1.2 GiB and the 478.2 MiB backbone file — the on-device bench
+has not been run yet, so no measured figure is quoted here.
 
-**dht_crawler patches (order is fixed, applied by `prepareDhtCrawlerSrc`):** `bencode-cap-fix.patch` →
-`bencode-init-fix.patch` → `civetweb-stop-flag-atomic.patch`. Upstream fixes belong in `patches/`.
+**dht_crawler patches (order is fixed, applied by `prepareDhtCrawlerSrc`):** the 15-entry list in
+`app/build.gradle.kts` opens with the three upstream fixes — `bencode-cap-fix.patch` →
+`bencode-init-fix.patch` → `civetweb-stop-flag-atomic.patch` — and closes with
+`movie-kind-v10-streaming.patch` (last-token pooling + inline ingest classification); new patches go
+LAST. Upstream fixes belong in `patches/`.
 See the vendored repo's `CLAUDE.md` for its architecture (thread trees, bloom filters, schema).
 
 ## Tests
