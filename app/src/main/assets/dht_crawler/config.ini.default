@@ -80,13 +80,13 @@ adult_hide_threshold=0.891912
 hard_block_file=hard_block.txt
 
 # ==== Movie-Kind Classifier & Backfill ====
-# Movie-kind JEVH classifier (models/v9): a llama.cpp Q8_0 backbone plus a linear
-# head, gated by models/v9/manifest.json (which pins both binaries' byte size and
+# Movie-kind JEVH classifier (models/v10): a llama.cpp Q4_0 backbone plus a linear
+# head, gated by models/v10/manifest.json (which pins both binaries' byte size and
 # sha256). The app stages the model dir and pins movie_kind_model_dir; the other
 # keys are settable from the advanced textarea. movie_kind_enabled = 0 stops new
 # backfill passes and leaves the database valid (its columns are additive).
 movie_kind_enabled = 1
-movie_kind_model_dir = models/v9
+movie_kind_model_dir = models/v10
 # Encoder threads (clamped 1..8 by the crawler).
 movie_kind_threads = 4
 # Pause the backfill between batches at or above this CPU temperature (Celsius).

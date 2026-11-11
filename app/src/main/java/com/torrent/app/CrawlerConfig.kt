@@ -17,9 +17,9 @@ import java.nio.file.StandardOpenOption
 /**
  * Owns the dht_crawler's working dir under internal storage: `filesDir/crawler/`
  * (contains `config.ini`, `data/`, the keyword files, `models/v6/` with the
- * fastText classifier model files, and `models/v9/` with the movie-kind JEVH
- * backbone + head). Stage 09 (internal storage only); the crawler process
- * itself is started by a later supervisor step.
+ * fastText classifier model files, and `models/v10/` with the movie-kind JEVH
+ * backbone (Q4_0, hidden 1024) + head). Stage 09 (internal storage only); the
+ * crawler process itself is started by a later supervisor step.
  */
 class CrawlerConfig(
     private val context: Context,
@@ -51,7 +51,7 @@ class CrawlerConfig(
      * Copies the keyword files from `assets/dht_crawler/` into [workDir], the
      * fastText classifier files from `assets/dht_crawler/models/v6/` into
      * [modelsDir], and the movie-kind JEVH files from
-     * `assets/dht_crawler/models/v9/` into [movieModelsDir], when missing or when
+     * `assets/dht_crawler/models/v10/` into [movieModelsDir], when missing or when
      * the `"<versionCode>|<MODELS_SUBDIR>|<MOVIE_MODEL_SUBDIR>"` `.assets_version`
      * stamp differs — so a model-dir bump re-stages even at an unchanged version
      * code. Every call also sweeps `models/` for other generations
@@ -239,7 +239,7 @@ class CrawlerConfig(
         const val MODELS_SUBDIR = "models/v6"
 
         /** Movie-kind model dir, work-dir relative (mirrors `movie_kind_model_dir`). */
-        const val MOVIE_MODEL_SUBDIR = "models/v9"
+        const val MOVIE_MODEL_SUBDIR = "models/v10"
 
         /**
          * A classifier model generation dir name: `v` followed by digits (`v3`, `v4`, …).
@@ -297,13 +297,14 @@ class CrawlerConfig(
         val MODEL_FILES = listOf("adult.ftz", "category.ftz", "tv_kind.ftz", "manifest.json")
 
         /**
-         * Movie-kind assets shipped under `assets/dht_crawler/models/v9/` and staged
-         * into `workDir/models/v9/`, where the crawler resolves them via the pinned
+         * Movie-kind assets shipped under `assets/dht_crawler/models/v10/` and staged
+         * into `workDir/models/v10/`, where the crawler resolves them via the pinned
          * `movie_kind_model_dir`. The manifest pins both binaries' size + sha256; the
-         * `.gguf` is the Q8_0 backbone, the `.bin` the JEVH head.
+         * `.gguf` is the Q4_0 backbone (hidden 1024, last-token pooling), the `.bin`
+         * the JEVH head.
          */
         val MOVIE_MODEL_FILES = listOf(
-            "manifest.json", "movie_kind_backbone_Q8_0.gguf", "movie_kind_head.bin"
+            "manifest.json", "movie_kind_backbone_Q4_0.gguf", "movie_kind_head.bin"
         )
 
         /** Buffer size for the binary-safe asset copy (streamed, never decoded). */

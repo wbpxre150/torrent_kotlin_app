@@ -15,8 +15,8 @@ android {
         applicationId = "com.torrent.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
     }
 
     buildTypes {
@@ -51,6 +51,15 @@ android {
             // failure / bad-gateway paths); return defaults instead of throwing
             // "not mocked" in JVM unit tests.
             isReturnDefaultValues = true
+            // Robolectric stages ~660 MB of model assets per EnsureLayoutTest case into
+            // java.io.tmpdir; on this build host /tmp is a small, shared, quota'd tmpfs
+            // ("Disk quota exceeded" with the 478 MiB movie-kind backbone). Keep that
+            // churn on the build volume instead.
+            all {
+                val unitTestTmp = project.layout.buildDirectory.dir("tmp/unit-tests").get().asFile
+                unitTestTmp.mkdirs()
+                it.systemProperty("java.io.tmpdir", unitTestTmp.absolutePath)
+            }
         }
     }
 
@@ -583,11 +592,11 @@ tasks.register<Copy>("copyDhtCrawlerAssets") {
     // conversion), so a plain copy is correct here. The include list is explicit on
     // purpose: `v*/**` would ship the retired v4 generation too.
     // `into("models")` is relative to the task destination above, giving the asset
-    // paths dht_crawler/models/v6/<file> and dht_crawler/models/v9/<file> (overriding
+    // paths dht_crawler/models/v6/<file> and dht_crawler/models/v10/<file> (overriding)
     // the crawler's compiled-in default dirs).
     val modelSrc = file("src/main/cpp/dht_crawler-android/models")
     from(modelSrc) {
-        include("v6/**", "v9/**")
+        include("v6/**", "v10/**")
         into("models")
     }
     into(file("build/generated/assets/dht_crawler/dht_crawler"))

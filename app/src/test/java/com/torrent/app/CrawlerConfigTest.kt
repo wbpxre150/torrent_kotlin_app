@@ -261,9 +261,9 @@ class CrawlerConfigTest {
         // must not be rendered at all (the crawler ignores it as unknown).
         assertNull(ini["adult_drop_threshold"])
         assertEquals("hard_block.txt", ini["hard_block_file"])
-        // Stage D movie-kind classifier (models/v9): storage-only, no form field.
+        // Stage D movie-kind classifier (models/v10): storage-only, no form field.
         assertEquals("1", ini["movie_kind_enabled"])
-        assertEquals("models/v9", ini["movie_kind_model_dir"])
+        assertEquals("models/v10", ini["movie_kind_model_dir"])
         assertEquals("4", ini["movie_kind_threads"])
         assertEquals("82", ini["movie_kind_thermal_backoff_c"])
         assertNull(ini["backup_path"])
@@ -396,14 +396,15 @@ class CrawlerConfigTest {
                 assertTrue("$name must be staged into ${cfg.movieModelsDir}", staged.isFile)
                 assertEquals("$name size must match the asset", source.length(), staged.length())
                 assertEquals("$name staged hash", sha256Hex(source), sha256Hex(staged))
-                assertArrayEquals(
-                    "$name must be copied byte-for-byte", source.readBytes(), staged.readBytes()
+                assertTrue(
+                    "$name must be copied byte-for-byte",
+                    sameBytes(source, staged)
                 )
             }
             // The manifest pins both binaries (size + sha256); assert the STAGED bytes
             // against it, so a swapped or corrupted model fails here, not on device.
             val backbone = manifest.getJSONObject("backbone")
-            assertEquals("Q8_0", backbone.getString("quant"))
+            assertEquals("Q4_0", backbone.getString("quant"))
             val stagedBackbone = File(cfg.movieModelsDir, backbone.getString("file"))
             assertEquals(backbone.getLong("bytes"), stagedBackbone.length())
             assertEquals(backbone.getString("sha256"), sha256Hex(stagedBackbone))
@@ -557,8 +558,8 @@ class CrawlerConfigTest {
         /** Checked-in model assets (read-only source of truth for the staging tests). */
         private val MODEL_SRC_DIR = File("src/main/cpp/dht_crawler-android/models/v6")
 
-        /** Checked-in movie-kind (JEVH) assets — the v9 generation's source of truth. */
-        private val MOVIE_MODEL_SRC_DIR = File("src/main/cpp/dht_crawler-android/models/v9")
+        /** Checked-in movie-kind (JEVH) assets — the v10 generation's source of truth. */
+        private val MOVIE_MODEL_SRC_DIR = File("src/main/cpp/dht_crawler-android/models/v10")
 
         /** Mirrors `CrawlerConfig.currentVersionCode()`, which is private to the class. */
         private fun crawlerVersionCode(): Long {
@@ -573,7 +574,7 @@ class CrawlerConfigTest {
         }
 
         /**
-         * Mirrors `assets/dht_crawler/models/v6/` and `.../v9/` into the asset fixture with
+         * Mirrors `assets/dht_crawler/models/v6/` and `.../v10/` into the asset fixture with
          * the real checked-in model files, so byte fidelity is asserted against real
          * binaries.
          */
@@ -591,9 +592,44 @@ class CrawlerConfigTest {
             }
         }
 
-        private fun sha256Hex(file: File): String =
-            MessageDigest.getInstance("SHA-256").digest(file.readBytes())
-                .joinToString("") { "%02x".format(it) }
+        /**
+         * SHA-256 of [file], streamed in 64 KiB chunks: the movie-kind backbone is
+         * ~478 MiB, so a whole-file `readBytes()` would blow the unit-test heap.
+         */
+        private fun sha256Hex(file: File): String {
+            val digest = MessageDigest.getInstance("SHA-256")
+            val buffer = ByteArray(64 * 1024)
+            file.inputStream().use { input ->
+                while (true) {
+                    val n = input.read(buffer)
+                    if (n < 0) break
+                    digest.update(buffer, 0, n)
+                }
+            }
+            return digest.digest().joinToString("") { "%02x".format(it) }
+        }
+
+        /**
+         * True when [a] and [b] hold identical bytes, compared in 64 KiB chunks: the
+         * movie-kind backbone is ~478 MiB, so `readBytes()` on both sides would blow
+         * the unit-test heap.
+         */
+        private fun sameBytes(a: File, b: File): Boolean {
+            if (a.length() != b.length()) return false
+            val bufA = ByteArray(64 * 1024)
+            val bufB = ByteArray(64 * 1024)
+            a.inputStream().use { ia ->
+                b.inputStream().use { ib ->
+                    while (true) {
+                        val na = ia.read(bufA)
+                        val nb = ib.read(bufB)
+                        if (na != nb) return false
+                        if (na <= 0) return true
+                        if (!java.util.Arrays.equals(bufA, 0, na, bufB, 0, nb)) return false
+                    }
+                }
+            }
+        }
 
         @Test fun renderManaged_setsFormKeysInPlaceAndKeepsComments() {
             val cfg = configWithRealDefaultAsset()
