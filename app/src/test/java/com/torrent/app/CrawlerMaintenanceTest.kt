@@ -204,7 +204,7 @@ class CrawlerMaintenanceTest {
         assertEquals(0, ex.submitted.get())
     }
 
-    @Test fun withProgress_mergesOnlyTheProgressFields() {
+    @Test fun withProgress_mergesTheProgressFieldsAndKeepsTheExtras() {
         val before = MaintenanceStatus(
             action = MaintenanceAction.REBUILD_BLOOM_FILTER,
             running = true,
@@ -215,7 +215,9 @@ class CrawlerMaintenanceTest {
             message = "running --rebuild-bloom-filter",
         )
         val after = before.withProgress(
-            MaintenanceProgress("rebuild-bloom-filter", "scan", done = 10, total = 40, percent = 25)
+            MaintenanceProgress(
+                "rebuild-bloom-filter", "scan", done = 10, total = 40, percent = 25,
+                extras = mapOf("rc" to "0"))
         )
         assertEquals("scan", after.phase)
         assertEquals(25, after.percent)
@@ -227,6 +229,40 @@ class CrawlerMaintenanceTest {
         assertEquals(before.lines, after.lines)
         assertEquals(1_000L, after.startedAt)
         assertEquals(before.message, after.message)
+        // The line's other k=v pairs are kept instead of dropped.
+        assertEquals(mapOf("rc" to "0"), after.extras)
+    }
+
+    @Test fun withProgress_terminalLineFoldsAllFiveCountersIntoTheMessage() {
+        // The exact terminal line main.c emits for the adult backfill.
+        val line = "[MPROG] action=adult-backfill phase=done rc=0 total=946726 " +
+            "gated_out=944000 scored=2726 updated=2726 failed=0"
+        val parsed = parseMaintenanceProgress(line)!!
+        val st = MaintenanceStatus(action = MaintenanceAction.ADULT_BACKFILL, running = true)
+            .withProgress(parsed)
+
+        assertEquals("done", st.phase)
+        // Criterion 7 reads these counters from the status message, not the raw
+        // `lines` ring buffer: all five must be there.
+        for (counter in listOf(
+            "total=946726", "gated_out=944000", "scored=2726", "updated=2726", "failed=0"
+        )) {
+            assertTrue(st.message, st.message.contains(counter))
+        }
+        // …and they stay available structurally too.
+        assertEquals("2726", st.extras["scored"])
+        assertEquals("944000", st.extras["gated_out"])
+    }
+
+    @Test fun summaryCounters_keepsTheWireOrderAndSkipsWhatIsAbsent() {
+        assertEquals(
+            "total=6 gated_out=2 scored=4 updated=4 failed=0",
+            summaryCounters(
+                mapOf(
+                    "failed" to "0", "updated" to "4", "scored" to "4",
+                    "gated_out" to "2", "total" to "6", "rc" to "0")))
+        assertEquals("", summaryCounters(mapOf("rc" to "0")))
+        assertEquals("", summaryCounters(emptyMap()))
     }
 
     @Test fun withProgress_phaseOnlyLineLeavesTheDenominatorNull() {
@@ -247,5 +283,7 @@ class CrawlerMaintenanceTest {
         assertNull(st.percent)
         assertNull(st.done)
         assertNull(st.total)
+        // …and no counter from a previous run survives either.
+        assertTrue(st.extras.isEmpty())
     }
 }

@@ -75,6 +75,12 @@ fun maintenanceRouteAllowed(route: String): Boolean =
  * `[MPROG]` lines ([MaintenanceProgress], merged by [withProgress]). They stay
  * null for an action that reports no progress, and [percent] stays null whenever
  * the action has no denominator: phase-only is the honest state.
+ *
+ * [extras] keeps the `k=v` pairs of the last progress line that have no field of
+ * their own (`rc`, `removed`, and the terminal counters of an action that
+ * publishes them - the adult backfill's `total/gated_out/scored/updated/failed`).
+ * On the terminal `phase=done` line those counters are also folded into
+ * [message], which is what `GET /api/crawler/maintenance` returns.
  */
 data class MaintenanceStatus(
     val action: MaintenanceAction? = null,
@@ -88,16 +94,51 @@ data class MaintenanceStatus(
     val percent: Int? = null,
     val done: Long? = null,
     val total: Long? = null,
+    val extras: Map<String, String> = emptyMap(),
 )
 
+/** Counter keys an action may publish on its terminal `[MPROG]` line, in the
+ *  order the status message shows them. The adult backfill publishes all five. */
+private val SUMMARY_COUNTER_KEYS = listOf("total", "gated_out", "scored", "updated", "failed")
+
 /**
- * Merges one parsed [MaintenanceProgress] line into the status. Only the progress
- * fields change: the raw line still goes to [MaintenanceStatus.lines] (the
- * console keeps every line verbatim), and [MaintenanceStatus.message] keeps
- * describing the process lifecycle.
+ * The `k=v` counters of a terminal progress line folded into one readable tail
+ * (`total=18 gated_out=6 scored=12 updated=12 failed=0`), or "" when the line
+ * published none of them.
+ *
+ * [total] is passed separately because `total` is a progress field of its own, so
+ * [MaintenanceProgress] lifts it out of [MaintenanceProgress.extras].
+ *
+ * Structured on purpose: the status message is what
+ * `GET /api/crawler/maintenance` returns, so a caller reads the adult
+ * backfill's counts from there instead of scraping the raw `lines` ring buffer.
  */
-internal fun MaintenanceStatus.withProgress(p: MaintenanceProgress): MaintenanceStatus =
-    copy(phase = p.phase, percent = p.percent, done = p.done, total = p.total)
+internal fun summaryCounters(extras: Map<String, String>, total: Long? = null): String {
+    val values = LinkedHashMap(extras)
+    if (total != null) values["total"] = total.toString()
+    return SUMMARY_COUNTER_KEYS.mapNotNull { key -> values[key]?.let { "$key=$it" } }
+        .joinToString(" ")
+}
+
+/**
+ * Merges one parsed [MaintenanceProgress] line into the status. The progress
+ * fields change and [MaintenanceStatus.extras] keeps the line's remaining `k=v`
+ * pairs; the raw line still goes to [MaintenanceStatus.lines] (the console keeps
+ * every line verbatim).
+ *
+ * The terminal `phase=done` line is where an action's counters live, so its
+ * extras are folded into [MaintenanceStatus.message]: that message is the
+ * structured answer the maintenance API gives, and the counters must not exist
+ * only in the raw console tail.
+ */
+internal fun MaintenanceStatus.withProgress(p: MaintenanceProgress): MaintenanceStatus {
+    val merged = copy(
+        phase = p.phase, percent = p.percent, done = p.done, total = p.total,
+        extras = p.extras)
+    if (p.phase != MaintenanceProgress.PHASE_DONE) return merged
+    val counters = summaryCounters(p.extras, p.total)
+    return if (counters.isEmpty()) merged else merged.copy(message = "${p.action} done ($counters)")
+}
 
 /**
  * Runs dht_crawler maintenance actions (plan 10 §4) one at a time. Each
@@ -162,7 +203,8 @@ class CrawlerMaintenance(
             action = action, running = true, exitCode = null, lines = emptyList(),
             startedAt = System.currentTimeMillis(), finishedAt = null,
             message = "starting ${action.flag} (stopping crawler)",
-            phase = null, percent = null, done = null, total = null)
+            phase = null, percent = null, done = null, total = null,
+            extras = emptyMap())
         try {
             executor.execute { runAction(action) }
         } catch (e: RejectedExecutionException) {
@@ -188,11 +230,16 @@ class CrawlerMaintenance(
                 pushLine(lines, line)
             }
             val ok = exitCode == 0
+            val outcome = if (ok) "${action.flag} succeeded"
+            else "${action.flag} exited with code $exitCode"
+            // A terminal [MPROG] line's counters ride the message (see
+            // withProgress): keep them across the lifecycle wording so the
+            // counters survive into the final status the maintenance API returns.
+            val counters = summaryCounters(status.extras, status.total)
             status = status.copy(
                 running = false, exitCode = exitCode,
                 finishedAt = System.currentTimeMillis(),
-                message = if (ok) "${action.flag} succeeded"
-                else "${action.flag} exited with code $exitCode")
+                message = if (counters.isEmpty()) outcome else "$outcome ($counters)")
         } catch (e: Exception) {
             status = status.copy(
                 running = false, exitCode = -1,
