@@ -114,7 +114,7 @@ prefix is required by the packaging step — they are **exec'd as PIE binaries, 
 | Output | Source | Built by | Role |
 |---|---|---|---|
 | `libtransmissiond.so` | transmission **4.1.2** tarball + `src/main/cpp/transmission-fork/` | `buildTransmission` → `apply_fork.py` → CMake/NDK | BitTorrent daemon; disk I/O routed to SAF gateway via `/saf/usb` sentinel path |
-| `libdhtcrawler.so` | vendored `src/main/cpp/dht_crawler/` | `buildDhtCrawler` → `prepareDhtCrawlerSrc` (copy + 15 patches) → CMake | DHT keyspace crawler; SQLite DB; civetweb HTTP API; bloom-filter dedup |
+| `libdhtcrawler.so` | vendored `src/main/cpp/dht_crawler/` | `buildDhtCrawler` → `prepareDhtCrawlerSrc` (copy + 16 patches) → CMake | DHT keyspace crawler; SQLite DB; civetweb HTTP API; bloom-filter dedup |
 | `libftpserver.so` | `src/main/cpp/ftp-server/` (C11) | `buildFtpServer` → CMake/NDK | FTP server for media clients; posix or SAF backend (SAF talks to `SafIpcServer`) |
 
 **Task graph:** `buildMbedtls` (mbedTLS **3.6.6**) → `buildCurl` (curl **8.20.0**) → `buildTransmission`;
@@ -131,13 +131,14 @@ crawler source root. Native build inputs/outputs land under `app/build/native/`.
 **Movie-kind classifier (v10).** The crawler links a CPU-only llama.cpp (`buildLlama`) and the vendored
 `dht_crawler-android/utf8proc/` (**2.12.0**); the NDK wrapper defines `MK_ENABLED` and
 `MK_NFC_ENABLED` only when `LLAMA_INSTALL` is set, so a plain host configure stays plain C99. Two
-model generations ship side by side: `models/v6` (fastText, pinned by `classifier_model_dir`) and
-`models/v10` (Qwen3.5-0.8B nemotron arm decoder — Q4_0 backbone 501,452,416 B / 478.2 MiB, sha256
-`02555750…`, plus the JEVH head 65,712 B, 1024×16, sha256 `077aaf11…`, hidden 1024 — pinned by
-`movie_kind_model_dir`). `ensureAssets` stages both, the sweep keeps the active *set* `{v6, v10}` and
-removes retired dirs, and `.assets_version` is `<versionCode>|models/v6|models/v10` — a stamp change is
-what triggers restaging, no versionCode bump required; the staged models total 528,149,134 B (~504 MiB)
-and the debug APK measures 541,786,478 B at `versionCode` 2 / `versionName` "0.2.0".
+model generations ship side by side: `models/v11` (fastText — see *fastText adult classifier (v11)*
+below) and `models/v10` (Qwen3.5-0.8B nemotron arm decoder — Q4_0 backbone 501,452,416 B / 478.2 MiB,
+sha256 `02555750…`, plus the JEVH head 65,712 B, 1024×16, sha256 `077aaf11…`, hidden 1024 — pinned by
+`movie_kind_model_dir`). `ensureAssets` stages both, the sweep keeps the active *set* `{v11, v10}` and
+removes retired dirs, and `.assets_version` is `<versionCode>|models/v11|models/v10` — a stamp change is
+what triggers restaging, no versionCode bump required; the staged models total 528,146,811 B (~503.7 MiB
+— `models/v11` 26,612,152 B + `models/v10` 501,534,659 B) and the debug APK measures 548,821,733 B at
+`versionCode` 2 / `versionName` "0.2.0".
 Pooling is last-token: `src/movie_kind.c` sets `context_params.pooling_type = LLAMA_POOLING_TYPE_LAST`,
 the read stays `llama_get_embeddings_seq(ctx, 0)`, and `embd_normalize` is not set — at the llama.cpp
 pin the pooled vector comes back unnormalised, which is what the v10 head was fitted on. v9 shipped the
@@ -163,11 +164,95 @@ the reset one-shot is `--movie-kind-backfill <db> --reset` with the app force-st
 median ≤ 300 ms, p95 ≤ 600 ms, peak RSS ≤ 1.2 GiB and the 478.2 MiB backbone file — the on-device bench
 has not been run yet, so no measured figure is quoted here.
 
-**dht_crawler patches (order is fixed, applied by `prepareDhtCrawlerSrc`):** the 15-entry list in
+**fastText adult classifier (v11).** `classifier_model_dir` pins `models/v11` (`CrawlerConfig.MODELS_SUBDIR`);
+`models/v6` is retired and survives only as rollback history (reinstalling the 0.1.0 APK restages it — G8
+in `plan/adult-v11-integration.md`). Staged files and shas:
+
+| file | bytes | sha256 |
+|---|---:|---|
+| `adult.ftz` | 8,863,323 | `7b8a3272642133dbf56b0a44d78dedfdc28a1a63b2800c96ab3cc8923d0f9412` |
+| `category.ftz` | 8,857,514 | `2d4dcd7c6c4cc50dd078667872985fe1ce58d2a56dd9103828b700e4b6dd9271` |
+| `tv_kind.ftz` | 8,883,074 | `35c0ac36f50ef4e2950bc8189990faf9759f3c1ed1e28278bc07cce1cfa13440` |
+| `manifest.json` | 8,241 | `481e737905f2cf7eafe353229329d67ced60c4ffa946eb1ea34440f06d3092aa` |
+
+`adult_hide_threshold` **0.545726** and `adult_drop_threshold` **0.949021** ride the manifest:
+`src/classifier.c` prefers `thresholds.*` from `models/v11/manifest.json` over `config.ini`, which is why
+the manifest is staged with the `.ftz` files. `AppConfig.adultHideThreshold` carries the same 0.545726
+default, and the Stage-12 `ClassifierModelVersionMigration` resets the persisted value on a generation
+change, so a model bump cannot leave a stale operating point behind.
+
+The parser copy (`dht_crawler-android/tparse/`, resynced from classifier-model) emits the `__adult_jav`,
+`__adult_site` and `__adult_set` feature tokens from `tparse/adult_terms.h`. That header is **generated**
+(`uv run cm gen-header` in the model repo, guarded there by a committed-parity test) — never hand-edit it.
+
+`torrent_class.adult_clf_ver` records which adult student produced `adult`/`adult_p`: **NULL = never
+adult-backfilled** (a v6-era verdict), **11 = scored by v11**. `clf_ver` keeps its old meaning
+(category/tv_kind generation) and stays 6 on backfilled rows, so the mixed generations are explicit rather
+than mislabelled. The full `clf_ver` 11 reclassify is deliberately **not** run this release.
+
+The token-gated pass is crawler patch 16: `--adult-backfill <db> [--write] [--adult-backfill-limit <n>]`.
+It re-scores only rows whose name fires an `__adult_*` token, re-checks the file list for the rows that
+pass, and (with `--write`) sets `adult`/`adult_p`/`adult_clf_ver` = 11; without `--write` it walks the same
+gate and writes nothing. On the phone the only way to run it is the dashboard maintenance action
+`POST /crawler/maintenance/adult-backfill` (`MaintenanceAction.ADULT_BACKFILL`, space-gated), which stops
+the supervised crawler, runs the one-shot and restarts it; the terminal `[MPROG]` counters
+(`total/gated_out/scored/updated/failed`) are folded into the maintenance status `message`.
+
+`classify_backfill_mode` is pinned **`off`** (`CrawlerConfig` write + `CrawlerKeys` allow-list; operator
+decision), so the crawler's own backfill daemon never starts a pass at launch. The C default stays `all`
+and the daemon's `adult` branch (auto-run the gated pass) is implemented and host-tested but unpinned —
+flipping the pin is a one-line config change. With `off` the daemon publishes state **`disabled`**, not
+`idle`, and never polls.
+
+`/stats` gains `classifier.clf_ver`, `classifier.adult_drop_threshold` and
+`classifier.model_sha256_{adult,category,tv_kind}` beside the existing threshold/counter fields, plus an
+`adult_backfill` object: `state`, `target_adult_clf_ver`, `rows_total`, `rows_gated_out`, `rows_scored`,
+`rows_updated`, `rows_failed`, `last_id`, `started_at`, `finished_at`, `last_error`.
+
+**Measured on the reference device (v11 rollout, 965,230-row corpus, threshold 0.545726).** G1 parser
+parity 10,000/10,000 identical feature texts (quotas jav 259 / site 243 / set 200 / none 9,306 against a
+200 bar; the negative control — the pre-Stage-1 parser — differs on 694 of 10,000 rows, `__adult_*` tokens
+only, host side only, so the harness does detect the drift). G2 500/500 label agreement, max |Δadult_p|
+0.000000. G3 **the pre-registered 2,886–24,049 (0.3–2.5 %) band was MISSED**: the pre-write dry run gated
+in 24,435 of 961,969 = 2.5401 %, 386 rows (1.6 %) over the ceiling, and the band was re-derived to
+1.0–8.0 % under operator authorisation once the cause was established as corpus composition, not token
+over-fire (identical parser and lists fire 0.7352 % on `~/torrents.db`'s 6,015,586 rows vs 2.5328 % on the
+950,993-row device corpus, driven by `__adult_site` at 9.3×; 25/25 sampled `__adult_site` matches are
+genuine curated adult studios; R3 re-curation was rejected). The actual write measured 24,528 = 2.5411 %,
+inside the re-derived band. G4 0 of 200 untouched rows differing, 0 of 24,435 backfilled rows changing
+`category`/`tv_kind`/`clf_ver`, `clf_ver` = 6 AND `adult_clf_ver` = 11 = 24,528 = the run's `updated`,
+`adult_clf_ver IS NULL` = 940,702 = its `gated_out`. G5 duration ~2.5 min for 965,230 scanned / 24,528
+scored (bar ≤ 30 min) but peak RSS **VmHWM 1,832,772 kB ≈ 1.75 GiB against a 300 MiB bar — MISS** (likely
+the on-device movie_kind backbone plus the 8.2 GB DB page cache, i.e. the bar was set for a model-free
+host measurement — not proven); no crawler restart, `/stats` stayed 200. G6/D1 PASS: catch 99.00 %
+(396/400) against ≥ 60 %, 0 flips against ≤ 2, paired v6 recall 98.50 % with 6 rows caught that v6 missed
+and 0 lost. G7 movie_kind untouched: generation 10, hidden 1024, backbone `02555750…`, head `077aaf11…`,
+`model_ready` true, `movie_kind_backfill` idle with `rows_processed` 0. Restart persistence clean: model-dir
+mtimes and `.assets_version` (`2|models/v11|models/v10`) identical after force-stop + relaunch (no
+restage), `clf_ver` 11, `classifier_backfill` `disabled`, `adult_backfill` idle with no re-run.
+
+**D1's coverage bound.** The 500-row D1 sample was ~80 % backfilled rows, so 99 % catch measures the
+*fidelity of the write*, not the reach of the backfill. An unbiased 20,000-row random sample scores 19.14 %
+reference-adult (3,828/20,000 — ~184,745 adult rows in the 965,230-row DB) and the token gate selected
+24,528 of them, i.e. **≈ 13.3 % coverage**; the remaining ~87 % of adult rows keep their v6-era labels.
+That is the bound on what this pass achieves, and the full `clf_ver` 11 reclassify that would cover them is
+deliberately not run in this release.
+
+**Classifier traps (each cost time on the v11 rollout).**
+- The host CLF binary's `config.ini` default `adult_hide_threshold` (**0.917039**, `src/config.c`) beats
+  the manifest (0.545726) — config > manifest. Any host scoring run must set it explicitly; the device is
+  protected by `ClassifierModelVersionMigration`, the host is not.
+- `classifier_enabled` / `movie_kind_enabled` are parsed with `atoi`, so `= true` means 0 (off). Use `= 1`.
+- `make clf-backfill` takes `-I` from the app's tparse copy but `TPARSE_LIB` from the model repo's prebuilt
+  archive — override `TPARSE_LIB` or you measure the wrong parser.
+- Adding a `torrent_class` column means five places in the C tree plus the Kotlin mirror — see invariant 14.
+
+**dht_crawler patches (order is fixed, applied by `prepareDhtCrawlerSrc`):** the 16-entry list in
 `app/build.gradle.kts` opens with the three upstream fixes — `bencode-cap-fix.patch` →
 `bencode-init-fix.patch` → `civetweb-stop-flag-atomic.patch` — and closes with
-`movie-kind-v10-streaming.patch` (last-token pooling + inline ingest classification); new patches go
-LAST. Upstream fixes belong in `patches/`.
+`movie-kind-v10-streaming.patch` (last-token pooling + inline ingest classification) then
+`adult-v11-backfill.patch` (the token-gated adult backfill, `adult_clf_ver`, `classify_backfill_mode`);
+new patches go LAST, as the 17th slot. Upstream fixes belong in `patches/`.
 See the vendored repo's `CLAUDE.md` for its architecture (thread trees, bloom filters, schema).
 
 ## Tests
@@ -213,6 +298,10 @@ See the vendored repo's `CLAUDE.md` for its architecture (thread trees, bloom fi
     walks match the sanitized leaf so the alias survives cache loss. Only a provider `" (1)"` dedup
     suffix is a real collision (deleted + loud failure). Rejecting transliteration makes torrents
     with such files unsaveable (torrent pauses with `I/O error (5)` forever).
+14. **A new `torrent_class` column means FIVE C places plus the Kotlin mirror:** the live CREATE,
+    `database_ensure_column`, `batch_writer.c`'s backup DDL, `backup_ensure_column` and
+    `tools/schema-v2.sql`, plus `backup/CrawlerDbSchema.kt` and its exact-string test. Miss one and
+    backup/restore or `rebuild-db-v2.sh --check-schema` breaks — this is how `adult_clf_ver` landed.
 
 ## tools/ scripts
 
