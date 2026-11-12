@@ -68,8 +68,8 @@ class CrawlerMaintenanceTest {
     }
 
     @Test fun maintenanceRouteAllowed_refusesTheTwoCliOnlyActions() {
-        // The enum keeps all seven members, so both CLI flags stay reachable…
-        assertEquals(7, MaintenanceAction.entries.size)
+        // The enum keeps all eight members, so both CLI flags stay reachable…
+        assertEquals(8, MaintenanceAction.entries.size)
         assertEquals(
             listOf("compact", "category-filter-update"),
             MaintenanceAction.entries.filterNot { it.phoneSupported }.map { it.route }
@@ -97,6 +97,7 @@ class CrawlerMaintenanceTest {
         assertEquals("--clear-failure-filter", MaintenanceAction.CLEAR_FAILURE_FILTER.flag)
         assertEquals("--category-filter-update", MaintenanceAction.CATEGORY_FILTER_UPDATE.flag)
         assertEquals("--movie-kind-bench", MaintenanceAction.MOVIE_KIND_BENCH.flag)
+        assertEquals("--adult-backfill", MaintenanceAction.ADULT_BACKFILL.flag)
     }
 
     @Test fun needsSpaceCheckOnlyForDbRewritingActions() {
@@ -110,6 +111,8 @@ class CrawlerMaintenanceTest {
         assertFalse(MaintenanceAction.CATEGORY_FILTER_UPDATE.needsSpaceCheck)
         // The bench only reads the database and times the encoder.
         assertFalse(MaintenanceAction.MOVIE_KIND_BENCH.needsSpaceCheck)
+        // The adult backfill rewrites torrent_class rows and grows the WAL.
+        assertTrue(MaintenanceAction.ADULT_BACKFILL.needsSpaceCheck)
     }
 
     @Test fun movieKindBench_commandLineCarriesTheDatabaseOperand() {
@@ -120,9 +123,20 @@ class CrawlerMaintenanceTest {
             listOf("--movie-kind-bench", "data/torrents.db"),
             CrawlerMaintenance.argv(MaintenanceAction.MOVIE_KIND_BENCH)
         )
-        for (a in MaintenanceAction.entries - MaintenanceAction.MOVIE_KIND_BENCH) {
+        for (a in MaintenanceAction.entries - MaintenanceAction.MOVIE_KIND_BENCH -
+            MaintenanceAction.ADULT_BACKFILL) {
             assertEquals("$a must stay a bare flag", listOf(a.flag), CrawlerMaintenance.argv(a))
         }
+    }
+
+    @Test fun adultBackfill_commandLineCarriesTheDatabaseOperandAndWrite() {
+        // The pass only commits anything with an explicit `--write`; without it the C
+        // side reports counts and writes nothing. This action is the only path that
+        // runs the pass in this release (`classify_backfill_mode` is pinned `off`).
+        assertEquals(
+            listOf("--adult-backfill", "data/torrents.db", "--write"),
+            CrawlerMaintenance.argv(MaintenanceAction.ADULT_BACKFILL)
+        )
     }
 
     @Test fun movieKindBench_skipsSpaceCheckEvenWithNoSpace() {

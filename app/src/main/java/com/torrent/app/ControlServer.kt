@@ -125,6 +125,7 @@ class ControlServer(
     @Volatile private var cachedCrawlerStatsJson: String? = null
     @Volatile private var cachedCrawlerStatsLine: String? = null
     @Volatile private var cachedCrawlerBackfillLine: String? = null
+    @Volatile private var cachedCrawlerAdultBackfillLine: String? = null
     // One frame flow per feed: replay keeps the newest frame for a client that
     // connects between ticks, DROP_OLDEST keeps a slow socket from stalling
     // the ticker.
@@ -732,6 +733,7 @@ class ControlServer(
         cachedCrawlerStatsJson = raw
         cachedCrawlerStatsLine = raw?.let { crawlerStatsLine(it) }
         cachedCrawlerBackfillLine = raw?.let { crawlerBackfillLine(it) }
+        cachedCrawlerAdultBackfillLine = raw?.let { crawlerAdultBackfillLine(it) }
         statsFrames.emit(crawlerStatsJson(cachedCrawlerStatsJson, crawler?.state))
     }
 
@@ -943,6 +945,7 @@ class ControlServer(
             """<div class="row"><span class="k">Search</span><span class="v"><a href="/search">/search</a></span></div>""",
             """<div class="row"><span class="k">Stats</span><span class="v" data-field="statsLine">${esc(cachedCrawlerStatsLine ?: "—")}</span></div>""",
             """<div class="row"><span class="k">Backfill</span><span class="v" data-field="backfillLine">${esc(cachedCrawlerBackfillLine ?: "—")}</span></div>""",
+            """<div class="row"><span class="k">Adult backfill</span><span class="v" data-field="adultBackfillLine">${esc(cachedCrawlerAdultBackfillLine ?: "—")}</span></div>""",
         )
     }
 
@@ -1062,6 +1065,7 @@ class ControlServer(
                         append(",\"pausedNoWifi\":").append(crawlerPausedNoWifi())
                         append(",\"statsLine\":").append(jsonStr(cachedCrawlerStatsLine))
                         append(",\"backfillLine\":").append(jsonStr(cachedCrawlerBackfillLine))
+                        append(",\"adultBackfillLine\":").append(jsonStr(cachedCrawlerAdultBackfillLine))
                     }
                     append("}")
                 }
@@ -1762,6 +1766,7 @@ class ControlServer(
         MaintenanceAction.CLEAR_FAILURE_FILTER -> "Clear failure filter"
         MaintenanceAction.CATEGORY_FILTER_UPDATE -> "Category filter update"
         MaintenanceAction.MOVIE_KIND_BENCH -> "Movie-kind bench"
+        MaintenanceAction.ADULT_BACKFILL -> "Adult backfill"
     }
 
     /** What a maintenance action does, phrased for its confirmation prompt. */
@@ -1776,6 +1781,9 @@ class ControlServer(
                 "from the database"
         MaintenanceAction.MOVIE_KIND_BENCH ->
             "Bench the movie-kind encoder over the database rows (read-only)"
+        MaintenanceAction.ADULT_BACKFILL ->
+            "Re-score the token-gated rows with the v11 adult classifier and write " +
+                "adult, adult_p and adult_clf_ver"
     }
 
     /**
@@ -2261,6 +2269,30 @@ class ControlServer(
                 val total = b.optLong("rows_total", 0L)
                 val err = b.optString("last_error", "")
                 val line = "Backfill: %s %d / %d → v%d".format(state, done, total, target)
+                if (state == "failed" && err.isNotBlank()) "$line — $err" else line
+            } catch (e: Exception) {
+                null
+            }
+        }
+
+        /**
+         * The one-line `adult_backfill` summary beside the `classifier_backfill` one,
+         * derived from the same raw loopback /stats body: the pass state, the rows it
+         * actually wrote of the gated-in total, and the target adult generation. Field
+         * names are the daemon's wire names (`rows_updated`/`rows_total`,
+         * `target_adult_clf_ver`); the daemon's `last_error` is appended while the pass
+         * is failed. Null when the body does not parse or carries no such object, so the
+         * card keeps its previous line.
+         */
+        internal fun crawlerAdultBackfillLine(raw: String): String? {
+            return try {
+                val b = JSONObject(raw).optJSONObject("adult_backfill") ?: return null
+                val state = b.optString("state", "")
+                val target = b.optInt("target_adult_clf_ver", 0)
+                val updated = b.optLong("rows_updated", 0L)
+                val total = b.optLong("rows_total", 0L)
+                val err = b.optString("last_error", "")
+                val line = "Adult backfill: %s %d / %d → v%d".format(state, updated, total, target)
                 if (state == "failed" && err.isNotBlank()) "$line — $err" else line
             } catch (e: Exception) {
                 null
@@ -2953,6 +2985,7 @@ ${adultSelectionRow(adultSelection)}
                   patchText(fieldIn(section, 'internalFree'), d.internalFree);
                   patchText(fieldIn(section, 'statsLine'), d.statsLine);
                   patchText(fieldIn(section, 'backfillLine'), d.backfillLine);
+                  patchText(fieldIn(section, 'adultBackfillLine'), d.adultBackfillLine);
                   // The paused badge is rendered on every crawler render and
                   // only its `hidden` attribute is flipped here, so a pause that
                   // starts after the page loaded appears within one tick. Only

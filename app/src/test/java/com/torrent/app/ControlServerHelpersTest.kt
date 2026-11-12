@@ -338,6 +338,40 @@ class ControlServerHelpersTest {
     }
 
     /**
+     * The adult-backfill sibling of [crawlerBackfillLine]: same /stats body, the
+     * `adult_backfill` object's wire names (`rows_updated` / `rows_total` /
+     * `target_adult_clf_ver`), `last_error` appended only while failed, and no line
+     * at all when the object is absent or the body does not parse.
+     */
+    @Test fun crawlerAdultBackfillLine_formatsTheDaemonsAdultBackfillObject() {
+        val running = """{"torrents_indexed":286705,"adult_backfill":{
+            "state":"running","target_adult_clf_ver":11,"rows_total":12000,
+            "rows_gated_out":150000,"rows_scored":4000,"rows_updated":3900,
+            "rows_failed":0,"last_id":880,"started_at":1761650000,
+            "finished_at":0,"last_error":""}}"""
+        assertEquals(
+            "Adult backfill: running 3900 / 12000 → v11",
+            ControlServer.crawlerAdultBackfillLine(running),
+        )
+
+        // Mode `off` publishes idle with a resolved target of 0 and zero rows.
+        val idle = """{"adult_backfill":{"state":"idle","target_adult_clf_ver":0,
+            "rows_total":0,"rows_gated_out":0,"rows_scored":0,"rows_updated":0,
+            "rows_failed":0,"last_id":0,"started_at":0,"finished_at":0,"last_error":""}}"""
+        assertEquals("Adult backfill: idle 0 / 0 → v0", ControlServer.crawlerAdultBackfillLine(idle))
+
+        val failed = """{"adult_backfill":{"state":"failed","target_adult_clf_ver":11,
+            "rows_total":12000,"rows_updated":12,"last_error":"database disk image is malformed"}}"""
+        val failedLine = ControlServer.crawlerAdultBackfillLine(failed)
+        assertNotNull("a failed adult backfill must still render its counters", failedLine)
+        assertTrue(failedLine!!, failedLine.startsWith("Adult backfill: failed 12 / 12000 → v11"))
+        assertTrue(failedLine, failedLine.endsWith("database disk image is malformed"))
+
+        assertNull(ControlServer.crawlerAdultBackfillLine("""{"torrents_indexed":1}"""))
+        assertNull(ControlServer.crawlerAdultBackfillLine("not json"))
+    }
+
+    /**
      * Webui corrective stage 8: RFC 8259 forbids raw U+0000–U+001F inside a
      * JSON string, so `jsonStr` must escape every control character. One ANSI
      * ESC in a daemon log line used to make the dashboard client's

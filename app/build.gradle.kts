@@ -593,11 +593,11 @@ tasks.register<Copy>("copyDhtCrawlerAssets") {
     // conversion), so a plain copy is correct here. The include list is explicit on
     // purpose: `v*/**` would ship the retired v4 generation too.
     // `into("models")` is relative to the task destination above, giving the asset
-    // paths dht_crawler/models/v6/<file> and dht_crawler/models/v10/<file> (overriding)
+    // paths dht_crawler/models/v11/<file> and dht_crawler/models/v10/<file> (overriding)
     // the crawler's compiled-in default dirs).
     val modelSrc = file("src/main/cpp/dht_crawler-android/models")
     from(modelSrc) {
-        include("v6/**", "v10/**")
+        include("v11/**", "v10/**")
         into("models")
     }
     into(file("build/generated/assets/dht_crawler/dht_crawler"))

@@ -98,7 +98,7 @@ class CrawlerDbSchemaTest {
         assertTrue(
             "the movie-kind columns must follow clf_ver: $torrentClass",
             torrentClass.contains(
-                "    clf_ver INTEGER NOT NULL,    movie_kind_mask INTEGER,    movie_kind_clf_ver INTEGER);",
+                "    clf_ver INTEGER NOT NULL,    movie_kind_mask INTEGER,    movie_kind_clf_ver INTEGER,    adult_clf_ver INTEGER);",
             ),
         )
         assertTrue(

@@ -49,6 +49,9 @@ class ConfigStore(context: Context) {
             // round trip exactly (a Float would render as 0.8919119834899902 in the form).
             adultHideThreshold = prefs.getString(KEY_CRAWLER_ADULT_HIDE_THRESHOLD, null)?.toDoubleOrNull()
                 ?: ConfigDefaults.CRAWLER.adultHideThreshold,
+            classifyBackfillMode = prefs.getString(
+                KEY_CRAWLER_CLASSIFY_BACKFILL_MODE, ConfigDefaults.CRAWLER.classifyBackfillMode
+            )!!,
             bloomCapacity = prefs.getInt(KEY_CRAWLER_BLOOM_CAPACITY, ConfigDefaults.CRAWLER.bloomCapacity),
             failureBloomCapacity = prefs.getInt(KEY_CRAWLER_FAILURE_BLOOM_CAPACITY, ConfigDefaults.CRAWLER.failureBloomCapacity),
             bloomErrorRate = prefs.getFloat(KEY_CRAWLER_BLOOM_ERROR_RATE, ConfigDefaults.CRAWLER.bloomErrorRate.toFloat()).toDouble(),
@@ -127,6 +130,7 @@ class ConfigStore(context: Context) {
             .putBoolean(KEY_CRAWLER_CLASSIFIER_ENABLED, s.classifierEnabled)
             .putString(KEY_CRAWLER_ADULT_MODE, s.adultMode)
             .putString(KEY_CRAWLER_ADULT_HIDE_THRESHOLD, s.adultHideThreshold.toString())
+            .putString(KEY_CRAWLER_CLASSIFY_BACKFILL_MODE, s.classifyBackfillMode)
             .putInt(KEY_CRAWLER_BLOOM_CAPACITY, s.bloomCapacity)
             .putInt(KEY_CRAWLER_FAILURE_BLOOM_CAPACITY, s.failureBloomCapacity)
             .putFloat(KEY_CRAWLER_BLOOM_ERROR_RATE, s.bloomErrorRate.toFloat())
@@ -263,6 +267,7 @@ class ConfigStore(context: Context) {
             .putBoolean(KEY_LKG_CRAWLER_CLASSIFIER_ENABLED, s.classifierEnabled)
             .putString(KEY_LKG_CRAWLER_ADULT_MODE, s.adultMode)
             .putString(KEY_LKG_CRAWLER_ADULT_HIDE_THRESHOLD, s.adultHideThreshold.toString())
+            .putString(KEY_LKG_CRAWLER_CLASSIFY_BACKFILL_MODE, s.classifyBackfillMode)
             .putInt(KEY_LKG_CRAWLER_BLOOM_CAPACITY, s.bloomCapacity)
             .putInt(KEY_LKG_CRAWLER_FAILURE_BLOOM_CAPACITY, s.failureBloomCapacity)
             .putFloat(KEY_LKG_CRAWLER_BLOOM_ERROR_RATE, s.bloomErrorRate.toFloat())
@@ -296,6 +301,9 @@ class ConfigStore(context: Context) {
             adultMode = prefs.getString(KEY_LKG_CRAWLER_ADULT_MODE, ConfigDefaults.CRAWLER.adultMode)!!,
             adultHideThreshold = prefs.getString(KEY_LKG_CRAWLER_ADULT_HIDE_THRESHOLD, null)?.toDoubleOrNull()
                 ?: ConfigDefaults.CRAWLER.adultHideThreshold,
+            classifyBackfillMode = prefs.getString(
+                KEY_LKG_CRAWLER_CLASSIFY_BACKFILL_MODE, ConfigDefaults.CRAWLER.classifyBackfillMode
+            )!!,
             bloomCapacity = prefs.getInt(KEY_LKG_CRAWLER_BLOOM_CAPACITY, ConfigDefaults.CRAWLER.bloomCapacity),
             failureBloomCapacity = prefs.getInt(KEY_LKG_CRAWLER_FAILURE_BLOOM_CAPACITY, ConfigDefaults.CRAWLER.failureBloomCapacity),
             bloomErrorRate = prefs.getFloat(KEY_LKG_CRAWLER_BLOOM_ERROR_RATE, ConfigDefaults.CRAWLER.bloomErrorRate.toFloat()).toDouble(),
@@ -344,6 +352,8 @@ class ConfigStore(context: Context) {
         private const val KEY_CRAWLER_CLASSIFIER_ENABLED = "crawler_classifier_enabled"
         private const val KEY_CRAWLER_ADULT_MODE = "crawler_adult_mode"
         private const val KEY_CRAWLER_ADULT_HIDE_THRESHOLD = "crawler_adult_hide_threshold"
+        /** `classify_backfill_mode`: the config writer pins it to `off` this release. */
+        private const val KEY_CRAWLER_CLASSIFY_BACKFILL_MODE = "crawler_classify_backfill_mode"
         /** Sentinel: the model dir the classifier thresholds were last migrated for. */
         private const val KEY_CLASSIFIER_MODEL_VERSION = "classifier_model_version"
         private const val KEY_CRAWLER_BLOOM_CAPACITY = "crawler_bloom_capacity"
@@ -385,6 +395,7 @@ class ConfigStore(context: Context) {
         private const val KEY_LKG_CRAWLER_CLASSIFIER_ENABLED = "lkg_crawler_classifier_enabled"
         private const val KEY_LKG_CRAWLER_ADULT_MODE = "lkg_crawler_adult_mode"
         private const val KEY_LKG_CRAWLER_ADULT_HIDE_THRESHOLD = "lkg_crawler_adult_hide_threshold"
+        private const val KEY_LKG_CRAWLER_CLASSIFY_BACKFILL_MODE = "lkg_crawler_classify_backfill_mode"
         private const val KEY_LKG_CRAWLER_BLOOM_CAPACITY = "lkg_crawler_bloom_capacity"
         private const val KEY_LKG_CRAWLER_FAILURE_BLOOM_CAPACITY = "lkg_crawler_failure_bloom_capacity"
         private const val KEY_LKG_CRAWLER_BLOOM_ERROR_RATE = "lkg_crawler_bloom_error_rate"

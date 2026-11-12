@@ -50,10 +50,18 @@ data class CrawlerSettings(
     /**
      * `adult_hide_threshold`: adult probability at or above which an adult-tagged row
      * is hidden (`adult_mode=tag`) or discarded (`adult_mode=drop`).
-     * Calibrated default from `models/v6/manifest.json`; the crawler reads 0 as
+     * Calibrated default from `models/v11/manifest.json`; the crawler reads 0 as
      * "take the manifest threshold", which the form never writes.
      */
-    val adultHideThreshold: Double = 0.891912,
+    val adultHideThreshold: Double = 0.545726,
+    /**
+     * `classify_backfill_mode`: `"all"` | `"adult"` | `"off"` — what the crawler's
+     * backfill daemon does on its own. Pinned to `"off"` by
+     * [com.torrent.app.CrawlerConfig.PINNED_KEYS] for this release (nothing may
+     * auto-run a reclassify; the adult pass is the deliberate `adult-backfill`
+     * maintenance action), so this value is belt-and-braces. No form field.
+     */
+    val classifyBackfillMode: String = "off",
     val bloomCapacity: Int = 30_000_000,
     val failureBloomCapacity: Int = 30_000_000,
     val bloomErrorRate: Double = 0.001,

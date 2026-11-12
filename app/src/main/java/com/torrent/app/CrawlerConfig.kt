@@ -16,7 +16,7 @@ import java.nio.file.StandardOpenOption
 
 /**
  * Owns the dht_crawler's working dir under internal storage: `filesDir/crawler/`
- * (contains `config.ini`, `data/`, the keyword files, `models/v6/` with the
+ * (contains `config.ini`, `data/`, the keyword files, `models/v11/` with the
  * fastText classifier model files, and `models/v10/` with the movie-kind JEVH
  * backbone (Q4_0, hidden 1024) + head). Stage 09 (internal storage only); the
  * crawler process itself is started by a later supervisor step.
@@ -49,7 +49,7 @@ class CrawlerConfig(
 
     /**
      * Copies the keyword files from `assets/dht_crawler/` into [workDir], the
-     * fastText classifier files from `assets/dht_crawler/models/v6/` into
+     * fastText classifier files from `assets/dht_crawler/models/v11/` into
      * [modelsDir], and the movie-kind JEVH files from
      * `assets/dht_crawler/models/v10/` into [movieModelsDir], when missing or when
      * the `"<versionCode>|<MODELS_SUBDIR>|<MOVIE_MODEL_SUBDIR>"` `.assets_version`
@@ -149,6 +149,9 @@ class CrawlerConfig(
             // The C crawler compares adult_mode case-sensitively; normalise here.
             "adult_mode" to s.adultMode.trim().lowercase(),
             "adult_hide_threshold" to s.adultHideThreshold.toString(),
+            // classify_backfill_mode is normalised like adult_mode (the C side compares
+            // case-sensitively); PINNED_KEYS forces it to "off" for this release.
+            "classify_backfill_mode" to s.classifyBackfillMode.trim().lowercase(),
             "bloom_capacity" to s.bloomCapacity.toString(),
             "failure_bloom_capacity" to s.failureBloomCapacity.toString(),
             "bloom_error_rate" to s.bloomErrorRate.toString(),
@@ -236,7 +239,7 @@ class CrawlerConfig(
         const val HARD_BLOCK_FILE = "hard_block.txt"
 
         /** Classifier model dir, work-dir relative (mirrors crawler `classifier_model_dir`). */
-        const val MODELS_SUBDIR = "models/v6"
+        const val MODELS_SUBDIR = "models/v11"
 
         /** Movie-kind model dir, work-dir relative (mirrors `movie_kind_model_dir`). */
         const val MOVIE_MODEL_SUBDIR = "models/v10"
@@ -290,8 +293,8 @@ class CrawlerConfig(
         }
 
         /**
-         * Binary model assets shipped under `assets/dht_crawler/models/v6/` and staged
-         * into `workDir/models/v6/`, where the crawler resolves them via the pinned
+         * Binary model assets shipped under `assets/dht_crawler/models/v11/` and staged
+         * into `workDir/models/v11/`, where the crawler resolves them via the pinned
          * `classifier_model_dir`.
          */
         val MODEL_FILES = listOf("adult.ftz", "category.ftz", "tv_kind.ftz", "manifest.json")
@@ -312,9 +315,15 @@ class CrawlerConfig(
 
         /**
          * Keys the config writer always forces to a fixed value: the backup flags
-         * (backups are off on Android) and the app-owned path keys pointing at the
+         * (backups are off on Android), the app-owned path keys pointing at the
          * assets the app itself stages (`classifier_model_dir`, `movie_kind_model_dir`,
-         * `hard_block_file`).
+         * `hard_block_file`), and `classify_backfill_mode`.
+         *
+         * The mode is pinned to `off` for this release: nothing may auto-run a
+         * reclassify at launch (the pre-registered G3/D1 protocol needs a deliberate,
+         * measured write), so the pin wins over both the stored default and any
+         * advanced-override line. The adult pass runs only through the `adult-backfill`
+         * maintenance action.
          */
         val PINNED_KEYS = linkedMapOf(
             "backup_enabled" to "0",
@@ -323,6 +332,7 @@ class CrawlerConfig(
             "classifier_model_dir" to MODELS_SUBDIR,
             "movie_kind_model_dir" to MOVIE_MODEL_SUBDIR,
             "hard_block_file" to HARD_BLOCK_FILE,
+            "classify_backfill_mode" to "off",
         )
 
         /**

@@ -38,6 +38,12 @@ enum class MaintenanceAction(
     // writes nothing, so it is not space-gated either. Unlike every other action
     // it needs the db operand — see [CrawlerMaintenance.argv].
     MOVIE_KIND_BENCH("movie-kind-bench", "--movie-kind-bench", false),
+    // Token-gated adult backfill (classifier generation 11): re-scores only the rows
+    // whose name fires an `__adult_*` token and writes `adult`/`adult_p`/
+    // `adult_clf_ver`. It rewrites DB rows and grows the WAL, so it is space-gated.
+    // This is the ONLY path that runs the pass in this release: `classify_backfill_mode`
+    // is pinned `off`, so the crawler's own backfill daemon never starts it.
+    ADULT_BACKFILL("adult-backfill", "--adult-backfill", true),
     ;
 
     companion object {
@@ -212,18 +218,21 @@ class CrawlerMaintenance(
         internal const val MAX_LINES = 2000
 
         /**
-         * The db operand the movie-kind bench needs: relative to [workDir]
-         * (`filesDir/crawler`), matching the crawler's `db_path`. The row count is
-         * the C side's default.
+         * The db operand the movie-kind bench and the adult backfill need: relative to
+         * [workDir] (`filesDir/crawler`), matching the crawler's `db_path`. The row count
+         * is the C side's default.
          */
         internal const val BENCH_DB_OPERAND = "data/torrents.db"
 
         /**
-         * argv for [action]'s one-shot: a bare flag for every action except the
-         * movie-kind bench, which also takes the database operand.
+         * argv for [action]'s one-shot: a bare flag for most actions. The movie-kind
+         * bench also takes the database operand, and the adult backfill takes it plus
+         * `--write` (without that flag the C side only reports counts).
          */
         internal fun argv(action: MaintenanceAction): List<String> = when (action) {
             MaintenanceAction.MOVIE_KIND_BENCH -> listOf(action.flag, BENCH_DB_OPERAND)
+            MaintenanceAction.ADULT_BACKFILL ->
+                listOf(action.flag, BENCH_DB_OPERAND, "--write")
             else -> listOf(action.flag)
         }
 

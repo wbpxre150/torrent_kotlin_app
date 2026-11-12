@@ -254,9 +254,9 @@ class CrawlerConfigTest {
         assertEquals("300", ini["bloom_persist_interval_sec"])
         // Stage 6 adult handling: classifier + calibrated thresholds + hard-block list
         assertEquals("1", ini["classifier_enabled"])
-        assertEquals("models/v6", ini["classifier_model_dir"])
+        assertEquals("models/v11", ini["classifier_model_dir"])
         assertEquals("tag", ini["adult_mode"])
-        assertEquals("0.891912", ini["adult_hide_threshold"])
+        assertEquals("0.545726", ini["adult_hide_threshold"])
         // The drop threshold is gone with drop-all-adult-tagged semantics: the key
         // must not be rendered at all (the crawler ignores it as unknown).
         assertNull(ini["adult_drop_threshold"])
@@ -556,7 +556,7 @@ class CrawlerConfigTest {
         }
 
         /** Checked-in model assets (read-only source of truth for the staging tests). */
-        private val MODEL_SRC_DIR = File("src/main/cpp/dht_crawler-android/models/v6")
+        private val MODEL_SRC_DIR = File("src/main/cpp/dht_crawler-android/models/v11")
 
         /** Checked-in movie-kind (JEVH) assets — the v10 generation's source of truth. */
         private val MOVIE_MODEL_SRC_DIR = File("src/main/cpp/dht_crawler-android/models/v10")
@@ -574,7 +574,7 @@ class CrawlerConfigTest {
         }
 
         /**
-         * Mirrors `assets/dht_crawler/models/v6/` and `.../v10/` into the asset fixture with
+         * Mirrors `assets/dht_crawler/models/v11/` and `.../v10/` into the asset fixture with
          * the real checked-in model files, so byte fidelity is asserted against real
          * binaries.
          */
@@ -792,7 +792,9 @@ class CrawlerConfigTest {
             assertEquals("1", ini["classifier_enabled"])
             assertEquals(CrawlerConfig.MODELS_SUBDIR, ini["classifier_model_dir"])
             assertEquals("tag", ini["adult_mode"])
-            assertEquals("0.891912", ini["adult_hide_threshold"])
+            assertEquals("0.545726", ini["adult_hide_threshold"])
+            // Pinned for this release: nothing may auto-run a reclassify at launch.
+            assertEquals("off", ini["classify_backfill_mode"])
             assertNull(ini["adult_drop_threshold"])
             assertEquals(CrawlerConfig.HARD_BLOCK_FILE, ini["hard_block_file"])
         }

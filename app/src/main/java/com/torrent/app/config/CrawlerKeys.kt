@@ -37,6 +37,10 @@ object CrawlerKeys {
         // Ingest-time classifier + adult handling (Stage 5/6)
         "classifier_enabled", "classifier_model_dir",
         "adult_mode", "adult_hide_threshold", "hard_block_file",
+        // Classifier/adult backfill mode (`all` | `adult` | `off`). The config writer
+        // pins it to `off` for this release and no form field renders it, so it is
+        // known (parseAdvanced must not call it unknown) and advanced-overridable.
+        "classify_backfill_mode",
         // Movie-kind classifier + backfill (Stage D). Storage-only: the app stages
         // the model dir (pinned) and renders no form field for these, so the three
         // tunables are settable from the advanced textarea (the
@@ -111,6 +115,13 @@ object CrawlerKeys {
 
     /** `adult_mode` values accepted by the C crawler's `config.c` (case-sensitive there). */
     val ADULT_MODES = listOf("tag", "drop")
+
+    /**
+     * `classify_backfill_mode` values accepted by the C crawler's `config.c`
+     * (case-sensitive there): run the full classify pass, run the token-gated adult
+     * pass only, or run nothing at all.
+     */
+    val CLASSIFY_BACKFILL_MODES = listOf("all", "adult", "off")
 
     /**
      * Fixed worker-thread overhead on top of `num_trees × Σ(per-tree workers)`
