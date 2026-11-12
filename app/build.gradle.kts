@@ -570,7 +570,8 @@ tasks.register("prepareDhtCrawlerSrc") {
             "random-facet-pool.patch",
             "movie-kind-conjunctive.patch",
             "maintenance-progress.patch",
-            "movie-kind-v10-streaming.patch"
+            "movie-kind-v10-streaming.patch",
+            "adult-v11-backfill.patch"
         )) {
             project.exec {
                 commandLine("patch", "-p1", "-d", destDir.absolutePath, "-i", file("$destDir/patches/$patchName").absolutePath)

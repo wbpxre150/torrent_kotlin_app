@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS path_prefixes (    id INTEGER PRIMARY KEY AUTOINCREME
 CREATE TABLE IF NOT EXISTS torrent_files (    id INTEGER PRIMARY KEY AUTOINCREMENT,    torrent_id INTEGER NOT NULL,    prefix_id INTEGER,    filename TEXT NOT NULL,    size_bytes INTEGER NOT NULL,    file_index SMALLINT NOT NULL,    FOREIGN KEY (torrent_id) REFERENCES torrents(id) ON DELETE CASCADE,    FOREIGN KEY (prefix_id) REFERENCES path_prefixes(id));
 CREATE INDEX IF NOT EXISTS idx_files_torrent ON torrent_files(torrent_id);
 CREATE INDEX IF NOT EXISTS idx_files_prefix ON torrent_files(prefix_id);
-CREATE TABLE IF NOT EXISTS torrent_class (    torrent_id INTEGER PRIMARY KEY REFERENCES torrents(id) ON DELETE CASCADE,    category INTEGER NOT NULL,    tv_kind INTEGER,    adult INTEGER NOT NULL DEFAULT 0,    adult_p REAL,    season_lo INTEGER,    season_hi INTEGER,    episode_lo INTEGER,    episode_hi INTEGER,    resolution INTEGER,    confidence REAL,    clf_ver INTEGER NOT NULL,    movie_kind_mask INTEGER,    movie_kind_clf_ver INTEGER);
+CREATE TABLE IF NOT EXISTS torrent_class (    torrent_id INTEGER PRIMARY KEY REFERENCES torrents(id) ON DELETE CASCADE,    category INTEGER NOT NULL,    tv_kind INTEGER,    adult INTEGER NOT NULL DEFAULT 0,    adult_p REAL,    season_lo INTEGER,    season_hi INTEGER,    episode_lo INTEGER,    episode_hi INTEGER,    resolution INTEGER,    confidence REAL,    clf_ver INTEGER NOT NULL,    movie_kind_mask INTEGER,    movie_kind_clf_ver INTEGER,    adult_clf_ver INTEGER);
 CREATE INDEX IF NOT EXISTS idx_class_cat ON torrent_class(category, tv_kind, torrent_id) WHERE adult = 0;
 CREATE INDEX IF NOT EXISTS idx_class_ver ON torrent_class(clf_ver);
 CREATE TABLE IF NOT EXISTS classifier_meta (key TEXT PRIMARY KEY, value TEXT);
