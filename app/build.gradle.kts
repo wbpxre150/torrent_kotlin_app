@@ -15,8 +15,8 @@ android {
         applicationId = "com.torrent.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "0.3.0"
     }
 
     buildTypes {
@@ -571,7 +571,8 @@ tasks.register("prepareDhtCrawlerSrc") {
             "movie-kind-conjunctive.patch",
             "maintenance-progress.patch",
             "movie-kind-v10-streaming.patch",
-            "adult-v11-backfill.patch"
+            "adult-v11-backfill.patch",
+            "movie-kind-v13-default.patch"
         )) {
             project.exec {
                 commandLine("patch", "-p1", "-d", destDir.absolutePath, "-i", file("$destDir/patches/$patchName").absolutePath)
@@ -593,11 +594,11 @@ tasks.register<Copy>("copyDhtCrawlerAssets") {
     // conversion), so a plain copy is correct here. The include list is explicit on
     // purpose: `v*/**` would ship the retired v4 generation too.
     // `into("models")` is relative to the task destination above, giving the asset
-    // paths dht_crawler/models/v11/<file> and dht_crawler/models/v10/<file> (overriding)
+    // paths dht_crawler/models/v11/<file> and dht_crawler/models/v13/<file> (overriding)
     // the crawler's compiled-in default dirs).
     val modelSrc = file("src/main/cpp/dht_crawler-android/models")
     from(modelSrc) {
-        include("v11/**", "v10/**")
+        include("v11/**", "v13/**")
         into("models")
     }
     into(file("build/generated/assets/dht_crawler/dht_crawler"))

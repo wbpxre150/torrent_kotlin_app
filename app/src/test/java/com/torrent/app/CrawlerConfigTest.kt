@@ -261,9 +261,9 @@ class CrawlerConfigTest {
         // must not be rendered at all (the crawler ignores it as unknown).
         assertNull(ini["adult_drop_threshold"])
         assertEquals("hard_block.txt", ini["hard_block_file"])
-        // Stage D movie-kind classifier (models/v10): storage-only, no form field.
+        // Stage D movie-kind classifier (models/v13): storage-only, no form field.
         assertEquals("1", ini["movie_kind_enabled"])
-        assertEquals("models/v10", ini["movie_kind_model_dir"])
+        assertEquals("models/v13", ini["movie_kind_model_dir"])
         assertEquals("4", ini["movie_kind_threads"])
         assertEquals("82", ini["movie_kind_thermal_backoff_c"])
         assertNull(ini["backup_path"])
@@ -524,12 +524,17 @@ class CrawlerConfigTest {
             // left over from an older build.
             val retired = File(cfg.workDir, "models/v4").apply { mkdirs() }
             File(retired, "adult.ftz").writeBytes(byteArrayOf(4, 4, 4))
+            // The generation the app shipped before this bump: no longer active, so it must
+            // be swept even though its file names are identical to the active pair's.
+            val previous = File(cfg.workDir, "models/v10").apply { mkdirs() }
+            File(previous, "movie_kind_head.bin").writeBytes(byteArrayOf(10, 10, 10))
             val stamp = File(cfg.workDir, CrawlerConfig.STAMP_FILE)
             stamp.writeText("${crawlerVersionCode()}|models/v6")
 
             cfg.ensureAssets()
 
             assertFalse("the retired v4 generation is reclaimed", retired.exists())
+            assertFalse("the previous v10 generation is reclaimed", previous.exists())
             assertTrue("the fastText generation survives the sweep", cfg.modelsDir.isDirectory)
             assertTrue("the movie-kind generation survives the sweep", cfg.movieModelsDir.isDirectory)
             for (name in CrawlerConfig.MOVIE_MODEL_FILES) {
@@ -558,8 +563,8 @@ class CrawlerConfigTest {
         /** Checked-in model assets (read-only source of truth for the staging tests). */
         private val MODEL_SRC_DIR = File("src/main/cpp/dht_crawler-android/models/v11")
 
-        /** Checked-in movie-kind (JEVH) assets — the v10 generation's source of truth. */
-        private val MOVIE_MODEL_SRC_DIR = File("src/main/cpp/dht_crawler-android/models/v10")
+        /** Checked-in movie-kind (JEVH) assets — the v13 generation's source of truth. */
+        private val MOVIE_MODEL_SRC_DIR = File("src/main/cpp/dht_crawler-android/models/v13")
 
         /** Mirrors `CrawlerConfig.currentVersionCode()`, which is private to the class. */
         private fun crawlerVersionCode(): Long {
@@ -574,7 +579,7 @@ class CrawlerConfigTest {
         }
 
         /**
-         * Mirrors `assets/dht_crawler/models/v11/` and `.../v10/` into the asset fixture with
+         * Mirrors `assets/dht_crawler/models/v11/` and `.../v13/` into the asset fixture with
          * the real checked-in model files, so byte fidelity is asserted against real
          * binaries.
          */

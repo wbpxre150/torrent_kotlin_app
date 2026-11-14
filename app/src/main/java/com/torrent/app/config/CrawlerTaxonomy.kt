@@ -29,7 +29,7 @@ object CrawlerTaxonomy {
 
     /**
      * The 16 movie-kind genre names, in the movie-kind manifest order
-     * (`dht_crawler-android/models/v10/manifest.json`), which is also the bit
+     * (`dht_crawler-android/models/v13/manifest.json`), which is also the bit
      * order of a row's `movie_kind_mask`. The search page renders its chips and
      * badges in this order, and the crawler's `movie_kind` filter param accepts
      * exactly these names (plus the literal `none`).
