@@ -114,7 +114,7 @@ prefix is required by the packaging step — they are **exec'd as PIE binaries, 
 | Output | Source | Built by | Role |
 |---|---|---|---|
 | `libtransmissiond.so` | transmission **4.1.2** tarball + `src/main/cpp/transmission-fork/` | `buildTransmission` → `apply_fork.py` → CMake/NDK | BitTorrent daemon; disk I/O routed to SAF gateway via `/saf/usb` sentinel path |
-| `libdhtcrawler.so` | vendored `src/main/cpp/dht_crawler/` | `buildDhtCrawler` → `prepareDhtCrawlerSrc` (copy + 16 patches) → CMake | DHT keyspace crawler; SQLite DB; civetweb HTTP API; bloom-filter dedup |
+| `libdhtcrawler.so` | vendored `src/main/cpp/dht_crawler/` | `buildDhtCrawler` → `prepareDhtCrawlerSrc` (copy + 17 patches) → CMake | DHT keyspace crawler; SQLite DB; civetweb HTTP API; bloom-filter dedup |
 | `libftpserver.so` | `src/main/cpp/ftp-server/` (C11) | `buildFtpServer` → CMake/NDK | FTP server for media clients; posix or SAF backend (SAF talks to `SafIpcServer`) |
 
 **Task graph:** `buildMbedtls` (mbedTLS **3.6.6**) → `buildCurl` (curl **8.20.0**) → `buildTransmission`;
@@ -128,20 +128,31 @@ generations (~504 MiB, ~6 s) into
 `mergeDebugJniLibFolders` depend on all three build tasks. `-PdhtCrawlerSrc=<path>` overrides the
 crawler source root. Native build inputs/outputs land under `app/build/native/`.
 
-**Movie-kind classifier (v10).** The crawler links a CPU-only llama.cpp (`buildLlama`) and the vendored
+**Movie-kind classifier (v13).** The crawler links a CPU-only llama.cpp (`buildLlama`) and the vendored
 `dht_crawler-android/utf8proc/` (**2.12.0**); the NDK wrapper defines `MK_ENABLED` and
 `MK_NFC_ENABLED` only when `LLAMA_INSTALL` is set, so a plain host configure stays plain C99. Two
 model generations ship side by side: `models/v11` (fastText — see *fastText adult classifier (v11)*
-below) and `models/v10` (Qwen3.5-0.8B nemotron arm decoder — Q4_0 backbone 501,452,416 B / 478.2 MiB,
-sha256 `02555750…`, plus the JEVH head 65,712 B, 1024×16, sha256 `077aaf11…`, hidden 1024 — pinned by
-`movie_kind_model_dir`). `ensureAssets` stages both, the sweep keeps the active *set* `{v11, v10}` and
-removes retired dirs, and `.assets_version` is `<versionCode>|models/v11|models/v10` — a stamp change is
-what triggers restaging, no versionCode bump required; the staged models total 528,146,811 B (~503.7 MiB
-— `models/v11` 26,612,152 B + `models/v10` 501,534,659 B) and the debug APK measures 548,821,733 B at
-`versionCode` 2 / `versionName` "0.2.0".
+below) and `models/v13` (same family as v10 — decoder backbone, Q4_0 501,452,416 B / 478.2 MiB, sha256
+`28270fa01100687969b541282814371062ab9e1a560bb7ea755243c822cf0d4c`, plus the JEVH head 65,712 B,
+1024×16, sha256 `2f994cbe792441be182717cc6faa46f3ff245db6d17af30d72cfc47bbefb7ae3`, hidden 1024, 16
+labels, prompt `Torrent: {name}\nFilm genres:`, max 64 tokens, staged beside `manifest.json` 17,772 B
+sha256 `e0474643…fb57` — pinned by `movie_kind_model_dir`). `CrawlerConfig.MOVIE_MODEL_SUBDIR =
+"models/v13"` drives the staging source/dest, the stamp and that pin. `ensureAssets` stages both, the
+sweep keeps the active *set* `{v11, v13}` and removes retired dirs, and `.assets_version` is
+`<versionCode>|models/v11|models/v13` — a stamp change is what triggers restaging, no versionCode bump
+required; the stamp is a crawler-level file (`files/crawler/.assets_version`, **not** under `models/`)
+and currently reads `3|models/v11|models/v13`. The staged models total 528,148,052 B (~503.7 MiB —
+`models/v11` 26,612,152 B + `models/v13` 501,535,900 B) and the debug APK measures 542,045,550 B at
+`versionCode` 3 / `versionName` "0.3.0" — ~6.8 MB *smaller* than the 548,821,733 B v10 build because the
+v13 weights deflate differently, despite identical uncompressed asset sizes.
+Generation is manifest-derived: the manifest's top-level `"version": "v13"` (`mk_parse_generation`)
+yields `movie_kind_clf_ver` 13 and `/stats movie_kind.generation` 13 with **no code change**; `genres[]`
+order is byte-identical to v10 and `taxonomy.sha256` is unchanged at
+`313dafd4a5fd27e35e15530cee5279c409a92d2cb818a3d4878cfc914f7148b4`.
 Pooling is last-token: `src/movie_kind.c` sets `context_params.pooling_type = LLAMA_POOLING_TYPE_LAST`,
 the read stays `llama_get_embeddings_seq(ctx, 0)`, and `embd_normalize` is not set — at the llama.cpp
-pin the pooled vector comes back unnormalised, which is what the v10 head was fitted on. v9 shipped the
+pin the pooled vector comes back unnormalised, which is what the v13 head was fitted on, as v10 was. v9
+shipped the
 CLS/`llama_get_embeddings()` pairing, whose P0 (one constant mask on every name) was invisible to host
 tests, review and `/stats`, so the on-device mask-parity spot check is mandatory before any production
 write is trusted.
@@ -149,7 +160,7 @@ Classification happens inline at ingest: `movie_kind_classify()` is called in
 `tree_metadata_worker_func` between the survivor classification block and the adult drop — outside
 `db->mutex` and outside `batch_writer_add` — for movie category + `adult = 0` + `movie_kind_enabled()`
 rows only. The verdict rides `torrent_metadata_t` (`movie_kind_mask`, `has_movie_kind`,
-`movie_kind_clf_ver`) into the 14-column `torrent_class` INSERT, stamped `movie_kind_clf_ver` = 10; a
+`movie_kind_clf_ver`) into the 14-column `torrent_class` INSERT, stamped `movie_kind_clf_ver` = 13; a
 classify failure stores the row unlabelled (both columns NULL) and is non-fatal. The backfill daemon is
 **not** started in production — only the `movie_backfill_daemon_start` call in `src/main.c` was removed,
 while `request_shutdown`/`destroy` stay and are no-op-safe when never started; the engine,
@@ -161,8 +172,40 @@ dashboard panel is left as-is on purpose.
 `classifier`/`classifier_backfill`. The `movie-kind-bench` maintenance action runs
 `--movie-kind-bench data/torrents.db` (every maintenance action stops the supervised crawler first);
 the reset one-shot is `--movie-kind-backfill <db> --reset` with the app force-stopped. G6 bars are
-median ≤ 300 ms, p95 ≤ 600 ms, peak RSS ≤ 1.2 GiB and the 478.2 MiB backbone file — the on-device bench
-has not been run yet, so no measured figure is quoted here.
+median ≤ 300 ms, p95 ≤ 600 ms, peak RSS ≤ 1.2 GiB and the 478.2 MiB backbone file.
+**G6 measured on b078fce — the first real on-device movie-kind measurement (v10's was never run).** The
+bench `--movie-kind-bench data/torrents.db 500` reports median **188.843 ms**, p95 **284.400 ms**,
+`vmhwm_kib` **1,149,368** (= 1,122.4 MiB), max CPU 76 °C, threads 4, 3000 samples over 627 s, failures
+0, generation 13: PASS on median, p95 and peak RSS on **both** bar bases (1,228,800 KiB reported-KiB and
+1,171,866 KiB = 1,144.4 MiB strict-GB), and the 478.2 MiB file passes the 600 MiB bar. A sustained live
+window (35.5 min, 8 samples, the crawler ingesting 22,036 → 29,103 torrents) settled at
+`mean_us_per_item` ≈ **254 ms** (window mean 302.7 ms, steady-state mean 261.2 ms after warm-up) with
+`thermal_pauses` 0 and failures 0 at every sample, 59.0–67.3 °C. A distinct quantity, never conflated
+with the classifier's pre-registered bench figure: the **whole crawler process** live `VmHWM` reached
+2,044,464 KiB ≈ 1.95 GiB (model + crawl state + SQLite page cache; already 1.70 GiB before the
+measurement).
+**Gate P (mask parity) is mandatory before any production write** — the v9 P0 class (one constant mask
+on every name) is invisible to host tests, review and `/stats`. It ran and PASSED under an
+operator-revised cross-architecture bar: ≥98 % identical label sets, measured **490/500 = 98.00 %** and
+**986/1000 = 98.6 %** (≤64-token subset 985/995 = 99.0 %), every mismatch within Hamming 4 (N=1000: 11
+rows at 1, 2 at 2, 1 at 4) with flips in **both** directions, 122/165 distinct masks (no constant-mask
+P0 signature), the decomposed-Unicode row agrees, zero classify failures, and three independent phone
+bench runs are bit-identical (determinism). The original 500/500 empty-diff letter is recorded as
+**FAILED** (commit 3e592d7); the bar revision is a recorded operator decision, not a silent pass. The
+residual is arm64-vs-x86 float32 accumulation at the head thresholds.
+**Device state after the D1 reset + full backfill (b078fce, single generation):** 21,404 torrents,
+**9,144** adult0-movie rows all at `movie_kind_clf_ver` = 13, zero at 10, zero NULL; `classifier_meta`
+`movie_kind_clf_ver` = 13 and `movie_backfill_last_id` = `''`. The reset cleared 9,144 rows (it clears
+every `movie_kind_clf_ver >= 9`, which is why it runs **exactly once**, app force-stopped, before the
+pass) and the pass then relabelled all 9,144 with `updated=9144 skipped=0 failed=0 thermal_pauses=0` in
+~29 min; log corruption count 0. The backfill's 500-row `--dump-masks` dump was byte-identical to the
+pre-write gate-P dump.
+Carried forward, unchanged: the accepted G3 `none`-recall miss (**0.7368** vs the 0.85 bar — recorded
+upstream, not waived), `classify_backfill_mode` pinned `off`, the backfill daemon not started in
+production, and the movie-kind backfill reachable only as a force-stopped one-shot.
+**Rollback history:** `models/v10` survives only in git as reinstall-rollback history — reinstalling the
+0.2.0 APK restages v10, and masks are bit-compatible so 13-labelled rows stay readable. The device's
+`files/crawler/models/` now holds only `v11` and `v13`.
 
 **fastText adult classifier (v11).** `classifier_model_dir` pins `models/v11` (`CrawlerConfig.MODELS_SUBDIR`);
 `models/v6` is retired and survives only as rollback history (reinstalling the 0.1.0 APK restages it — G8
@@ -247,12 +290,15 @@ deliberately not run in this release.
   archive — override `TPARSE_LIB` or you measure the wrong parser.
 - Adding a `torrent_class` column means five places in the C tree plus the Kotlin mirror — see invariant 14.
 
-**dht_crawler patches (order is fixed, applied by `prepareDhtCrawlerSrc`):** the 16-entry list in
+**dht_crawler patches (order is fixed, applied by `prepareDhtCrawlerSrc`):** the 17-entry list in
 `app/build.gradle.kts` opens with the three upstream fixes — `bencode-cap-fix.patch` →
 `bencode-init-fix.patch` → `civetweb-stop-flag-atomic.patch` — and closes with
-`movie-kind-v10-streaming.patch` (last-token pooling + inline ingest classification) then
-`adult-v11-backfill.patch` (the token-gated adult backfill, `adult_clf_ver`, `classify_backfill_mode`);
-new patches go LAST, as the 17th slot. Upstream fixes belong in `patches/`.
+`movie-kind-v10-streaming.patch` (last-token pooling + inline ingest classification),
+`adult-v11-backfill.patch` (the token-gated adult backfill, `adult_clf_ver`, `classify_backfill_mode`)
+then `movie-kind-v13-default.patch` (the 17th and last: flips only the compiled-in model-dir default —
+three literals in `src/config.c`, `include/movie_kind.h` `MOVIE_KIND_MODEL_DIR_DEFAULT` and the
+`include/config.h` comment — so the vendored tree stays pristine); new patches go LAST, as the 18th
+slot. Upstream fixes belong in `patches/`.
 See the vendored repo's `CLAUDE.md` for its architecture (thread trees, bloom filters, schema).
 
 ## Tests
