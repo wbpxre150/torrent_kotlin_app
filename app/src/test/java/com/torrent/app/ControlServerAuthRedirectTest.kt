@@ -57,6 +57,9 @@ class ControlServerAuthRedirectTest {
     /** How often the injected reset lambda ran; proves the route's guard. */
     private val resetCalls = AtomicInteger()
 
+    /** How often the injected cloudflared-save lambda ran; proves the split. */
+    private val cloudflaredCalls = AtomicInteger()
+
     @Before fun startServer() {
         port = freePort()
         control = newServer(port)
@@ -119,6 +122,62 @@ class ControlServerAuthRedirectTest {
 
     @Test fun crawlerPost_acceptedForm_redirectsWithoutToken() {
         assertSettingsRedirect("/settings/crawler", "saveCategories=movie")
+    }
+
+    // ── the tunnel card's own route (Stage 6) ──────────────────────────────
+
+    /**
+     * Stage 6: `POST /settings/cloudflared` is the tunnel card's own route. A form
+     * that ticks "enabled" with no stored token is rejected before anything is
+     * written — [cloudflaredCalls] proves the save slot never ran, so no store
+     * write and no cloudflared start/stop happened.
+     */
+    @Test fun cloudflaredPost_rejectedForm_redirectsWithoutTokenAndWritesNothing() {
+        val r = postWithRetry(
+            "/settings/cloudflared", body = "cloudflaredEnabled=on", cookie = COOKIE)
+        assertEquals(r.statusLine, 302, r.status)
+        val location = r.header("Location")
+        assertNotNull("expected a Location on the tunnel redirect", location)
+        assertTrue(
+            "expected a /settings/crawler?msg= redirect, got: $location",
+            location!!.startsWith("/settings/crawler?msg=")
+        )
+        assertFalse("the Location must not carry token=: $location", location.contains("token="))
+        assertEquals(
+            "Tunnel token is required when the Cloudflare tunnel is enabled",
+            redirectMessage(location)
+        )
+        assertTrue("expected ok=false, got: $location", location.endsWith("&ok=false"))
+        assertEquals("a rejected tunnel form must write nothing", 0, cloudflaredCalls.get())
+    }
+
+    @Test fun cloudflaredPost_acceptedForm_savesThroughItsOwnSlot() {
+        val r = postWithRetry(
+            "/settings/cloudflared", body = "cloudflaredHostname=abc.example.com", cookie = COOKIE)
+        assertEquals(r.statusLine, 302, r.status)
+        val location = r.header("Location")
+        assertNotNull("expected a Location on the tunnel redirect", location)
+        assertTrue(
+            "expected a /settings/crawler?msg= redirect, got: $location",
+            location!!.startsWith("/settings/crawler?msg=")
+        )
+        assertFalse("the Location must not carry token=: $location", location.contains("token="))
+        assertEquals("the save result's message is the redirect's msg", "tunnel saved",
+            redirectMessage(location))
+        assertTrue("expected ok=true, got: $location", location.endsWith("&ok=true"))
+        assertEquals("the tunnel save must reach its own slot exactly once",
+            1, cloudflaredCalls.get())
+    }
+
+    /**
+     * The point of Stage 6: a crawler apply never reconciles the tunnel, and a
+     * tunnel save never applies the crawler — the two forms have separate routes.
+     */
+    @Test fun crawlerPost_neverTouchesTheCloudflaredSlot() {
+        val r = postWithRetry("/settings/crawler", body = "saveCategories=movie", cookie = COOKIE)
+        assertEquals(r.statusLine, 302, r.status)
+        assertEquals("the crawler POST must not save tunnel settings",
+            0, cloudflaredCalls.get())
     }
 
     @Test fun crawlerMaintenancePost_redirectsWithoutToken() {
@@ -233,6 +292,10 @@ class ControlServerAuthRedirectTest {
             crawlerBackupDbReset = {
                 resetCalls.incrementAndGet()
                 "db backup reset queued"
+            },
+            saveCloudflared = {
+                cloudflaredCalls.incrementAndGet()
+                com.torrent.app.config.ApplyResult(true, "tunnel saved", false)
             },
             port = port,
         )

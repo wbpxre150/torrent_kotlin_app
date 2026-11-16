@@ -24,6 +24,10 @@ import org.mockito.Mockito
  * Mockito, driving [ControlServer.buildCrawlerPanel] through its injected
  * collaborator lambdas (same harness as [ControlServerCrawlerCategoriesTest]).
  *
+ * Stage 6 moved the card into its OWN `<form id="cloudflared-form">` posting to
+ * `POST /settings/cloudflared`, so a tunnel save never runs the crawler apply
+ * (HTML forbids nested forms, so the card sits after the crawler form).
+ *
  * The token is a secret: the card must never interpolate the stored value into
  * the HTML, so every render assertion here also re-checks that.
  */
@@ -80,20 +84,37 @@ class ControlServerCloudflaredCardTest {
     private fun occurrences(html: String, needle: String): Int =
         Regex(Regex.escape(needle)).findAll(html).count()
 
-    @Test fun panel_rendersTheTunnelCardBetweenAccessAndBackup() {
+    /**
+     * Stage 6: the card has its OWN form and its OWN route. HTML forbids nested
+     * forms, so the card is emitted after the crawler form's `</form>` — a tunnel
+     * save must never be able to run the crawler apply.
+     */
+    @Test fun panel_rendersTheTunnelCardInItsOwnForm() {
         val html = panel(CloudflaredSettings())
-        val access = html.indexOf("<legend>Access</legend>")
-        val tunnel = html.indexOf("Cloudflare Tunnel")
-        val backup = html.indexOf("<legend>Backup ")
-        assertTrue("the Access card must still render", access > 0)
-        assertTrue("the tunnel card must render", tunnel > access)
-        assertTrue("the tunnel card must sit before the Backup card", backup > tunnel)
+        val crawlerFormOpen = html.indexOf("<form id=\"settings-form\"")
+        assertTrue("the crawler form must still render", crawlerFormOpen > 0)
+        val crawlerFormClose = html.indexOf("</form>", crawlerFormOpen)
+        val formOpen = html.indexOf(
+            "<form id=\"cloudflared-form\" method=\"post\" action=\"/settings/cloudflared\">")
+        assertTrue("the card must have its own form posting to its own route", formOpen > 0)
+        val formClose = html.indexOf("</form>", formOpen)
+        assertTrue("the tunnel form must be closed", formClose > formOpen)
+        assertTrue("the tunnel form must follow the crawler form (no nested forms)",
+            formOpen > crawlerFormClose)
+        val card = html.substring(formOpen, formClose)
         assertTrue("the card needs its fieldset legend",
-            html.contains("<fieldset class=\"card\"><legend>Cloudflare Tunnel "))
+            card.contains("<fieldset class=\"card\"><legend>Cloudflare Tunnel "))
         assertTrue("the card must say it is app-side only",
-            html.contains("app-side only; not written to the crawler config"))
+            card.contains("app-side only; not written to the crawler config"))
         assertTrue("the enable toggle is the form's checkbox convention",
-            html.contains("<input type=\"checkbox\" name=\"cloudflaredEnabled\" >"))
+            card.contains("<input type=\"checkbox\" name=\"cloudflaredEnabled\" >"))
+        assertTrue("the tunnel form needs its own submit button",
+            card.contains("<button type=\"submit\" class=\"btn\">Save tunnel</button>"))
+        val crawlerForm = html.substring(crawlerFormOpen, crawlerFormClose)
+        assertFalse("no tunnel field may ride the crawler form",
+            crawlerForm.contains("cloudflared"))
+        assertTrue("the Access card must still render",
+            crawlerForm.contains("<legend>Access</legend>"))
     }
 
     @Test fun panel_tokenRowStartsHiddenWhileDisabled() {

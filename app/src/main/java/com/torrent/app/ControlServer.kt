@@ -58,8 +58,8 @@ class ControlServer(
         { com.torrent.app.config.ApplyResult(false, "backup settings are not wired", false) },
     // Cloudflare Tunnel (Stage 3): a plain store write plus a cloudflared
     // supervisor start/stop — the crawler is never stopped or reconfigured
-    // (see DaemonService.saveCloudflaredSettings). Stage 5 wires the settings
-    // card's form to this slot.
+    // (see DaemonService.saveCloudflaredSettings). Stage 6 wires the tunnel
+    // card's own form (POST /settings/cloudflared) to this slot.
     private val saveCloudflared: (com.torrent.app.config.CloudflaredSettings) -> com.torrent.app.config.ApplyResult =
         { com.torrent.app.config.ApplyResult(false, "cloudflared is not wired", false) },
     private val crawlerApplyStatus: () -> CrawlerApplyStatus = { CrawlerApplyStatus() },
@@ -354,34 +354,36 @@ class ControlServer(
                             is CrawlerSettingsFormResult.Ok -> {
                                 val s = parsed.settings
                                 val backup = backupSettingsFromForm(form, currentCfg.backup)
-                                // Stage 5: an enabled tunnel with no stored token is a
-                                // form mistake. Rejected here, before applyCrawler, so a
-                                // bad tunnel form never stops or rewrites the crawler.
-                                val cf = when (val cfParsed =
-                                    cloudflaredSettingsFromForm(form, currentCfg.cloudflared)) {
-                                    is CloudflaredFormResult.Bad -> {
-                                        redirectAuthed(call,
-                                            "/settings/crawler?msg=${urlEnc(cfParsed.message)}&ok=false")
-                                        return@post
-                                    }
-                                    is CloudflaredFormResult.Ok -> cfParsed.settings
-                                }
                                 val bloomChanged = current.bloomCapacity != s.bloomCapacity ||
                                     current.failureBloomCapacity != s.failureBloomCapacity ||
                                     current.bloomErrorRate != s.bloomErrorRate
                                 val r = applyCrawler(s)
                                 val rb = saveBackup(backup)
-                                // Beside saveBackup, never inside applyCrawler: the
-                                // tunnel save writes the store and reconciles the
-                                // cloudflared child only, so the dht_crawler keeps
-                                // running untouched (criterion 9).
-                                val rc = saveCloudflared(cf)
-                                val okAll = r.ok && rb.ok && rc.ok
+                                val okAll = r.ok && rb.ok
                                 val msg = if (okAll) r.message
-                                    else "${r.message} / backup: ${rb.message} / tunnel: ${rc.message}"
+                                    else "${r.message} / backup: ${rb.message}"
                                 val rebuild = if (bloomChanged) "&rebuildBloom=true" else ""
                                 redirectAuthed(call,
                                     "/settings/crawler?msg=${urlEnc(msg)}&ok=$okAll$rebuild")
+                            }
+                        }
+                    }
+                    // Stage 6: the Cloudflare Tunnel card's OWN route. It parses the
+                    // dedicated form and touches the store plus the cloudflared child
+                    // only — applyCrawler, saveBackup and every crawler config.ini
+                    // writer are deliberately absent, so a tunnel save never stops or
+                    // reconfigures the dht_crawler (criterion 9).
+                    post("settings/cloudflared") {
+                        val form = collapseForm(parseFormMulti(call.receiveText()))
+                        val current = loadConfig().cloudflared
+                        when (val parsed = cloudflaredSettingsFromForm(form, current)) {
+                            // Nothing is written on a rejected form.
+                            is CloudflaredFormResult.Bad -> redirectAuthed(call,
+                                "/settings/crawler?msg=${urlEnc(parsed.message)}&ok=false")
+                            is CloudflaredFormResult.Ok -> {
+                                val rc = saveCloudflared(parsed.settings)
+                                redirectAuthed(call,
+                                    "/settings/crawler?msg=${urlEnc(rc.message)}&ok=${rc.ok}")
                             }
                         }
                     }
@@ -1463,16 +1465,6 @@ class ControlServer(
                 <label class="row"><input type="checkbox" name="lanDirect" ${checked(s.lanDirect)}> ${infoBtn("LAN direct", "lan-direct")}</label>
                 ${infoText("lan-direct", "bind 0.0.0.0, no proxy, no auth")}
               </fieldset>
-              <fieldset class="card"><legend>${infoBtn("Cloudflare Tunnel", "cf-tunnel")}</legend>
-                ${infoText("cf-tunnel", "app-side only; not written to the crawler config")}
-                <label class="row"><input type="checkbox" name="cloudflaredEnabled" ${checked(sCf.enabled)}> Enable Cloudflare tunnel</label>
-                <div id="cf-token-row"$cfTokenRowHidden>
-                  <label>${infoBtn("Tunnel token", "cf-token")}<input type="password" name="cloudflaredToken" placeholder="unchanged"></label>
-                  ${infoText("cf-token", "leave blank to keep")}
-                  <label>${infoBtn("Public hostname", "cf-hostname")}<input name="cloudflaredHostname" value="${esc(sCf.publicHostname)}"></label>
-                  ${infoText("cf-hostname", "auto-detected when connected; edit only if detection is unavailable")}
-                </div>
-              </fieldset>
               <fieldset class="card"><legend>${infoBtn("Backup", "backup")}</legend>
                 ${infoText("backup", "app-side only; not written to the crawler config")}
                 <label class="row"><input type="checkbox" name="uploadEnabled" ${checked(sBackup.uploadEnabled)}> Enable R2 upload</label>
@@ -1489,6 +1481,23 @@ class ControlServer(
                 <label>R2 DB object prefix<input name="r2DbObjectPrefix" value="${esc(sBackup.r2DbObjectPrefix)}"></label>
               </fieldset>
               <button type="submit" class="btn">Apply</button>
+            </form>
+            <!-- Stage 6: the tunnel card lives in its OWN form (HTML forbids nested
+                 forms). POST /settings/cloudflared saves the store and reconciles
+                 the cloudflared child only — it never runs applyCrawler, so a
+                 tunnel save cannot stop or reconfigure the dht_crawler. -->
+            <form id="cloudflared-form" method="post" action="/settings/cloudflared">
+              <fieldset class="card"><legend>${infoBtn("Cloudflare Tunnel", "cf-tunnel")}</legend>
+                ${infoText("cf-tunnel", "app-side only; not written to the crawler config")}
+                <label class="row"><input type="checkbox" name="cloudflaredEnabled" ${checked(sCf.enabled)}> Enable Cloudflare tunnel</label>
+                <div id="cf-token-row"$cfTokenRowHidden>
+                  <label>${infoBtn("Tunnel token", "cf-token")}<input type="password" name="cloudflaredToken" placeholder="unchanged"></label>
+                  ${infoText("cf-token", "leave blank to keep")}
+                  <label>${infoBtn("Public hostname", "cf-hostname")}<input name="cloudflaredHostname" value="${esc(sCf.publicHostname)}"></label>
+                  ${infoText("cf-hostname", "auto-detected when connected; edit only if detection is unavailable")}
+                </div>
+              </fieldset>
+              <button type="submit" class="btn">Save tunnel</button>
             </form>
             $rebuildHint
             <div id="apply-status"$applyClass>$applyText</div>
@@ -5105,7 +5114,8 @@ ${adultSelectionRow(adultSelection)}
         )
 
         /**
-         * Builds CloudflaredSettings from the crawler panel form (checkbox
+         * Builds CloudflaredSettings from the tunnel card's own form (Stage 6:
+         * `POST /settings/cloudflared`, never the crawler form) — checkbox
          * presence = true, a blank token field keeps the stored secret, a
          * pasted `https://` prefix is stripped off the hostname). Pure and
          * unit-testable; the POST route redirects with the message on [Bad].
