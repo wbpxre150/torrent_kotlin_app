@@ -114,7 +114,7 @@ prefix is required by the packaging step — they are **exec'd as PIE binaries, 
 | Output | Source | Built by | Role |
 |---|---|---|---|
 | `libtransmissiond.so` | transmission **4.1.2** tarball + `src/main/cpp/transmission-fork/` | `buildTransmission` → `apply_fork.py` → CMake/NDK | BitTorrent daemon; disk I/O routed to SAF gateway via `/saf/usb` sentinel path |
-| `libdhtcrawler.so` | vendored `src/main/cpp/dht_crawler/` | `buildDhtCrawler` → `prepareDhtCrawlerSrc` (copy + 18 patches) → CMake | DHT keyspace crawler; SQLite DB; civetweb HTTP API; bloom-filter dedup |
+| `libdhtcrawler.so` | vendored `src/main/cpp/dht_crawler/` | `buildDhtCrawler` → `prepareDhtCrawlerSrc` (copy + 19 patches) → CMake | DHT keyspace crawler; SQLite DB; civetweb HTTP API; bloom-filter dedup |
 | `libftpserver.so` | `src/main/cpp/ftp-server/` (C11) | `buildFtpServer` → CMake/NDK | FTP server for media clients; posix or SAF backend (SAF talks to `SafIpcServer`) |
 
 **Task graph:** `buildMbedtls` (mbedTLS **3.6.6**) → `buildCurl` (curl **8.20.0**) → `buildTransmission`;
@@ -290,16 +290,42 @@ deliberately not run in this release.
   archive — override `TPARSE_LIB` or you measure the wrong parser.
 - Adding a `torrent_class` column means five places in the C tree plus the Kotlin mirror — see invariant 14.
 
-**dht_crawler patches (order is fixed, applied by `prepareDhtCrawlerSrc`):** the 18-entry list in
+**dht_crawler patches (order is fixed, applied by `prepareDhtCrawlerSrc`):** the 19-entry list in
 `app/build.gradle.kts` opens with the three upstream fixes — `bencode-cap-fix.patch` →
 `bencode-init-fix.patch` → `civetweb-stop-flag-atomic.patch` — and closes with
 `movie-kind-v10-streaming.patch` (last-token pooling + inline ingest classification),
 `adult-v11-backfill.patch` (the token-gated adult backfill, `adult_clf_ver`, `classify_backfill_mode`),
 `movie-kind-v13-default.patch` (flips only the compiled-in model-dir default — three literals in
 `src/config.c`, `include/movie_kind.h` `MOVIE_KIND_MODEL_DIR_DEFAULT` and the `include/config.h`
-comment — so the vendored tree stays pristine) and `inflight-dedup.patch` (the 18th and last); new
-patches go LAST, as the 19th slot. Upstream fixes belong in `patches/`.
-See the vendored repo's `CLAUDE.md` for its architecture (thread trees, bloom filters, schema).
+comment — so the vendored tree stays pristine), `inflight-dedup.patch` (18th) and
+`getpeers-metadata-tuning.patch` (19th and last: the `/stats` success-metric split + per-outcome metadata
+failure attribution + get_peers round-idle exit/miss penalties + metadata piece-idle eviction, window and
+deadline defaults); new patches go LAST, as the 20th slot. Upstream fixes belong in `patches/`.
+See the vendored repo's `CLAUDE.md` for its architecture (thread trees, bloom filters, schema) and its
+`CONFIG_INI.md` for the patch-19 config keys.
+
+**`/stats` after patch 19 (interface only — no measurement recorded yet).** `aggregate` publishes both
+denominators beside their percentages: `metadata_attempts_total` with `metadata_fetch_success_percent`
+(`total_metadata_fetched * 100 / metadata_attempts_total`, 0.0 when the denominator is 0) and
+`get_peers_lookups_total` / `get_peers_lookups_with_peers` with `get_peers_yield_percent`; **`metadata_success_rate_percent`
+is removed** from the JSON — it survives only as a `gp_probe.py` legacy fallback and in source comments.
+`supervisor.metadata_failures` splits the failure mass into `connect_total`, `handshake_total`,
+`stall_total`, `ut_reject_total`, `size_total`, `hash_total`, `deadline_total` and `other_total`: each
+failed connection is counted once, at the site that first detects it, **except `deadline_total`, which is
+one event per attempt** at the global-timeout break (every live slot is abandoned together), so
+Σ counters ≥ failed attempts by design. `supervisor.metadata` echoes the effective metadata knobs
+(`parallel_peers`, `metadata_timeout_ms`, `metadata_workers`, `tcp_connect_timeout_ms`,
+`fresh_peer_retries`, `piece_idle_ms`); `supervisor.get_peers` and every `trees[].get_peers` gain
+`idle_exits_total`, `deadline_exits_total`, `unanswered_slots_total` and `miss_penalties_total` (the
+per-tree block also echoes `round_idle_ms` and `penalize_misses`), and each tree gains `metadata_attempts`
+beside `metadata_count`. Patch 19 also adds the config keys `tree_get_peers_round_idle_ms` (default 1500,
+clamp 0 or 250..6000, 0 = off = the legacy full-deadline round), `tree_get_peers_penalize_misses`
+(default 1, 0/1) and `tree_metadata_piece_idle_ms` (default 15000, clamp 0 or 3000..60000, 0 = off), and
+changes two compiled defaults — `tree_parallel_peers` 2→4 (clamp narrowed 1..10 → 1..4 to match
+`MAX_PARALLEL_PEERS`, so the accepted value is the effective one) and `tree_metadata_timeout_ms`
+60000→30000 — all fail-open to the pre-patch behaviour at 0/old values.
+`tools/crawler/gp_probe.py` reads the new keys with a fallback to `metadata_success_rate_percent`, so one
+probe version measures pre- and post-patch-19 builds.
 
 **Measured on b078fce (patch 18, 320,697-row DB, 64 trees).** `/stats` carries an `inflight` object
 (`enabled/capacity/held/claimed/refused/released/expired/tree_released/clears`). Over an 18-minute run
