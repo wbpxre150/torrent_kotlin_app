@@ -301,6 +301,18 @@ comment — so the vendored tree stays pristine) and `inflight-dedup.patch` (the
 patches go LAST, as the 19th slot. Upstream fixes belong in `patches/`.
 See the vendored repo's `CLAUDE.md` for its architecture (thread trees, bloom filters, schema).
 
+**Measured on b078fce (patch 18, 320,697-row DB, 64 trees).** `/stats` carries an `inflight` object
+(`enabled/capacity/held/claimed/refused/released/expired/tree_released/clears`). Over an 18-minute run
+`refused` 788,419 vs `claimed` 188,715 — **80.7 %** of BEP51 discovery attempts were duplicates that never
+reached a fetch; `held` plateaued at ~21–22 k (bounded by the per-tree queue capacities, not a leak) and
+`expired`/`clears` stayed 0. `Cached counts initialized: 320697 torrents, 10711461 files` matched the
+pre-restart `/stats` exactly across two restarts (319,600 → 319,600 and 320,697 → 320,697), and the
+15-minute re-seed logged `320697 torrents (was 320697)` — zero drift. That re-seed costs ≤ 1 s here
+(`COUNT(*)` over 320 k torrents + 10.7 M files), so expect ~10–25 s on the 6.1 M/286.7 M-row production DB.
+**Trap:** `log_level = DEBUG` on this crawler writes ~575 MB in 18 minutes (1.9 GB/h) — enable it only for a
+short window, and remember `crawler_log_level` lives in `app_config.xml` while `config.ini` is only
+rewritten on a settings apply, so a hand-edited `config.ini` survives a restart.
+
 ## Tests
 
 - Location: `app/src/test/java/com/torrent/app/` mirroring main packages. Run with
