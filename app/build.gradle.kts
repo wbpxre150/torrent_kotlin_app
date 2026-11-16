@@ -576,7 +576,9 @@ tasks.register("prepareDhtCrawlerSrc") {
             // 18th: concurrent-duplicate-fetch suppression (in-flight claim set +
             // bloom-on-fetch-success) and the periodic re-seed of the counts
             // /stats publishes. See include/inflight_set.h.
-            "inflight-dedup.patch"
+            "inflight-dedup.patch",
+            // 19th: get_peers/metadata rate tuning + honest stats split
+            "getpeers-metadata-tuning.patch"
         )) {
             project.exec {
                 commandLine("patch", "-p1", "-d", destDir.absolutePath, "-i", file("$destDir/patches/$patchName").absolutePath)

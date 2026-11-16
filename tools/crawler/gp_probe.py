@@ -140,6 +140,12 @@ def parse_stats(body, t=None):
     Returns None for bodies that are not usable samples: the dashboard fallback body
     (`{"running": false, ...}`), non-dict payloads, or anything without a supervisor /
     trees section. Missing optional keys become None — never an exception.
+
+    The `aggregate` block is read for the published denominators: `gp_yield_percent`
+    (`aggregate.get_peers_yield_percent`), `metadata_fetch_success_percent` and
+    `metadata_attempts_total`. `metadata_success_percent` falls back to the
+    pre-patch-19 `aggregate.metadata_success_rate_percent`, so one probe version
+    measures the old build (baseline) and the new one.
     """
     if not isinstance(body, dict):
         return None
@@ -209,7 +215,13 @@ def parse_stats(body, t=None):
             if isinstance(sup.get("dispatcher"), dict)
             else None
         ),
-        "metadata_success_percent": num(agg.get("metadata_success_rate_percent")),
+        "gp_yield_percent": num(agg.get("get_peers_yield_percent")),
+        "metadata_fetch_success_percent": num(agg.get("metadata_fetch_success_percent")),
+        "metadata_attempts_total": num(agg.get("metadata_attempts_total")),
+        # Legacy fallback: pre-patch-19 builds emit only metadata_success_rate_percent.
+        "metadata_success_percent": num(
+            agg.get("metadata_fetch_success_percent", agg.get("metadata_success_rate_percent"))
+        ),
         "aggregate_conns": num(agg.get("active_connections")),
         "trees": trees,
     }
@@ -500,6 +512,9 @@ def derive(samples, health, meta):
         "metadata_per_s": None,
         "first_strike_per_s": None,
         "metadata_success_percent": None,
+        "metadata_fetch_success_percent": None,
+        "metadata_attempts_total": None,
+        "gp_yield_percent": None,
         "dropped_per_s": None,
         "queue_full_drops_per_s": None,
         "dispatcher_drops_delta": None,
@@ -522,6 +537,9 @@ def derive(samples, health, meta):
     out["config_line"] = config_line(last)
     out["pps_cap"] = last.get("udp_rate_limit_pps")
     out["metadata_success_percent"] = last.get("metadata_success_percent")
+    out["metadata_fetch_success_percent"] = last.get("metadata_fetch_success_percent")
+    out["metadata_attempts_total"] = last.get("metadata_attempts_total")
+    out["gp_yield_percent"] = last.get("gp_yield_percent")
 
     # Queue drain / fill / paused duty cycle (works on the old binary too).
     fits = queue_fits(samples)
@@ -726,6 +744,13 @@ def render_table(derived, meta):
         )
     )
     rows.append(
+        (
+            "peer yield % (lifetime)",
+            f1(d.get("gp_yield_percent")),
+            "`aggregate.get_peers_yield_percent` — lifetime, all trees incl. respawned",
+        )
+    )
+    rows.append(
         ("packets per lookup", f2(d.get("packets_per_lookup")), "d`packets_total`/d`lookups_total`")
     )
     rows.append(
@@ -749,12 +774,22 @@ def render_table(derived, meta):
             f"cap {fbig(d.get('pps_cap'))}; throttled delta {fbig(d.get('throttled_delta'))}",
         )
     )
+    success = d.get("metadata_fetch_success_percent")
+    if success is not None:
+        success_note = (
+            f"success {f1(success, ' %')} (lifetime, `aggregate.metadata_fetch_success_percent`, "
+            f"{fbig(d.get('metadata_attempts_total'))} attempts)"
+        )
+    else:
+        success_note = (
+            f"success {f1(d.get('metadata_success_percent'), ' %')} (legacy "
+            "`aggregate.metadata_success_rate_percent`, lifetime)"
+        )
     rows.append(
         (
             "metadata /s",
             f2(d.get("metadata_per_s")),
-            f"first strike /s {f2(d.get('first_strike_per_s'))}; "
-            f"success {f1(d.get('metadata_success_percent'), ' %')} (lifetime, `aggregate`)",
+            f"first strike /s {f2(d.get('first_strike_per_s'))}; " + success_note,
         )
     )
     rows.append(
