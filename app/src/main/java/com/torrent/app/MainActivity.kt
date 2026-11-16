@@ -16,6 +16,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import android.net.Uri
 import com.torrent.app.config.ConfigStore
 import com.torrent.app.net.CloudflaredTunnelState
+import com.torrent.app.net.connectionUrl
 import com.torrent.app.storage.SafStatus
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.clickable
@@ -255,12 +256,16 @@ fun MainScreen(
     // Stage 4: the tunnel's https URL works from anywhere, so it wins while the
     // tunnel is connected; the LAN URL stays the fallback. The QR bitmap is
     // `remember(url)`-keyed, so it re-encodes on the flip by itself.
-    val showConnection = (wifiIp.isNotEmpty() || tunnelConnected) && authToken.isNotEmpty()
-    val url = if (tunnelConnected && publicHostname.isNotEmpty()) {
-        "https://$publicHostname/?token=$authToken"
-    } else {
-        "http://$wifiIp:8090/?token=$authToken"
-    }
+    // Stage 7 (review P1): both branches are conditional now. With the tunnel
+    // connected, its hostname undetected and no wifi IP — the cellular flagship
+    // case — there is no usable URL at all, so the link and the QR are hidden
+    // instead of rendering a dead `http://:8090/?token=…`. A blank token hides
+    // it too: the `takeIf` folds that into `url`, so one null check covers
+    // `url != null && authToken.isNotEmpty()` — `url` is the single gate the
+    // link text, the click intent and the QR all read.
+    val url = connectionUrl(tunnelConnected, publicHostname, wifiIp)
+        ?.takeIf { authToken.isNotEmpty() }
+        ?.let { "$it/?token=$authToken" }
 
     Column(
         modifier = Modifier
@@ -285,8 +290,8 @@ fun MainScreen(
 
         Spacer(modifier = Modifier.height(32.dp))
 
-        // Connection info (shown when network is available)
-        if (showConnection) {
+        // Connection info (shown when a usable URL exists)
+        if (url != null) {
             Text(
                 text = "Open this URL in your browser:",
                 style = MaterialTheme.typography.bodyMedium
@@ -321,7 +326,7 @@ fun MainScreen(
 
         // QR code pinned to the bottom of the screen
         Spacer(modifier = Modifier.weight(1f))
-        if (showConnection) {
+        if (url != null) {
             QrCode(url = url)
         }
     }

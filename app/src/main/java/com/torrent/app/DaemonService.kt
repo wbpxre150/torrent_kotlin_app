@@ -34,6 +34,8 @@ import com.torrent.app.net.CloudflaredTunnel
 import com.torrent.app.net.CloudflaredTunnelState
 import com.torrent.app.net.FtpHangWatchdog
 import com.torrent.app.net.WifiGateMonitor
+import com.torrent.app.net.connectionUrl
+import com.torrent.app.net.parseReady
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.launch
@@ -936,15 +938,14 @@ class DaemonService : Service() {
      * [token] and returns it. Unlike the crawler and ftp_server supervisors it
      * is registered lazily — only while the tunnel is enabled with a stored
      * token — so a disabled tunnel never appears in the daemons table. It is
-     * replaced (stop old, build new) when the token changes or [force] is set:
-     * a supervisor's args/env are immutable. The stop blocks for the SIGTERM
-     * grace, so this runs on the cloudflared-control executor, never on the
-     * main thread.
+     * replaced (stop old, build new) when the token changes: a supervisor's
+     * args/env are immutable. The stop blocks for the SIGTERM grace, so this
+     * runs on the cloudflared-control executor, never on the main thread.
      */
-    private fun registerCloudflaredSupervisor(token: String, force: Boolean = false): ProcessSupervisor {
+    private fun registerCloudflaredSupervisor(token: String): ProcessSupervisor {
         synchronized(cloudflaredRegistrationLock) {
             val previous = cloudflaredSupervisor
-            if (previous != null && cloudflaredToken == token && !force) return previous
+            if (previous != null && cloudflaredToken == token) return previous
             val sup = buildCloudflaredSupervisor(token)
             if (previous != null) {
                 try {
@@ -1056,11 +1057,18 @@ class DaemonService : Service() {
     private fun applyTunnelState(next: CloudflaredTunnelState) {
         val previous = _tunnel.value
         _tunnel.value = next
-        val stored = configStore.load().cloudflared
-        if (next.connected && next.publicHostname.isNotEmpty() &&
-            next.publicHostname != stored.publicHostname
-        ) {
-            configStore.saveCloudflared(stored.copy(publicHostname = next.publicHostname))
+        // Stage 7 (review P2): load+write is one critical section under the
+        // registration lock, so a hostname persist can never resurrect an
+        // `enabled=true` that a concurrent saveCloudflaredSettings just wrote as
+        // false (SharedPreferences.apply() gives no cross-thread ordering).
+        // Only the store I/O is inside the lock — nothing here blocks.
+        synchronized(cloudflaredRegistrationLock) {
+            val stored = configStore.load().cloudflared
+            if (next.connected && next.publicHostname.isNotEmpty() &&
+                next.publicHostname != stored.publicHostname
+            ) {
+                configStore.saveCloudflared(stored.copy(publicHostname = next.publicHostname))
+            }
         }
         if (previous.connected != next.connected ||
             previous.publicHostname != next.publicHostname
@@ -1082,7 +1090,12 @@ class DaemonService : Service() {
         if (errors.isNotEmpty()) {
             return com.torrent.app.config.ApplyResult(false, errors.joinToString("; "), false)
         }
-        configStore.saveCloudflared(s)
+        // Stage 7 (review P2): the write half of the load+write pair — the
+        // watcher's hostname persist (applyTunnelState) takes the same lock, so
+        // neither can resurrect the other's stale `enabled`. Kept to the store
+        // call: the lock is never held across the runOnCloudflaredControl
+        // submission below.
+        synchronized(cloudflaredRegistrationLock) { configStore.saveCloudflared(s) }
         // Stage 4: restart the watcher so a newly saved token/hostname is
         // re-probed at once instead of on the next ~5 s tick.
         startTunnelWatcher()
@@ -1146,7 +1159,11 @@ class DaemonService : Service() {
         val st = cloudflaredSupervisor?.status?.value
         val running = st?.state == ProcessState.RUNNING
         val probe = if (running) fetchLocalHttp(CLOUDFLARED_READY_URL) else null
-        val connected = probe?.first == 200
+        // Stage 7 (review P2): one definition of `connected` — the same
+        // parseReady gate the watcher, the notification and the QR use, so a 200
+        // carrying a non-`/ready` body cannot make /api/status disagree with
+        // the UI.
+        val connected = parseReady(probe?.second.orEmpty())?.ready == true
         return CloudflaredStatus(
             enabled = s.enabled,
             state = st?.state?.name ?: ProcessState.STOPPED.name,
@@ -1668,12 +1685,13 @@ class DaemonService : Service() {
         // works from anywhere; the LAN URL stays the fallback (and is the only
         // option until a hostname has been detected).
         val tunnelState = _tunnel.value
-        val contentText = when {
-            tunnelState.connected && tunnelState.publicHostname.isNotEmpty() ->
-                "https://${tunnelState.publicHostname}/?token=$token"
-            wifiIp != null -> "http://$wifiIp:8090/?token=$token"
-            else -> "Services active — tap to open"
-        }
+        // Stage 7: the same helper the QR main screen uses, so the notification
+        // and the link can never disagree about when an https/LAN URL exists.
+        val contentText = connectionUrl(
+            tunnelConnected = tunnelState.connected,
+            publicHostname = tunnelState.publicHostname,
+            wifiIp = wifiIp ?: "",
+        )?.let { "$it/?token=$token" } ?: "Services active — tap to open"
 
         val shutdownIntent = PendingIntent.getService(
             this,
@@ -2272,12 +2290,19 @@ class DaemonService : Service() {
                 }
             },
             GracefulShutdownPlanner.Step("stop-cloudflared") {
-                // Queued on the cloudflared-control executor, never inline:
-                // stop() blocks for the child's 12 s SIGTERM grace. Dropping the
-                // cached registration in the same block is what makes a
-                // restarted service register a fresh supervisor instead of
-                // reusing a stopped one (the FTP step's lesson, below).
-                runOnCloudflaredControl { stopCloudflaredSupervisor() }
+                // Stage 7 (review P2): awaited inline, like stop-ftp and
+                // stop-transmission — the planner runs on shutdownExecutor,
+                // never main, so blocking for the child's 12 s SIGTERM grace is
+                // safe and the service cannot report `Stopped` while cloudflared
+                // is still alive. Dropping the cached registration under the
+                // registration lock is what makes a restarted service register a
+                // fresh supervisor instead of reusing a stopped one (the FTP
+                // step's lesson, above).
+                stopSupervisorForShutdown(CLOUDFLARED_LABEL)
+                synchronized(cloudflaredRegistrationLock) {
+                    cloudflaredSupervisor = null
+                    cloudflaredToken = null
+                }
             },
             GracefulShutdownPlanner.Step("stop-transmission") {
                 stopSupervisorForShutdown(TRANSMISSION_LABEL)

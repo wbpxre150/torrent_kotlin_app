@@ -41,6 +41,24 @@ fun parseReady(body: String): TunnelProbe? {
 }
 
 /**
+ * The connection URL — without the control token, which the caller appends — or
+ * null when no usable one exists.
+ *
+ * The https form wins while the tunnel is connected *and* its hostname is known;
+ * the LAN form is the fallback, itself conditional on a known wifi IP. When both
+ * are missing — the cellular flagship case: tunnel connected, hostname never
+ * detected, no wifi — the result is null, so the caller hides the link and the
+ * QR instead of rendering a dead `http://:8090/?token=…` URL.
+ *
+ * Pure and Android-free on purpose (plain-JUnit testable, house style).
+ */
+fun connectionUrl(tunnelConnected: Boolean, publicHostname: String, wifiIp: String): String? = when {
+    tunnelConnected && publicHostname.isNotEmpty() -> "https://$publicHostname"
+    wifiIp.isNotEmpty() -> "http://$wifiIp:8090"
+    else -> null
+}
+
+/**
  * Matches a `hostname` key/value pair in both the escaped and the unescaped form:
  * `\"hostname\":\"host\"` (inside the quoted `config="…"` log payload) and
  * `"hostname":"host"` (raw JSON from `GET /config`).

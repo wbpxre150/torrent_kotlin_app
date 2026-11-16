@@ -1607,8 +1607,10 @@ class ControlServer(
               }
               bindCategories();
               // Stage 5: the tunnel token/hostname row follows the enable toggle.
-              // Re-bound inside reconcileForm() for the same reason as above —
-              // the form swap would otherwise leave a dead listener behind.
+              // Bound once, on load: since Stage 6 the card is its own form
+              // outside #settings-form, so reconcileForm()'s swap never replaces
+              // the checkbox — rebinding there would only stack change
+              // listeners (Stage 7 review fix).
               var cfEnableBox = document.querySelector('input[name="cloudflaredEnabled"]');
               function syncCfTokenRow() {
                 var row = el('cf-token-row');
@@ -1651,7 +1653,6 @@ class ControlServer(
                       form.innerHTML = freshForm.innerHTML;
                       bindForm();
                       bindCategories();
-                      bindCloudflared();
                     }
                     var freshBanner = doc.getElementById('page-banner');
                     var banner = el('page-banner');

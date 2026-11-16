@@ -159,13 +159,14 @@ class ControlServerCloudflaredCardTest {
             html.contains("auto-detected when connected"))
     }
 
-    @Test fun panel_bindsAndRebindsTheTunnelToggle() {
+    @Test fun panel_bindsTheTunnelToggleOnce() {
         val html = panel(CloudflaredSettings())
         assertTrue("the reveal handler must be present", html.contains("function syncCfTokenRow()"))
-        // Once on load, once inside reconcileForm() — the form swap would
-        // otherwise leave a dead listener behind.
-        assertEquals("bindCloudflared must run on load and after a form reconcile",
-            2, occurrences(html, "bindCloudflared();"))
+        // Once, on load only: since Stage 6 the card is its own form outside
+        // #settings-form, so reconcileForm()'s swap never replaces the checkbox
+        // and rebinding there would only stack change listeners (Stage 7 fix).
+        assertEquals("bindCloudflared must run exactly once, on load",
+            1, occurrences(html, "bindCloudflared();"))
     }
 
     // ── the pure parser behind the POST ──────────────────────────────────────
