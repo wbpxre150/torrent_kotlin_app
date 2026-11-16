@@ -107,6 +107,18 @@ class DaemonService : Service() {
     // onStartCommand, stopped in onDestroy BEFORE the supervisor stops so a
     // restart never races the destroy.
     private lateinit var ftpHangWatchdog: FtpHangWatchdog
+    // The single cloudflared supervisor (Stage 3). Unlike the crawler and
+    // ftp_server supervisors it is registered LAZILY — only while the tunnel is
+    // enabled with a stored token — so a disabled tunnel is not listed in the
+    // daemons table. It is replaced (stop old + build new) when the token
+    // changes; see [registerCloudflaredSupervisor].
+    @Volatile private var cloudflaredSupervisor: ProcessSupervisor? = null
+    // The tunnel token [cloudflaredSupervisor] was built with (a supervisor's
+    // env is immutable). A secret: never logged.
+    @Volatile private var cloudflaredToken: String? = null
+    // Serializes [registerCloudflaredSupervisor] / [stopCloudflaredSupervisor]
+    // between boot, the settings save path and the shutdown planner.
+    private val cloudflaredRegistrationLock = Any()
 
     // Graceful shutdown (Stage 1): the ordered teardown runs on a dedicated
     // single-thread executor (see [shutdownExecutor]), never on the main thread,
@@ -396,6 +408,7 @@ class DaemonService : Service() {
             applyFtp = ::applyFtpSettings,
             applyCrawler = ::applyCrawlerSettings,
             saveBackup = ::saveBackupSettings,
+            saveCloudflared = ::saveCloudflaredSettings,
             crawlerApplyStatus = { crawlerApplyStatus },
             crawlerPausedNoWifi = { crawlerPausedNoWifi },
             crawlerHttpPort = ::crawlerHttpPort,
@@ -417,6 +430,7 @@ class DaemonService : Service() {
             // null, so the frame's `bootstrap` family is IDLE before the first
             // download attempt.
             bootstrapStatus = { bootstrapStatusHolder.status },
+            cloudflaredStatus = ::getCloudflaredStatus,
             addHandler = crawlerAddHandler,
             crawlerRestoreDbStatus = { dbRestore.status },
 )
@@ -448,6 +462,7 @@ class DaemonService : Service() {
         fun clearUsbTree() = this@DaemonService.clearUsbTree()
         fun getSafStatus(): SafStatus = this@DaemonService.getSafStatus()
         fun getFtpStatus(): FtpStatus = this@DaemonService.getFtpStatus()
+        fun getCloudflaredStatus(): CloudflaredStatus = this@DaemonService.getCloudflaredStatus()
         fun loadConfig(): com.torrent.app.config.AppConfig = this@DaemonService.loadConfig()
         fun applyTransmissionSettings(cfg: com.torrent.app.config.AppConfig, liveOnly: Boolean) =
             this@DaemonService.applyTransmissionSettings(cfg, liveOnly)
@@ -853,6 +868,222 @@ class DaemonService : Service() {
             },
             false)
     }
+
+    // ── Cloudflare Tunnel (Stage 3) ─────────────────────────────
+
+    /**
+     * Builds (does not start) the cloudflared tunnel supervisor for [token].
+     *
+     * Token-only remotely-managed mode: the ingress (public hostname → local
+     * service) lives Cloudflare-side, so there is deliberately no `--url`, and
+     * the token travels in the environment (`TUNNEL_TOKEN`), never argv —
+     * `/proc/<pid>/cmdline` is world-readable (same precedent as FTP_PASSWORD
+     * above). `--protocol http2` because mobile/CGNAT networks commonly block
+     * the QUIC path's UDP/7844; `--no-autoupdate` because the binary is exec'd
+     * in place from the read-only nativeLibraryDir (invariant 3).
+     */
+    private fun buildCloudflaredSupervisor(token: String): ProcessSupervisor {
+        // cloudflared writes into $HOME and into its cwd: both are pointed at a
+        // writable filesDir subdirectory, never at nativeLibraryDir.
+        val workDir = File(filesDir, "cloudflared").apply { mkdirs() }
+        return ProcessSupervisor(
+            label = CLOUDFLARED_LABEL, binaryName = "libcloudflared.so",
+            args = listOf(
+                "tunnel", "--no-autoupdate",
+                "--metrics", CLOUDFLARED_METRICS_ADDR,
+                "--protocol", "http2",
+                "--grace-period", "10s",
+                "--retries", "5",
+                "run"),
+            nativeLibraryDir = applicationInfo.nativeLibraryDir,
+            workDir = workDir,
+            logDir = File(filesDir, "logs"),
+            extraEnv = mapOf(
+                "TUNNEL_TOKEN" to token,
+                "HOME" to workDir.absolutePath,
+                "NO_AUTOUPDATE" to "true",
+                "TMPDIR" to File(filesDir, "tmp").apply { mkdirs() }.absolutePath),
+            selfLogging = false,
+            // ≥ the child's own 10 s --grace-period, so it can drain its
+            // connections before the supervisor escalates to SIGKILL.
+            graceMs = 12_000L,
+            // Readiness: the tunnel is only RUNNING once its metrics server
+            // answers GET /ready with 200, i.e. at least one edge connection is
+            // registered. A token that never connects leaves the child STARTING
+            // (alive, no crash loop); "connected" is reported separately by
+            // [getCloudflaredStatus].
+            readinessProbe = { cloudflaredReady() })
+    }
+
+    /**
+     * Registers (without starting) the single cloudflared supervisor for
+     * [token] and returns it. Unlike the crawler and ftp_server supervisors it
+     * is registered lazily — only while the tunnel is enabled with a stored
+     * token — so a disabled tunnel never appears in the daemons table. It is
+     * replaced (stop old, build new) when the token changes or [force] is set:
+     * a supervisor's args/env are immutable. The stop blocks for the SIGTERM
+     * grace, so this runs on the cloudflared-control executor, never on the
+     * main thread.
+     */
+    private fun registerCloudflaredSupervisor(token: String, force: Boolean = false): ProcessSupervisor {
+        synchronized(cloudflaredRegistrationLock) {
+            val previous = cloudflaredSupervisor
+            if (previous != null && cloudflaredToken == token && !force) return previous
+            val sup = buildCloudflaredSupervisor(token)
+            if (previous != null) {
+                try {
+                    previous.stop()
+                } catch (e: Exception) {
+                    android.util.Log.w("DaemonService", "cloudflared stop before rebuild failed: ${e.message}")
+                }
+                supervisors.remove(previous)
+            }
+            cloudflaredSupervisor = sup
+            cloudflaredToken = token
+            supervisors.add(sup)
+            return sup
+        }
+    }
+
+    /**
+     * Stops the cloudflared child (SIGTERM grace — never call this on the main
+     * thread) and drops its registration, so a disabled tunnel is not listed in
+     * the daemons table and a later enable rebuilds a fresh supervisor instead
+     * of reusing a stopped one.
+     */
+    private fun stopCloudflaredSupervisor() {
+        val sup = synchronized(cloudflaredRegistrationLock) {
+            val current = cloudflaredSupervisor
+            cloudflaredSupervisor = null
+            cloudflaredToken = null
+            current
+        } ?: return
+        try {
+            sup.stop()
+        } catch (e: Exception) {
+            android.util.Log.w("DaemonService", "cloudflared stop failed: ${e.message}")
+        }
+        supervisors.remove(sup)
+    }
+
+    /**
+     * Boot restore: when the stored settings say enabled AND a token is stored,
+     * (re)register and start the child. Called from [startSupervisors]; the work
+     * is queued on the cloudflared-control executor so a repeated
+     * onStartCommand never blocks the main thread on the SIGTERM grace.
+     */
+    private fun startCloudflaredIfEnabled() {
+        val cf = configStore.load().cloudflared
+        val token = cf.tunnelToken.trim()
+        if (!cf.enabled || token.isEmpty()) return
+        runOnCloudflaredControl {
+            try {
+                registerCloudflaredSupervisor(token).start()
+            } catch (e: Exception) {
+                android.util.Log.w("DaemonService", "cloudflared start failed: ${e.message}")
+            }
+        }
+    }
+
+    /** Runs on the dedicated cloudflared-control thread; never on the service main thread. */
+    private fun runOnCloudflaredControl(block: () -> Unit) {
+        try { cloudflaredControlExecutor.execute { block() } }
+        // Defensive only: the companion executor is never shut down (it survives
+        // a graceful stop so a restarted service reuses it).
+        catch (e: RejectedExecutionException) { /* not reachable; see above */ }
+    }
+
+    /**
+     * Persists the Cloudflare Tunnel settings and reconciles the supervised
+     * child. This is the **no-restart** save path (Stage 3, wired to the
+     * settings card in Stage 5): a plain store write plus a cloudflared
+     * start/stop — the dht_crawler is never stopped, reconfigured or restarted,
+     * and nothing is written to `config.ini` (invariant 7: the token must never
+     * reach the crawler config).
+     */
+    fun saveCloudflaredSettings(s: com.torrent.app.config.CloudflaredSettings): com.torrent.app.config.ApplyResult {
+        val errors = com.torrent.app.config.ConfigValidator.validateCloudflared(s).errors
+        if (errors.isNotEmpty()) {
+            return com.torrent.app.config.ApplyResult(false, errors.joinToString("; "), false)
+        }
+        configStore.saveCloudflared(s)
+        val token = s.tunnelToken.trim()
+        val run = s.enabled && token.isNotEmpty()
+        runOnCloudflaredControl {
+            try {
+                if (run) registerCloudflaredSupervisor(token).start()
+                else stopCloudflaredSupervisor()
+            } catch (e: Exception) {
+                android.util.Log.w("DaemonService", "cloudflared reconcile failed: ${e.message}")
+            }
+        }
+        return com.torrent.app.config.ApplyResult(
+            true, if (run) "tunnel enabled" else "tunnel disabled", false)
+    }
+
+    /**
+     * The tunnel's readiness probe: `GET http://127.0.0.1:20242/ready` answering
+     * 200 means at least one edge connection is registered. Any failure counts
+     * as "not ready" (see [ProcessSupervisor.awaitReadiness]).
+     */
+    private fun cloudflaredReady(): Boolean = fetchLocalHttp(CLOUDFLARED_READY_URL)?.first == 200
+
+    /**
+     * Minimal loopback HTTP GET returning (status code, body), or null when the
+     * request could not be made at all (connection refused, timeout). Used by
+     * the tunnel's /ready probe; Stage 4's tunnel watcher injects this as its
+     * `fetch`.
+     */
+    private fun fetchLocalHttp(url: String, timeoutMs: Int = 1000): Pair<Int, String>? {
+        var conn: java.net.HttpURLConnection? = null
+        try {
+            val c = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = timeoutMs
+                readTimeout = timeoutMs
+                useCaches = false
+            }
+            conn = c
+            val code = c.responseCode
+            val stream = if (code in 200..299) c.inputStream else c.errorStream
+            val body = stream?.bufferedReader()?.use { it.readText() } ?: ""
+            return code to body
+        } catch (e: Exception) {
+            return null
+        } finally {
+            try { conn?.disconnect() } catch (_: Exception) { /* already closed */ }
+        }
+    }
+
+    /**
+     * Snapshot for the control UI / `/api/status` (mirrors [getFtpStatus]):
+     * [CloudflaredStatus.state] is the child's process state while
+     * [CloudflaredStatus.connected] is the live tunnel state from the /ready
+     * probe — a child can be RUNNING with no edge connection registered (bad
+     * token, blocked egress), which is exactly what /ready distinguishes.
+     */
+    fun getCloudflaredStatus(): CloudflaredStatus {
+        val s = configStore.load().cloudflared
+        val st = cloudflaredSupervisor?.status?.value
+        val running = st?.state == ProcessState.RUNNING
+        val probe = if (running) fetchLocalHttp(CLOUDFLARED_READY_URL) else null
+        val connected = probe?.first == 200
+        return CloudflaredStatus(
+            enabled = s.enabled,
+            state = st?.state?.name ?: ProcessState.STOPPED.name,
+            connected = connected,
+            publicHostname = s.publicHostname,
+            readyConnections = if (connected) readyConnectionsOf(probe?.second) else 0,
+            lastError = when {
+                !running || connected -> null
+                probe == null -> "metrics endpoint $CLOUDFLARED_METRICS_ADDR is not answering"
+                else -> "tunnel not ready (HTTP ${probe.first})"
+            },
+        )
+    }
+
+    private fun readyConnectionsOf(body: String?): Int =
+        body?.let { READY_CONNECTIONS_RE.find(it)?.groupValues?.get(1)?.toIntOrNull() } ?: 0
 
     // ── Crawler (plan 10 step 2) ───────────────────────────────────────────
 
@@ -1415,6 +1646,11 @@ class DaemonService : Service() {
         if (CrawlerGate.mayStart(configStore.load().wizardCompleted, crawler.enabled, crawler.wifiOnly, wifiGateMonitor.state.value.wifi)) {
             startCrawlerSupervisor()
         }
+        // Stage 3: restore the Cloudflare tunnel when it is enabled with a
+        // stored token. Outbound-only, so there is deliberately no wifi gate
+        // here (transmission is the ungated precedent): a dropped network just
+        // backs the tunnel off, and it reconnects when the network returns.
+        startCloudflaredIfEnabled()
     }
 
     private fun startTransmissionSupervisor() {
@@ -1945,6 +2181,14 @@ class DaemonService : Service() {
                     ftpBindIp = null
                 }
             },
+            GracefulShutdownPlanner.Step("stop-cloudflared") {
+                // Queued on the cloudflared-control executor, never inline:
+                // stop() blocks for the child's 12 s SIGTERM grace. Dropping the
+                // cached registration in the same block is what makes a
+                // restarted service register a fresh supervisor instead of
+                // reusing a stopped one (the FTP step's lesson, below).
+                runOnCloudflaredControl { stopCloudflaredSupervisor() }
+            },
             GracefulShutdownPlanner.Step("stop-transmission") {
                 stopSupervisorForShutdown(TRANSMISSION_LABEL)
             },
@@ -2056,6 +2300,15 @@ class DaemonService : Service() {
         const val CRAWLER_LABEL = "dht_crawler"
         const val FTP_LABEL = "ftp_server"
         const val TRANSMISSION_LABEL = "transmission"
+        const val CLOUDFLARED_LABEL = "cloudflared"
+        // The tunnel child's metrics/readiness endpoint. Passed explicitly in
+        // argv (it sits inside cloudflared's 20241-20245 default range) so the
+        // /ready probe below is deterministic.
+        const val CLOUDFLARED_METRICS_ADDR = "127.0.0.1:20242"
+        private const val CLOUDFLARED_READY_URL = "http://$CLOUDFLARED_METRICS_ADDR/ready"
+        // The /ready body is `{"status":200,"readyConnections":N,…}`; N is the
+        // number of edge connections the tunnel has registered.
+        private val READY_CONNECTIONS_RE = Regex("\"readyConnections\"\\s*:\\s*(\\d+)")
         const val CRAWLER_GRACE_MS = 60_000L
         // Shutdown control: start-command action meaning "stop every daemon, then
         // close the app" (onStartCommand → requestShutdownAndExit). The in-app
@@ -2087,6 +2340,17 @@ class DaemonService : Service() {
         // being rejected.
         private val ftpControlExecutor = Executors.newSingleThreadExecutor(ThreadFactory {
             Thread(it, "ftp-control").apply { isDaemon = true }
+        })
+
+        // Stage 3: the cloudflared tunnel supervisor's stop/start/rebuild run on
+        // their own single-thread executor, never on the service main thread
+        // (stop() blocks for the child's 12 s SIGTERM grace). Process-wide and
+        // NEVER shut down, for the same reason as ftpControlExecutor: the
+        // service instance outlives a graceful stop, so the tunnel can be
+        // started again afterwards and a pending task from a previous service
+        // instance must serialize ahead of any new instance's task.
+        private val cloudflaredControlExecutor = Executors.newSingleThreadExecutor(ThreadFactory {
+            Thread(it, "cloudflared-control").apply { isDaemon = true }
         })
 
         // The graceful teardown runs on these threads (see requestGracefulShutdown).

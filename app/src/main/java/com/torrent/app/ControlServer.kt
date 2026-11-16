@@ -55,6 +55,12 @@ class ControlServer(
     // panel form; the save is a plain store write (no daemon is touched).
     private val saveBackup: (com.torrent.app.config.BackupSettings) -> com.torrent.app.config.ApplyResult =
         { com.torrent.app.config.ApplyResult(false, "backup settings are not wired", false) },
+    // Cloudflare Tunnel (Stage 3): a plain store write plus a cloudflared
+    // supervisor start/stop — the crawler is never stopped or reconfigured
+    // (see DaemonService.saveCloudflaredSettings). Stage 5 wires the settings
+    // card's form to this slot.
+    private val saveCloudflared: (com.torrent.app.config.CloudflaredSettings) -> com.torrent.app.config.ApplyResult =
+        { com.torrent.app.config.ApplyResult(false, "cloudflared is not wired", false) },
     private val crawlerApplyStatus: () -> CrawlerApplyStatus = { CrawlerApplyStatus() },
     private val crawlerPausedNoWifi: () -> Boolean = { false },
     private val crawlerHttpPort: () -> Int = { 8081 },
@@ -110,6 +116,10 @@ class ControlServer(
     // Search-dashboard stage 2: same-origin POST /api/transmission/add (mirrors
     // CrawlerProxyServer's route); null = the route answers 503.
     private val addHandler: CrawlerAddHandler? = null,
+    // Cloudflare Tunnel status (Stage 3): /api/status and the dashboard frame.
+    // Fail-closed default so an unwired ControlServer still renders the block.
+    private val cloudflaredStatus: () -> com.torrent.app.CloudflaredStatus =
+        { com.torrent.app.CloudflaredStatus() },
 ) {
     @Volatile private var server: EmbeddedServer<*, *>? = null
 
@@ -995,6 +1005,7 @@ class ControlServer(
         val f = ftpStatus()
         val s = safStatus()
         val crawler = daemons.firstOrNull { it.label == DaemonService.CRAWLER_LABEL }
+        val cf = cloudflaredStatus()
         return buildString {
             append("{\"service\":\"").append(serviceState.value.toString()).append("\"")
             append(",\"wizardCompleted\":").append(wizardCompleted())
@@ -1002,6 +1013,12 @@ class ControlServer(
             append(",\"usb\":{\"granted\":").append(s.granted).append(",\"freeBytes\":").append(usb ?: "null").append("}")
             append(",\"wifiUp\":").append(f.wifiUp)
             append(",\"ftp\":{").append("\"running\":").append(f.running).append(",\"state\":").append(jsonStr(f.state)).append(",\"port\":").append(f.port).append("}")
+            append(",\"cloudflared\":{\"enabled\":").append(cf.enabled)
+                .append(",\"state\":").append(jsonStr(cf.state.lowercase()))
+                .append(",\"connected\":").append(cf.connected)
+                .append(",\"publicHostname\":").append(jsonStr(cf.publicHostname))
+                .append(",\"readyConnections\":").append(cf.readyConnections)
+                .append(",\"lastError\":").append(jsonStr(cf.lastError)).append("}")
             append(",\"crawler\":{\"state\":\"").append(crawler?.state?.name ?: "STOPPED")
                 .append("\",\"pausedNoWifi\":").append(crawlerPausedNoWifi()).append("}")
             append(",\"daemons\":[")
@@ -1027,6 +1044,7 @@ class ControlServer(
         val usb = usbFreeSpace()
         val f = ftpStatus()
         val daemons = daemonStatuses()
+        val cf = cloudflaredStatus()
         val rpc = cachedRpcSummary
         val ftpUrl = if (f.running && f.ip != null && f.password != null)
             "ftp://${f.username}:${f.password}@${f.ip}:${f.port}/" else "—"
@@ -1043,6 +1061,12 @@ class ControlServer(
             append(",\"port\":").append(f.port)
             append(",\"url\":").append(jsonStr(ftpUrl))
             append(",\"wifiOnly\":").append(loadConfig().ftp.wifiOnly).append("}")
+            append(",\"cloudflared\":{\"enabled\":").append(cf.enabled)
+            append(",\"state\":").append(jsonStr(cf.state.lowercase()))
+            append(",\"connected\":").append(cf.connected)
+            append(",\"publicHostname\":").append(jsonStr(cf.publicHostname))
+            append(",\"readyConnections\":").append(cf.readyConnections)
+            append(",\"lastError\":").append(jsonStr(cf.lastError)).append("}")
             append(",\"transmission\":").append(transmissionScalarsJson(rpc))
             append(",\"daemons\":[")
             append(daemons.joinToString(",") { d ->
