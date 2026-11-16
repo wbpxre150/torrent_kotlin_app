@@ -15,6 +15,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import android.net.Uri
 import com.torrent.app.config.ConfigStore
+import com.torrent.app.net.CloudflaredTunnelState
 import com.torrent.app.storage.SafStatus
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.clickable
@@ -55,6 +56,10 @@ class MainActivity : ComponentActivity() {
     }
     private val serviceState = MutableStateFlow<ServiceState>(ServiceState.Stopped)
     private var authToken = MutableStateFlow("")
+    // Stage 4: the tunnel's connected state + auto-detected public hostname. Pushed
+    // from the binder (see onServiceConnected) so the link and the QR flip without
+    // waiting for the 3 s poll, and back to the LAN URL on disconnect.
+    private val tunnel = MutableStateFlow(CloudflaredTunnelState())
 
     private var boundService: DaemonService.LocalBinder? = null
 
@@ -72,6 +77,9 @@ class MainActivity : ComponentActivity() {
             lifecycleScope.launch {
                 b.serviceState.collect { serviceState.value = it }
             }
+            lifecycleScope.launch {
+                b.tunnel.collect { tunnel.value = it }
+            }
             authToken.value = b.getAuthToken()
             wifiIp.value = b.getWifiIpAddress() ?: ""
             safStatus.value = b.getSafStatus()
@@ -81,6 +89,7 @@ class MainActivity : ComponentActivity() {
         override fun onServiceDisconnected(name: ComponentName?) {
             boundService = null
             serviceState.value = ServiceState.Stopped
+            tunnel.value = CloudflaredTunnelState()
         }
     }
 
@@ -116,6 +125,7 @@ class MainActivity : ComponentActivity() {
             val state by serviceState.collectAsState()
             val token by authToken.collectAsState()
             val ip by wifiIp.collectAsState()
+            val tunnelState by tunnel.collectAsState()
 
             // Auto-start when service is stopped, unless the user asked for a shutdown.
             // The flag is saveable: a rotation keeps the suppression, a fresh launch clears it.
@@ -151,6 +161,8 @@ class MainActivity : ComponentActivity() {
                             serviceState = state,
                             authToken = token,
                             wifiIp = ip,
+                            tunnelConnected = tunnelState.connected,
+                            publicHostname = tunnelState.publicHostname,
                             safStatus = safStatus.collectAsState().value,
                             onGrantUsb = { usbTreeLauncher.launch(null) },
                             shutdownRequested = shutdownRequested,
@@ -231,6 +243,8 @@ fun MainScreen(
     serviceState: ServiceState,
     authToken: String,
     wifiIp: String,
+    tunnelConnected: Boolean,
+    publicHostname: String,
     safStatus: SafStatus?,
     onGrantUsb: () -> Unit,
     shutdownRequested: Boolean,
@@ -238,8 +252,15 @@ fun MainScreen(
     onStart: () -> Unit,
 ) {
     val context = LocalContext.current
-    val showConnection = wifiIp.isNotEmpty() && authToken.isNotEmpty()
-    val url = "http://$wifiIp:8090/?token=$authToken"
+    // Stage 4: the tunnel's https URL works from anywhere, so it wins while the
+    // tunnel is connected; the LAN URL stays the fallback. The QR bitmap is
+    // `remember(url)`-keyed, so it re-encodes on the flip by itself.
+    val showConnection = (wifiIp.isNotEmpty() || tunnelConnected) && authToken.isNotEmpty()
+    val url = if (tunnelConnected && publicHostname.isNotEmpty()) {
+        "https://$publicHostname/?token=$authToken"
+    } else {
+        "http://$wifiIp:8090/?token=$authToken"
+    }
 
     Column(
         modifier = Modifier

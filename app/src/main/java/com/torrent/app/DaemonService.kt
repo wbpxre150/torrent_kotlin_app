@@ -17,6 +17,9 @@ import androidx.core.app.ServiceCompat
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
 import java.io.File
 import android.net.Uri
 import com.torrent.app.storage.SafStatus
@@ -27,6 +30,8 @@ import com.torrent.app.storage.SafIpcServer
 import com.torrent.app.storage.UsbPermissionManager
 import com.torrent.app.ftp.FtpCredentials
 import com.torrent.app.ftp.FtpStatus
+import com.torrent.app.net.CloudflaredTunnel
+import com.torrent.app.net.CloudflaredTunnelState
 import com.torrent.app.net.FtpHangWatchdog
 import com.torrent.app.net.WifiGateMonitor
 import kotlinx.coroutines.Job
@@ -119,6 +124,16 @@ class DaemonService : Service() {
     // Serializes [registerCloudflaredSupervisor] / [stopCloudflaredSupervisor]
     // between boot, the settings save path and the shutdown planner.
     private val cloudflaredRegistrationLock = Any()
+    // Stage 4: the tunnel's connected state (readiness + auto-detected public
+    // hostname). Published for the foreground notification, the QR main screen
+    // and [getCloudflaredStatus]; the token never enters it.
+    private val _tunnel = MutableStateFlow(CloudflaredTunnelState())
+    val tunnel: StateFlow<CloudflaredTunnelState> = _tunnel
+    // The pure prober (net/CloudflaredTunnel) with this service's HTTP GET injected.
+    private val cloudflaredTunnel by lazy { CloudflaredTunnel(fetch = { url -> fetchLocalHttp(url) }) }
+    // The ~5 s watcher loop: started in [startSupervisors], cancelled by the
+    // shutdown planner's cancel-jobs step (the [ftpHangWatchdog] lifecycle).
+    private var tunnelObservingJob: Job? = null
 
     // Graceful shutdown (Stage 1): the ordered teardown runs on a dedicated
     // single-thread executor (see [shutdownExecutor]), never on the main thread,
@@ -455,6 +470,7 @@ class DaemonService : Service() {
 
     inner class LocalBinder : android.os.Binder() {
         val serviceState: StateFlow<ServiceState> = this@DaemonService.state
+        val tunnel: StateFlow<CloudflaredTunnelState> = this@DaemonService.tunnel
         fun getAuthToken(): String = this@DaemonService.getAuthToken()
         fun getWifiIpAddress(): String? = this@DaemonService.getWifiIpAddress()
         fun getDaemonStatuses(): List<ProcessStatus> = this@DaemonService.getDaemonStatuses()
@@ -994,6 +1010,66 @@ class DaemonService : Service() {
     }
 
     /**
+     * Starts the tunnel watcher: every ~5 s it re-probes `/ready` and re-reads the
+     * cloudflared log ring buffer for the `Updated to new configuration` line,
+     * publishing [CloudflaredTunnelState] and re-issuing the foreground
+     * notification when the URL flips. Restarting it cancels the previous loop,
+     * which is how the settings save path forces an immediate re-probe.
+     */
+    private fun startTunnelWatcher() {
+        tunnelObservingJob?.cancel()
+        tunnelObservingJob = MainScope().launch {
+            while (coroutineContext.isActive) {
+                try {
+                    applyTunnelState(probeTunnel())
+                } catch (e: Exception) {
+                    // A broken iteration must never kill the loop.
+                    android.util.Log.w("DaemonService", "tunnel probe failed: ${e.message}")
+                }
+                delay(TUNNEL_POLL_MS)
+            }
+        }
+    }
+
+    /**
+     * One probe. The HTTP GET runs off the main thread; a supervisor that is not
+     * RUNNING short-circuits to "not connected" with the stored hostname, so a
+     * disabled tunnel costs no socket work.
+     */
+    private suspend fun probeTunnel(): CloudflaredTunnelState {
+        val status = cloudflaredSupervisor?.status?.value
+        val stored = configStore.load().cloudflared.publicHostname
+        if (status?.state != ProcessState.RUNNING) {
+            return CloudflaredTunnelState(connected = false, publicHostname = stored)
+        }
+        return withContext(Dispatchers.IO) {
+            cloudflaredTunnel.probe(status.lastLogLines, stored)
+        }
+    }
+
+    /**
+     * Publishes [next] (main thread): persists a newly detected hostname — the
+     * live detection is authoritative, the editable field is only the escape
+     * hatch for when detection is unavailable — and re-issues the notification so
+     * its URL follows the tunnel instead of the LAN address.
+     */
+    private fun applyTunnelState(next: CloudflaredTunnelState) {
+        val previous = _tunnel.value
+        _tunnel.value = next
+        val stored = configStore.load().cloudflared
+        if (next.connected && next.publicHostname.isNotEmpty() &&
+            next.publicHostname != stored.publicHostname
+        ) {
+            configStore.saveCloudflared(stored.copy(publicHostname = next.publicHostname))
+        }
+        if (previous.connected != next.connected ||
+            previous.publicHostname != next.publicHostname
+        ) {
+            if (_state.value is ServiceState.Running) startForegroundWithNotification()
+        }
+    }
+
+    /**
      * Persists the Cloudflare Tunnel settings and reconciles the supervised
      * child. This is the **no-restart** save path (Stage 3, wired to the
      * settings card in Stage 5): a plain store write plus a cloudflared
@@ -1007,6 +1083,9 @@ class DaemonService : Service() {
             return com.torrent.app.config.ApplyResult(false, errors.joinToString("; "), false)
         }
         configStore.saveCloudflared(s)
+        // Stage 4: restart the watcher so a newly saved token/hostname is
+        // re-probed at once instead of on the next ~5 s tick.
+        startTunnelWatcher()
         val token = s.tunnelToken.trim()
         val run = s.enabled && token.isNotEmpty()
         runOnCloudflaredControl {
@@ -1072,7 +1151,9 @@ class DaemonService : Service() {
             enabled = s.enabled,
             state = st?.state?.name ?: ProcessState.STOPPED.name,
             connected = connected,
-            publicHostname = s.publicHostname,
+            // Stage 4: the watcher's live detection wins; the stored value is the
+            // fallback until the first detection lands.
+            publicHostname = _tunnel.value.publicHostname.ifEmpty { s.publicHostname },
             readyConnections = if (connected) readyConnectionsOf(probe?.second) else 0,
             lastError = when {
                 !running || connected -> null
@@ -1583,10 +1664,15 @@ class DaemonService : Service() {
 
         val wifiIp = getWifiIpAddress()
         val token = tokenManager.getToken()
-        val contentText = if (wifiIp != null) {
-            "http://$wifiIp:8090/?token=$token"
-        } else {
-            "Services active — tap to open"
+        // Stage 4: while the tunnel is connected its https URL is the one that
+        // works from anywhere; the LAN URL stays the fallback (and is the only
+        // option until a hostname has been detected).
+        val tunnelState = _tunnel.value
+        val contentText = when {
+            tunnelState.connected && tunnelState.publicHostname.isNotEmpty() ->
+                "https://${tunnelState.publicHostname}/?token=$token"
+            wifiIp != null -> "http://$wifiIp:8090/?token=$token"
+            else -> "Services active — tap to open"
         }
 
         val shutdownIntent = PendingIntent.getService(
@@ -1651,6 +1737,9 @@ class DaemonService : Service() {
         // here (transmission is the ungated precedent): a dropped network just
         // backs the tunnel off, and it reconnects when the network returns.
         startCloudflaredIfEnabled()
+        // Stage 4: publish the tunnel's connected state and hostname (the LAN URL
+        // in the notification and on the QR screen follows it when it flips).
+        startTunnelWatcher()
     }
 
     private fun startTransmissionSupervisor() {
@@ -2150,6 +2239,7 @@ class DaemonService : Service() {
                 rollbackJob?.cancel()
                 ftpObservingJob?.cancel()
                 crawlerObservingJob?.cancel()
+                tunnelObservingJob?.cancel()
             },
             GracefulShutdownPlanner.Step("stop-observers") {
                 // Stop the hang watchdog and the wifi gate BEFORE the supervisors:
@@ -2306,6 +2396,8 @@ class DaemonService : Service() {
         // /ready probe below is deterministic.
         const val CLOUDFLARED_METRICS_ADDR = "127.0.0.1:20242"
         private const val CLOUDFLARED_READY_URL = "http://$CLOUDFLARED_METRICS_ADDR/ready"
+        // Stage 4: how often the tunnel watcher re-probes /ready and the log buffer.
+        private const val TUNNEL_POLL_MS = 5_000L
         // The /ready body is `{"status":200,"readyConnections":N,…}`; N is the
         // number of edge connections the tunnel has registered.
         private val READY_CONNECTIONS_RE = Regex("\"readyConnections\"\\s*:\\s*(\\d+)")
