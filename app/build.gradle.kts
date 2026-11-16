@@ -731,6 +731,130 @@ tasks.register("buildFtpServer") {
     }
 }
 
+// cloudflared 2026.11.0 is built from Go source, so -- like llama.cpp above -- the tarball is
+// pinned by sha256: a mismatched download is deleted and re-fetched rather than used.
+tasks.register("fetchCloudflaredSrc") {
+    description = "Download the pinned cloudflared 2026.11.0 sources (Go) for the tunnel binary"
+
+    val nativeDir = file("build/native")
+    val srcDir = file("$nativeDir/src/cloudflared-2026.11.0")
+    val tarball = file("$nativeDir/src/cloudflared-2026.11.0.tar.gz")
+    val stamp = file("$srcDir/.sha")
+    val url = "https://github.com/cloudflare/cloudflared/archive/refs/tags/2026.11.0.tar.gz"
+    // One-time bootstrap: sha256sum of the single download of the pinned tag, hardcoded from then on.
+    val sha256 = "9913452304215e1e7b0ecd75b3e1ca400d5c8b64156e176c5e0aaaca4238c539"
+
+    outputs.dir(srcDir)
+
+    fun sha256Of(f: File): String {
+        val md = MessageDigest.getInstance("SHA-256")
+        f.inputStream().use { input ->
+            val buf = ByteArray(1 shl 16)
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                md.update(buf, 0, n)
+            }
+        }
+        return md.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    doLast {
+        // 1. Fetch the tarball, discarding a cached copy whose bytes are not the pin
+        if (tarball.exists() && sha256Of(tarball) != sha256) {
+            logger.warn("cloudflared tarball sha256 mismatch, re-downloading $url")
+            tarball.delete()
+        }
+        if (!tarball.exists()) {
+            tarball.parentFile.mkdirs()
+            project.exec {
+                commandLine("curl", "-L", "--fail", "-o", tarball.absolutePath, url)
+            }
+        }
+        // 2. Verify before extracting -- this is the pin the Go build compiles against
+        val actual = sha256Of(tarball)
+        if (actual != sha256) {
+            error("cloudflared tarball sha256 mismatch: expected $sha256, got $actual ($url)")
+        }
+        // 3. Extract (re-extract when the tree is missing or came from a different pin).
+        // The archive's own top-level directory is already cloudflared-2026.11.0, i.e. srcDir.
+        if (srcDir.exists() && (!stamp.exists() || stamp.readText().trim() != sha256)) {
+            srcDir.deleteRecursively()
+        }
+        if (!file("$srcDir/go.mod").exists()) {
+            srcDir.deleteRecursively()
+            project.exec {
+                commandLine("tar", "-xzf", tarball.absolutePath, "-C", file("$nativeDir/src").absolutePath)
+            }
+        }
+        stamp.writeText("$sha256\n")
+    }
+}
+
+tasks.register("buildCloudflared") {
+    description = "Cross-compile cloudflared 2026.11.0 for arm64, package libcloudflared.so"
+    dependsOn("fetchCloudflaredSrc")
+
+    val nativeDir = file("build/native")
+    val srcDir = file("$nativeDir/src/cloudflared-2026.11.0")
+    val buildDir = file("$nativeDir/build-cloudflared")
+    val binaryOut = file("$buildDir/cloudflared")
+    val jniLibsArm64 = file("src/main/jniLibs/arm64-v8a")
+
+    val ndk = providers.environmentVariable("ANDROID_NDK_HOME")
+        .orElse(providers.provider {
+            val sdk = android.sdkDirectory
+            val ndks = file("$sdk/ndk").listFiles()?.sortedByDescending { it.name }
+            ndks?.firstOrNull()?.absolutePath ?: error("NDK not found")
+        })
+    val ndkDir = file(ndk.get())
+    val toolchainBin = file("$ndkDir/toolchains/llvm/prebuilt/linux-x86_64/bin")
+    // minSdk is 26; the per-API wrapper form keeps cgo linked against bionic at the right level
+    val cc = file("$toolchainBin/aarch64-linux-android26-clang")
+    val cxx = file("$toolchainBin/aarch64-linux-android26-clang++")
+
+    outputs.file("$jniLibsArm64/libcloudflared.so")
+    inputs.dir(srcDir)
+
+    doLast {
+        // 0. Host Go guard. GOTOOLCHAIN makes Go download 1.27.4 itself (go.mod requires it, the
+        //    host ships 1.27.3), so the first build needs network for the toolchain and modules.
+        var goOk = true
+        try {
+            project.exec { commandLine("go", "version") }
+        } catch (e: Exception) {
+            goOk = false
+        }
+        if (!goOk) error("Go toolchain not found - install Go and set GOTOOLCHAIN=go1.27.4")
+        buildDir.mkdirs()
+        // 1. Cross-compile: android/arm64, cgo against the NDK's bionic (stock Go's pure resolver
+        //    is broken on Android), PIE because Android refuses ET_EXEC children.
+        project.exec {
+            workingDir = srcDir
+            environment("GOOS", "android")
+            environment("GOARCH", "arm64")
+            environment("CGO_ENABLED", "1")
+            environment("CC", cc.absolutePath)
+            environment("CXX", cxx.absolutePath)
+            environment("GOTOOLCHAIN", "go1.27.4")
+            commandLine(
+                "go", "build",
+                "-trimpath",
+                "-buildmode=pie",
+                "-ldflags", "-s -w -X main.Version=2026.11.0",
+                "-o", binaryOut.absolutePath,
+                "./cmd/cloudflared"
+            )
+        }
+        // 2. Copy + rename to jniLibs (lib*.so name required for packaging)
+        copy {
+            from(binaryOut)
+            into(jniLibsArm64)
+            rename { "libcloudflared.so" }
+        }
+    }
+}
+
 // Ensure buildTransmission runs before jniLibs are merged into the APK
 afterEvaluate {
     // Ensure native libs and generated crawler assets are ready before packaging
@@ -738,6 +862,7 @@ afterEvaluate {
         dependsOn("buildTransmission")
         dependsOn("buildDhtCrawler")
         dependsOn("buildFtpServer")
+        dependsOn("buildCloudflared")
     }
     tasks.named("mergeDebugAssets").configure {
         dependsOn("copyDhtCrawlerAssets")

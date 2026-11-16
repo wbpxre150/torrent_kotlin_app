@@ -21,6 +21,7 @@ local.properties
 app/src/main/jniLibs/arm64-v8a/libtransmissiond.so
 app/src/main/jniLibs/arm64-v8a/libdhtcrawler.so
 app/src/main/jniLibs/arm64-v8a/libftpserver.so
+app/src/main/jniLibs/arm64-v8a/libcloudflared.so
 .externalNativeBuild/
 .cxx/
 
