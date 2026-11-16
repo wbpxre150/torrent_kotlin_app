@@ -74,21 +74,31 @@ GP_KEYS = (
     "deadline_exits_total",
     "unanswered_slots_total",
     "miss_penalties_total",
+    # Crawler patch 19 rev2: round completion (per-slot budget / finish-on-peers).
+    "slot_expired_total",
+    "early_finish_total",
 )
 
-# Per-tree `get_peers` knob echoes (crawler patch 19 stage 3). Read from the first
-# tree so a sample carries the settings its counters were produced under.
+# Per-tree `get_peers` knob echoes (crawler patch 19 stages 3 + rev2). Read from the
+# first tree so a sample carries the settings its counters were produced under.
 GP_CFG_KEYS = (
     "round_idle_ms",
     "penalize_misses",
+    "slot_budget_ms",
+    "finish_on_peers",
 )
 
-# Window deltas of the exit-reason / penalty counters, in display order.
+# Window deltas of the exit-reason / penalty / round-completion counters, in display
+# order. `slot_expired_total` is a subset of `unanswered_slots_total` (a slot
+# abandoned by finish-on-peers is unanswered but not expired); `early_finish_total`
+# is a per-lookup count, so it must track the with-peers lookups of the window.
 GP_EXIT_KEYS = (
     "idle_exits_total",
     "deadline_exits_total",
     "unanswered_slots_total",
     "miss_penalties_total",
+    "slot_expired_total",
+    "early_finish_total",
 )
 
 # Per-outcome metadata connection-failure counters (crawler patch 19). Each failed
@@ -683,6 +693,13 @@ def derive(samples, health, meta):
         deadline = exit_deltas.get("deadline_exits_total")
         if idle is not None and deadline is not None and idle + deadline > 0:
             out["gp_idle_exit_percent"] = idle / (idle + deadline) * 100.0
+        # Rev2 round completion. `early_finish_total` is counted once per lookup
+        # terminated, so it must track the with-peers lookups of the same window
+        # (~100 %); a growing `slot_expired_total` is the per-slot budget firing,
+        # the observable the round-idle exit never produced on device.
+        early = exit_deltas.get("early_finish_total")
+        if early is not None and with_peers and with_peers["delta"] > 0:
+            out["gp_early_finish_percent"] = early / with_peers["delta"] * 100.0
 
     # UDP.
     sends = series_delta(samples, lambda s: s.get("udp_sends_total"))
@@ -767,6 +784,11 @@ def missing_features(samples):
         missing.append("queues.infohash_push_attempts/infohash_duplicates_rejected")
     if not any(dig(s, "gp", "idle_exits_total") is not None for s in samples):
         missing.append("supervisor.get_peers.idle_exits_total (round-idle / penalty counters)")
+    if not any(dig(s, "gp", "slot_expired_total") is not None for s in samples):
+        missing.append(
+            "supervisor.get_peers.slot_expired_total/early_finish_total "
+            "(rev2 round-completion counters)"
+        )
     return missing
 
 
@@ -908,6 +930,23 @@ def render_table(derived, meta):
                 f"idle {fbig(exit_deltas.get('idle_exits_total'))}"
                 f" / deadline {fbig(exit_deltas.get('deadline_exits_total'))}",
                 note,
+            )
+        )
+        completion_note = (
+            "window deltas of `supervisor.get_peers`: `slot_expired_total` is the "
+            "unanswered subset whose per-slot budget ran out, `early_finish_total` "
+            "the lookups ended by finish-on-peers"
+        )
+        if d.get("gp_early_finish_percent") is not None:
+            completion_note += (
+                f"; early finish / with-peers lookups {f1(d['gp_early_finish_percent'], ' %')}"
+            )
+        rows.append(
+            (
+                "round completion (window)",
+                f"early finish {fbig(exit_deltas.get('early_finish_total'))}"
+                f" / slot expired {fbig(exit_deltas.get('slot_expired_total'))}",
+                completion_note,
             )
         )
     rows.append(

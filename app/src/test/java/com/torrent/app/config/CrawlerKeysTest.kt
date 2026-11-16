@@ -190,6 +190,36 @@ class CrawlerKeysTest {
         assertEquals("1", r.entries["tree_get_peers_penalize_misses"])
     }
 
+    @Test fun parseAdvanced_allowsGetPeersSlotBudgetAndFinishOnPeersKeys() {
+        // Crawler patch 19 rev2: the per-slot answer budget (the round-completion
+        // mechanism that replaced the inert round-idle exit) and finish-on-peers.
+        // Both are fail-open (0 restores the pre-rev2 wait-for-every-slot behaviour)
+        // and the C side clamps, so the textarea only has to be allowed to state them.
+        val keys = listOf("tree_get_peers_slot_budget_ms", "tree_get_peers_finish_on_peers")
+        for (key in keys) {
+            assertTrue("$key must be known", key in CrawlerKeys.KNOWN_KEYS)
+            assertTrue("$key must be advanced-overridable", key in CrawlerKeys.ALLOWED_ADVANCED_KEYS)
+            assertFalse("$key must not be form-managed", key in CrawlerKeys.FORM_MANAGED_KEYS)
+            assertFalse("$key must not be path-managed", key in CrawlerKeys.PATH_KEYS)
+            assertFalse("$key must not be backup-managed", key in CrawlerKeys.BACKUP_KEYS)
+        }
+        val r = CrawlerKeys.parseAdvanced(
+            "tree_get_peers_slot_budget_ms = 2000\n" +
+                "tree_get_peers_finish_on_peers = 1\n"
+        )
+        assertTrue("advanced entries must parse: ${r.errors}", r.ok)
+        assertEquals("2000", r.entries["tree_get_peers_slot_budget_ms"])
+        assertEquals("1", r.entries["tree_get_peers_finish_on_peers"])
+        // 0 is a meaningful value for both (off / legacy) and must survive the parse.
+        val off = CrawlerKeys.parseAdvanced(
+            "tree_get_peers_slot_budget_ms = 0\n" +
+                "tree_get_peers_finish_on_peers = 0\n"
+        )
+        assertTrue("off values must parse: ${off.errors}", off.ok)
+        assertEquals("0", off.entries["tree_get_peers_slot_budget_ms"])
+        assertEquals("0", off.entries["tree_get_peers_finish_on_peers"])
+    }
+
     @Test fun parseAdvanced_laterDuplicatesWin() {
         val r = CrawlerKeys.parseAdvanced("batch_size=100\nbatch_size=200\n")
         assertTrue(r.ok)

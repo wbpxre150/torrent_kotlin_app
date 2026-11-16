@@ -256,7 +256,11 @@ class CrawlerConfigTest {
         assertEquals("30000", ini["tree_metadata_timeout_ms"])
         assertEquals("15000", ini["tree_metadata_piece_idle_ms"])
         assertEquals("1500", ini["tree_get_peers_round_idle_ms"])
-        assertEquals("1", ini["tree_get_peers_penalize_misses"])
+        // Patch 19 rev2: the miss penalty ships OFF (the ~1,000 penalties/s churned the
+        // routing tables), and the round-completion pair defaults to 2000 ms / on.
+        assertEquals("0", ini["tree_get_peers_penalize_misses"])
+        assertEquals("2000", ini["tree_get_peers_slot_budget_ms"])
+        assertEquals("1", ini["tree_get_peers_finish_on_peers"])
         assertEquals("300", ini["bloom_persist_interval_sec"])
         // Stage 6 adult handling: classifier + calibrated thresholds + hard-block list
         assertEquals("1", ini["classifier_enabled"])
@@ -693,18 +697,23 @@ class CrawlerConfigTest {
                 CrawlerSettings(
                     advancedOverrides =
                     "tree_get_peers_round_idle_ms = 1500\n" +
-                        "tree_get_peers_penalize_misses = 1\n" +
+                        "tree_get_peers_penalize_misses = 0\n" +
+                        "tree_get_peers_slot_budget_ms = 2000\n" +
+                        "tree_get_peers_finish_on_peers = 1\n" +
                         "tree_metadata_piece_idle_ms = 15000\n"
                 )
             )
             val text = cfg.configFile.readText()
             val ini = CrawlerConfig.parseIni(text)
             assertEquals("1500", ini["tree_get_peers_round_idle_ms"])
-            assertEquals("1", ini["tree_get_peers_penalize_misses"])
+            assertEquals("0", ini["tree_get_peers_penalize_misses"])
+            assertEquals("2000", ini["tree_get_peers_slot_budget_ms"])
+            assertEquals("1", ini["tree_get_peers_finish_on_peers"])
             assertEquals("15000", ini["tree_metadata_piece_idle_ms"])
             // Appended exactly once each, and the pre-existing keys survive untouched.
             for (key in listOf(
                 "tree_get_peers_round_idle_ms", "tree_get_peers_penalize_misses",
+                "tree_get_peers_slot_budget_ms", "tree_get_peers_finish_on_peers",
                 "tree_metadata_piece_idle_ms"
             )) {
                 val occurrences = text.split("\n").count {

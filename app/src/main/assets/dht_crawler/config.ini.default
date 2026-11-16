@@ -140,8 +140,12 @@ tree_get_peers_fanout = 8
 tree_get_peers_max_queries = 16
 # Cap on how long a get_peers round waits on silent nodes before exiting idle, in milliseconds (0 = off)
 tree_get_peers_round_idle_ms = 1500
-# Penalise a peer that misses its get_peers response for the rest of the infohash (1 = on, 0 = off)
-tree_get_peers_penalize_misses = 1
+# Charge a silent get_peers node a routing-table miss; an answer resets it (1 = on, 0 = off)
+tree_get_peers_penalize_misses = 0
+# Per-slot get_peers answer budget in milliseconds: one dead node cannot pin its round (0 = off)
+tree_get_peers_slot_budget_ms = 2000
+# End a get_peers lookup as soon as peers are found instead of waiting for every slot (1 = on, 0 = off)
+tree_get_peers_finish_on_peers = 1
 # Peers to attempt in parallel per infohash
 tree_parallel_peers = 4
 # TCP connection establishment timeout in milliseconds
