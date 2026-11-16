@@ -572,7 +572,11 @@ tasks.register("prepareDhtCrawlerSrc") {
             "maintenance-progress.patch",
             "movie-kind-v10-streaming.patch",
             "adult-v11-backfill.patch",
-            "movie-kind-v13-default.patch"
+            "movie-kind-v13-default.patch",
+            // 18th: concurrent-duplicate-fetch suppression (in-flight claim set +
+            // bloom-on-fetch-success) and the periodic re-seed of the counts
+            // /stats publishes. See include/inflight_set.h.
+            "inflight-dedup.patch"
         )) {
             project.exec {
                 commandLine("patch", "-p1", "-d", destDir.absolutePath, "-i", file("$destDir/patches/$patchName").absolutePath)
