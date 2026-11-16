@@ -250,7 +250,13 @@ class CrawlerConfigTest {
         assertEquals("127.0.0.1", ini["http_bind"])
         assertEquals("2500", ini["udp_rate_limit_pps"])
         assertEquals("1", ini["tree_metadata_fresh_peer_retries"])
-        assertEquals("60000", ini["tree_metadata_timeout_ms"])
+        // Crawler patch 19 defaults: a shorter metadata deadline, the piece-idle eviction
+        // window, and the get_peers round-idle cap / silent-node penalty. All integers —
+        // the C parser uses atoi, so `= true` would mean 0.
+        assertEquals("30000", ini["tree_metadata_timeout_ms"])
+        assertEquals("15000", ini["tree_metadata_piece_idle_ms"])
+        assertEquals("1500", ini["tree_get_peers_round_idle_ms"])
+        assertEquals("1", ini["tree_get_peers_penalize_misses"])
         assertEquals("300", ini["bloom_persist_interval_sec"])
         // Stage 6 adult handling: classifier + calibrated thresholds + hard-block list
         assertEquals("1", ini["classifier_enabled"])
@@ -670,6 +676,45 @@ class CrawlerConfigTest {
             val after = CrawlerConfig.parseIni(cfg.configFile.readText())
             assertNull(after["not_a_real_key"])
             assertFalse(after.containsKey("not_a_real_key"))
+        }
+
+        @Test fun renderManaged_appendsThePatch19TuningKeysFromAdvancedOverrides() {
+            val cfg = configWithRealDefaultAsset()
+            cfg.ensureLayout()
+            // A pre-patch-19 install: its config.ini has none of the three tuning keys, so
+            // renderManaged must append them from the advanced textarea (the setKeys append
+            // path). None of them is form-managed, path-managed or pinned, so the override
+            // lands verbatim — the round-trip the dashboard apply depends on.
+            cfg.configFile.writeText(
+                "num_trees = 64\n" +
+                    "batch_size = 750\n"
+            )
+            cfg.applySettings(
+                CrawlerSettings(
+                    advancedOverrides =
+                    "tree_get_peers_round_idle_ms = 1500\n" +
+                        "tree_get_peers_penalize_misses = 1\n" +
+                        "tree_metadata_piece_idle_ms = 15000\n"
+                )
+            )
+            val text = cfg.configFile.readText()
+            val ini = CrawlerConfig.parseIni(text)
+            assertEquals("1500", ini["tree_get_peers_round_idle_ms"])
+            assertEquals("1", ini["tree_get_peers_penalize_misses"])
+            assertEquals("15000", ini["tree_metadata_piece_idle_ms"])
+            // Appended exactly once each, and the pre-existing keys survive untouched.
+            for (key in listOf(
+                "tree_get_peers_round_idle_ms", "tree_get_peers_penalize_misses",
+                "tree_metadata_piece_idle_ms"
+            )) {
+                val occurrences = text.split("\n").count {
+                    val t = it.trimStart()
+                    t.startsWith("$key ") || t.startsWith("$key=")
+                }
+                assertEquals("$key must be written exactly once", 1, occurrences)
+            }
+            // A key the app does not manage keeps its hand-written value.
+            assertEquals("750", ini["batch_size"])
         }
 
         @Test fun renderManaged_writesCategorySelectionAsCommaJoinedLowercase() {

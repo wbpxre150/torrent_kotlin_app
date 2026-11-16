@@ -138,6 +138,10 @@ tree_get_peers_deadline_ms = 6000
 tree_get_peers_fanout = 8
 # total get_peers packets per infohash
 tree_get_peers_max_queries = 16
+# Cap on how long a get_peers round waits on silent nodes before exiting idle, in milliseconds (0 = off)
+tree_get_peers_round_idle_ms = 1500
+# Penalise a peer that misses its get_peers response for the rest of the infohash (1 = on, 0 = off)
+tree_get_peers_penalize_misses = 1
 # Peers to attempt in parallel per infohash
 tree_parallel_peers = 4
 # TCP connection establishment timeout in milliseconds
@@ -147,7 +151,9 @@ udp_rate_limit_pps = 2500
 # Fresh-peer re-lookup retries in the metadata failure path before a failure strike (0 = disable)
 tree_metadata_fresh_peer_retries = 1
 # Metadata fetch deadline per tree in milliseconds (5000-600000)
-tree_metadata_timeout_ms = 60000
+tree_metadata_timeout_ms = 30000
+# Evict a metadata fetch whose peer makes no piece progress for this long, in milliseconds (0 = off)
+tree_metadata_piece_idle_ms = 15000
 
 # ==== Rate-Based Respawn ====
 min_metadata_rate = 0.005
