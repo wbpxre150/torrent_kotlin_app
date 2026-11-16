@@ -113,6 +113,7 @@ META_CFG_KEYS = (
     "metadata_workers",
     "tcp_connect_timeout_ms",
     "fresh_peer_retries",
+    "piece_idle_ms",
 )
 
 
@@ -940,7 +941,8 @@ def render_table(derived, meta):
             (
                 "metadata config",
                 f"{fint(meta_cfg.get('parallel_peers'))} peers, "
-                f"{fint(meta_cfg.get('metadata_timeout_ms'), ' ms')} deadline",
+                f"{fint(meta_cfg.get('metadata_timeout_ms'), ' ms')} deadline, "
+                f"{fint(meta_cfg.get('piece_idle_ms'), ' ms')} piece-idle",
                 "`supervisor.metadata` echo: "
                 + " ".join(f"{key}={fint(value)}" for key, value in meta_cfg.items()),
             )
