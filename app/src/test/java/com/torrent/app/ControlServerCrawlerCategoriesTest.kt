@@ -181,13 +181,16 @@ class ControlServerCrawlerCategoriesTest {
      * 24 buttons, 24 paired explanation paragraphs that stay in the DOM while
      * collapsed, and none of the old parenthetical label text left behind.
      * (Stage 5 of the tunnel work added the Cloudflare Tunnel card's three:
-     * the legend, the token and the hostname.)
+     * the legend, the token and the hostname; Stage 8's "Clear stored token" hint
+     * is a bare info text with no ⓘ button, so the two counts differ by one.)
      */
     @Test fun crawlerPanel_explanationsAreInfoIcons() {
         val html = panel(CrawlerSettings())
         assertEquals(24, occurrences(html, "class=\"info\""))
         assertEquals(24, occurrences(html, "aria-expanded=\"false\""))
-        assertEquals(24, occurrences(html, "class=\"info-text\" id=\"info-"))
+        // Stage 8: the "Clear stored token" hint is a bare info text (the plan's
+        // card markup gives it no ⓘ button), so the text count is one ahead.
+        assertEquals(25, occurrences(html, "class=\"info-text\" id=\"info-"))
         assertTrue(
             "the toggle must be one delegated listener",
             html.contains("document.addEventListener('click'")

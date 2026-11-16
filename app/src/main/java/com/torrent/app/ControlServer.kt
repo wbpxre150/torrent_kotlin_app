@@ -1496,6 +1496,11 @@ class ControlServer(
                   <label>${infoBtn("Public hostname", "cf-hostname")}<input name="cloudflaredHostname" value="${esc(sCf.publicHostname)}"></label>
                   ${infoText("cf-hostname", "auto-detected when connected; edit only if detection is unavailable")}
                 </div>
+                <!-- Stage 8: the clear affordance sits OUTSIDE #cf-token-row so it
+                     stays reachable while the tunnel is disabled — a stored secret
+                     must be removable without first enabling the tunnel. -->
+                <label class="row"><input type="checkbox" name="cloudflaredClearToken"> Clear stored token</label>
+                ${infoText("cf-clear-token", "explicitly removes the saved tunnel token and disables the tunnel; blank token field alone keeps the stored token")}
               </fieldset>
               <button type="submit" class="btn">Save tunnel</button>
             </form>
@@ -5125,14 +5130,16 @@ ${adultSelectionRow(adultSelection)}
          * mean "keep the stored one". Enabling the tunnel with no stored token
          * is rejected here rather than written and bounced by
          * [ConfigValidator.validateCloudflared] later.
+         *
+         * Stage 8: an explicit `cloudflaredClearToken` checkbox is the only way to
+         * remove a stored secret — it wins over the enable tick and forces
+         * `enabled = false, tunnelToken = ""`, while a blank token field alone keeps
+         * the stored value (unchanged).
          */
         internal fun cloudflaredSettingsFromForm(
             form: Map<String, String>,
             current: CloudflaredSettings,
         ): CloudflaredFormResult {
-            val enabled = form.containsKey("cloudflaredEnabled")
-            val token = form["cloudflaredToken"]?.trim().takeUnless { it.isNullOrEmpty() }
-                ?: current.tunnelToken
             val hostname = (form["cloudflaredHostname"]?.trim() ?: current.publicHostname)
                 .let { h ->
                     when {
@@ -5142,6 +5149,22 @@ ${adultSelectionRow(adultSelection)}
                     }
                 }
                 .trim()
+            // Stage 8: an explicit "Clear stored token" tick wins over the enable
+            // checkbox. A tunnel cannot run tokenless, so clearing while enabled
+            // disables and stops the child on the same save (DaemonService's
+            // `run = enabled && token.isNotEmpty()` reconcile); the hostname is
+            // handled exactly as below (blank keeps the current value).
+            if (form.containsKey("cloudflaredClearToken"))
+                return CloudflaredFormResult.Ok(
+                    CloudflaredSettings(
+                        enabled = false,
+                        tunnelToken = "",
+                        publicHostname = hostname,
+                    )
+                )
+            val enabled = form.containsKey("cloudflaredEnabled")
+            val token = form["cloudflaredToken"]?.trim().takeUnless { it.isNullOrEmpty() }
+                ?: current.tunnelToken
             if (enabled && token.isBlank())
                 return CloudflaredFormResult.Bad(
                     "Tunnel token is required when the Cloudflare tunnel is enabled")

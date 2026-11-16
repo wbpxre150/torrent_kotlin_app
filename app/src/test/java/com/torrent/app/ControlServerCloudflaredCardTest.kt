@@ -169,6 +169,47 @@ class ControlServerCloudflaredCardTest {
             1, occurrences(html, "bindCloudflared();"))
     }
 
+    /**
+     * Stage 8: the ONLY way to remove a stored secret. The checkbox must sit
+     * inside the tunnel form but OUTSIDE `#cf-token-row`, because that row is
+     * hidden while the tunnel is disabled — a stored token has to be clearable
+     * without first enabling the tunnel.
+     */
+    @Test fun panel_rendersTheClearTokenCheckboxOutsideTheTokenRow() {
+        val html = panel(CloudflaredSettings(enabled = false, tunnelToken = STORED_TUNNEL_TOKEN))
+        val formOpen = html.indexOf("<form id=\"cloudflared-form\"")
+        val formClose = html.indexOf("</form>", formOpen)
+        assertTrue("the tunnel form must render", formOpen > 0 && formClose > formOpen)
+        val form = html.substring(formOpen, formClose)
+        val rowOpen = form.indexOf("<div id=\"cf-token-row\"")
+        val rowClose = form.indexOf("</div>", rowOpen)
+        val clearAt = form.indexOf("name=\"cloudflaredClearToken\"")
+        assertTrue("the clear checkbox must be in the tunnel form", clearAt > 0)
+        assertTrue("the clear checkbox must be outside #cf-token-row (reachable while disabled)",
+            rowOpen > 0 && rowClose > rowOpen && clearAt > rowClose)
+        assertTrue("the checkbox uses the form's checkbox convention",
+            form.contains(
+                "<label class=\"row\"><input type=\"checkbox\" name=\"cloudflaredClearToken\"> " +
+                    "Clear stored token</label>"))
+        assertTrue("the clear action needs its own ⓘ info text",
+            form.contains(
+                "<p class=\"info-text\" id=\"info-cf-clear-token\" hidden>" +
+                    "explicitly removes the saved tunnel token and disables the tunnel; " +
+                    "blank token field alone keeps the stored token</p>"))
+        assertFalse("clearing must never echo the stored token",
+            html.contains(STORED_TUNNEL_TOKEN))
+    }
+
+    @Test fun panel_clearCheckboxRendersUncheckedWhileDisabled() {
+        val html = panel(CloudflaredSettings(enabled = false, tunnelToken = STORED_TUNNEL_TOKEN))
+        assertTrue("the token row still starts hidden while disabled",
+            html.contains("id=\"cf-token-row\" hidden"))
+        assertTrue("the clear box must still render while disabled",
+            html.contains("<input type=\"checkbox\" name=\"cloudflaredClearToken\">"))
+        assertFalse("the clear box is never pre-ticked",
+            html.contains("name=\"cloudflaredClearToken\" checked"))
+    }
+
     // ── the pure parser behind the POST ──────────────────────────────────────
 
     @Test fun cloudflaredSettingsFromForm_blankTokenKeepsStoredValue() {
@@ -233,5 +274,56 @@ class ControlServerCloudflaredCardTest {
             "an absent field keeps the stored hostname",
             "abc.example.com",
             (kept as CloudflaredFormResult.Ok).settings.publicHostname)
+    }
+
+    // ── Stage 8: the explicit clear (blank alone never clears) ──────────────
+
+    @Test fun cloudflaredSettingsFromForm_clearWipesTheStoredTokenAndDisables() {
+        val current = CloudflaredSettings(
+            enabled = true, tunnelToken = STORED_TUNNEL_TOKEN, publicHostname = "abc.example.com")
+        val s = ControlServer.cloudflaredSettingsFromForm(
+            mapOf("cloudflaredClearToken" to "on", "cloudflaredHostname" to "abc.example.com"),
+            current)
+        assertTrue(s is CloudflaredFormResult.Ok)
+        val settings = (s as CloudflaredFormResult.Ok).settings
+        assertEquals("an explicit clear must empty the stored secret", "", settings.tunnelToken)
+        assertFalse("a tokenless tunnel cannot run, so a clear disables it", settings.enabled)
+        assertEquals("abc.example.com", settings.publicHostname)
+    }
+
+    @Test fun cloudflaredSettingsFromForm_clearWinsOverTheEnableTick() {
+        val current = CloudflaredSettings(tunnelToken = STORED_TUNNEL_TOKEN)
+        val s = ControlServer.cloudflaredSettingsFromForm(
+            mapOf("cloudflaredEnabled" to "on", "cloudflaredClearToken" to "on"), current)
+        val settings = (s as CloudflaredFormResult.Ok).settings
+        assertEquals("the clear wins over the enable tick", "", settings.tunnelToken)
+        assertFalse("clearing while enabled disables the tunnel", settings.enabled)
+    }
+
+    @Test fun cloudflaredSettingsFromForm_clearWithNothingStoredIsIdempotent() {
+        val s = ControlServer.cloudflaredSettingsFromForm(
+            mapOf("cloudflaredClearToken" to "on"), CloudflaredSettings())
+        val settings = (s as CloudflaredFormResult.Ok).settings
+        assertEquals("", settings.tunnelToken)
+        assertFalse(settings.enabled)
+    }
+
+    @Test fun cloudflaredSettingsFromForm_clearKeepsTheHostnameSemantics() {
+        val current = CloudflaredSettings(tunnelToken = "t", publicHostname = "abc.example.com")
+        val blank = ControlServer.cloudflaredSettingsFromForm(
+            mapOf("cloudflaredClearToken" to "on", "cloudflaredHostname" to ""), current)
+        assertEquals("an explicitly blank hostname still clears on a clear",
+            "", (blank as CloudflaredFormResult.Ok).settings.publicHostname)
+        val absent = ControlServer.cloudflaredSettingsFromForm(
+            mapOf("cloudflaredClearToken" to "on"), current)
+        assertEquals("an absent hostname still keeps the stored value on a clear",
+            "abc.example.com", (absent as CloudflaredFormResult.Ok).settings.publicHostname)
+        val pasted = ControlServer.cloudflaredSettingsFromForm(
+            mapOf(
+                "cloudflaredClearToken" to "on",
+                "cloudflaredHostname" to " https://Clr.example.com ",
+            ), current)
+        assertEquals("a pasted scheme is stripped on a clear too",
+            "Clr.example.com", (pasted as CloudflaredFormResult.Ok).settings.publicHostname)
     }
 }

@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import com.torrent.app.config.AppConfig
 import com.torrent.app.config.BackupSettings
+import com.torrent.app.config.CloudflaredSettings
 import com.torrent.app.config.CrawlerSettings
 import com.torrent.app.config.FtpSettings
 import com.torrent.app.config.TransmissionSettings
@@ -15,6 +16,7 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketException
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -59,6 +61,13 @@ class ControlServerAuthRedirectTest {
 
     /** How often the injected cloudflared-save lambda ran; proves the split. */
     private val cloudflaredCalls = AtomicInteger()
+
+    /** The settings the tunnel save slot received (proves what a clear writes). */
+    private val cloudflaredSaved = AtomicReference<CloudflaredSettings?>()
+
+    /** Crawler-apply / backup-save counters: the tunnel route must never touch them. */
+    private val applyCrawlerCalls = AtomicInteger()
+    private val saveBackupCalls = AtomicInteger()
 
     @Before fun startServer() {
         port = freePort()
@@ -167,6 +176,39 @@ class ControlServerAuthRedirectTest {
         assertTrue("expected ok=true, got: $location", location.endsWith("&ok=true"))
         assertEquals("the tunnel save must reach its own slot exactly once",
             1, cloudflaredCalls.get())
+    }
+
+    /**
+     * Stage 8: an explicit clear POST is the only way to remove a stored secret.
+     * It reaches the tunnel save slot once with `enabled = false, tunnelToken = ""`
+     * — the enable tick in the same body does not win — and never the crawler
+     * apply or the backup save, so the tunnel route still owns nothing but the
+     * tunnel.
+     */
+    @Test fun cloudflaredPost_clearTokenWipesTheSecretThroughItsOwnSlotOnly() {
+        val r = postWithRetry(
+            "/settings/cloudflared",
+            body = "cloudflaredEnabled=on&cloudflaredClearToken=on&cloudflaredToken=",
+            cookie = COOKIE)
+        assertEquals(r.statusLine, 302, r.status)
+        val location = r.header("Location")
+        assertNotNull("expected a Location on the tunnel redirect", location)
+        assertTrue(
+            "expected a /settings/crawler?msg= redirect, got: $location",
+            location!!.startsWith("/settings/crawler?msg=")
+        )
+        assertFalse("the Location must not carry token=: $location", location.contains("token="))
+        assertEquals("the save result's message is the redirect's msg", "tunnel saved",
+            redirectMessage(location))
+        assertTrue("expected ok=true, got: $location", location.endsWith("&ok=true"))
+        assertEquals("the clear must reach the tunnel slot exactly once",
+            1, cloudflaredCalls.get())
+        val saved = cloudflaredSaved.get()
+        assertNotNull("the clear must hand settings to the save slot", saved)
+        assertEquals("a clear empties the stored secret", "", saved!!.tunnelToken)
+        assertFalse("a clear disables the tunnel (and so stops a running child)", saved.enabled)
+        assertEquals("a clear must never touch the crawler apply", 0, applyCrawlerCalls.get())
+        assertEquals("a clear must never touch the backup save", 0, saveBackupCalls.get())
     }
 
     /**
@@ -293,8 +335,17 @@ class ControlServerAuthRedirectTest {
                 resetCalls.incrementAndGet()
                 "db backup reset queued"
             },
-            saveCloudflared = {
+            applyCrawler = {
+                applyCrawlerCalls.incrementAndGet()
+                notWired
+            },
+            saveBackup = {
+                saveBackupCalls.incrementAndGet()
+                notWired
+            },
+            saveCloudflared = { settings ->
                 cloudflaredCalls.incrementAndGet()
+                cloudflaredSaved.set(settings)
                 com.torrent.app.config.ApplyResult(true, "tunnel saved", false)
             },
             port = port,
