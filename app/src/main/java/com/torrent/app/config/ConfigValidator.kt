@@ -168,12 +168,44 @@ object ConfigValidator {
                      validateDbBackup(b.copy(dbBackupEnabled = true)).errors
         return ValidationResult(errors.isEmpty(), errors)
     }
+    /**
+     * Validates the Cloudflare Tunnel settings.
+     *
+     * App-side only — nothing here reaches the crawler `config.ini`: the tunnel
+     * token lives in SharedPreferences alone and [CrawlerKeys] would reject it as
+     * an unknown key anyway. When the tunnel is enabled a token is mandatory.
+     * [CloudflaredSettings.publicHostname] is optional (the daemon auto-detects it
+     * while connected) but when present it must be a bare hostname — no scheme, no
+     * port, no path.
+     */
+    fun validateCloudflared(c: CloudflaredSettings): ValidationResult {
+        val errors = mutableListOf<String>()
+        if (c.enabled && c.tunnelToken.isBlank())
+            errors.add("tunnel token must not be empty when the tunnel is enabled")
+        if (c.publicHostname.isNotBlank() && !validHostname(c.publicHostname))
+            errors.add("public hostname must be a bare hostname (no scheme, port or path)")
+        return ValidationResult(errors.isEmpty(), errors)
+    }
+
     private fun validPort(p: Int) = p in 1..65535
 
     /** `https://` scheme with a non-empty host; `http://`, hostless and unparsable URLs are rejected. */
     internal fun validHttpsUrl(raw: String): Boolean {
         val uri = try { java.net.URI(raw.trim()) } catch (e: Exception) { return false }
         return uri.scheme?.equals("https", ignoreCase = true) == true && !uri.host.isNullOrBlank()
+    }
+
+    /**
+     * Bare hostname — the host part [validHttpsUrl] accepts, without scheme, port
+     * or path: one or more dot-separated `[A-Za-z0-9-]` labels that neither start
+     * nor end with '-' (so `https://x.example.com`, `x.example.com:443`,
+     * `x.example.com/path`, `x example.com` and a trailing dot are all rejected).
+     */
+    internal fun validHostname(raw: String): Boolean {
+        val h = raw.trim()
+        if (h.isEmpty() || h.length > 253) return false
+        val label = Regex("[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
+        return h.split('.').all { it.matches(label) }
     }
 
     private fun validSubpath(p: String): Boolean {

@@ -73,6 +73,11 @@ class ConfigStore(context: Context) {
             bootstrapEnabled = prefs.getBoolean(KEY_BACKUP_BOOTSTRAP_ENABLED, ConfigDefaults.BACKUP.bootstrapEnabled),
             bootstrapUrl = prefs.getString(KEY_BACKUP_BOOTSTRAP_URL, ConfigDefaults.BACKUP.bootstrapUrl)!!,
         ),
+        cloudflared = CloudflaredSettings(
+            enabled = prefs.getBoolean(KEY_CLOUDFLARED_ENABLED, ConfigDefaults.CLOUDFLARED.enabled),
+            tunnelToken = prefs.getString(KEY_CLOUDFLARED_TUNNEL_TOKEN, ConfigDefaults.CLOUDFLARED.tunnelToken)!!,
+            publicHostname = prefs.getString(KEY_CLOUDFLARED_HOSTNAME, ConfigDefaults.CLOUDFLARED.publicHostname)!!,
+        ),
         dataSubpath = prefs.getString(KEY_DATA_SUBPATH, null)
             ?: prefs.getString(KEY_TX_SUBPATH, null)
             ?: prefs.getString(KEY_FTP_ROOT, null)
@@ -85,6 +90,7 @@ class ConfigStore(context: Context) {
         saveFtp(s.ftp)
         saveCrawler(s.crawler)
         saveBackup(s.backup)
+        saveCloudflared(s.cloudflared)
         prefs.edit().putString(KEY_DATA_SUBPATH, s.dataSubpath).apply()
     }
 
@@ -154,6 +160,18 @@ class ConfigStore(context: Context) {
             .putString(KEY_BACKUP_R2_DB_OBJECT_PREFIX, s.r2DbObjectPrefix)
             .putBoolean(KEY_BACKUP_BOOTSTRAP_ENABLED, s.bootstrapEnabled)
             .putString(KEY_BACKUP_BOOTSTRAP_URL, s.bootstrapUrl)
+            .apply()
+    }
+
+    /**
+     * Persists the Cloudflare Tunnel settings. Plain SharedPreferences only: the
+     * tunnel token must never reach `config.ini` (see [CloudflaredSettings]).
+     */
+    fun saveCloudflared(s: CloudflaredSettings) {
+        prefs.edit()
+            .putBoolean(KEY_CLOUDFLARED_ENABLED, s.enabled)
+            .putString(KEY_CLOUDFLARED_TUNNEL_TOKEN, s.tunnelToken)
+            .putString(KEY_CLOUDFLARED_HOSTNAME, s.publicHostname)
             .apply()
     }
 
@@ -376,6 +394,10 @@ class ConfigStore(context: Context) {
         private const val KEY_BACKUP_R2_DB_BUCKET = "backup_r2_db_bucket"
         private const val KEY_BACKUP_R2_DB_OBJECT_PREFIX = "backup_r2_db_object_prefix"
         private const val KEY_BACKUP_DB_LAST_SUCCESS_DATE = "backup_db_last_success_date"
+        private const val KEY_CLOUDFLARED_ENABLED = "cloudflared_enabled"
+        /** Tunnel token: a secret, kept in SharedPreferences only (never `config.ini`). */
+        private const val KEY_CLOUDFLARED_TUNNEL_TOKEN = "cloudflared_tunnel_token"
+        private const val KEY_CLOUDFLARED_HOSTNAME = "cloudflared_public_hostname"
         private const val KEY_LKG_CRAWLER_PRESENT = "lkg_crawler_present"
         private const val KEY_LKG_CRAWLER_ENABLED = "lkg_crawler_enabled"
         private const val KEY_LKG_CRAWLER_WIFI_ONLY = "lkg_crawler_wifi_only"

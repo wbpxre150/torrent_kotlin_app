@@ -97,6 +97,30 @@ data class BackupSettings(
     val bootstrapUrl: String = ConfigDefaults.BACKUP_BOOTSTRAP_URL,
 )
 
+/**
+ * Cloudflare Tunnel (`cloudflared`) settings.
+ *
+ * App-side only: nothing here reaches the crawler `config.ini` (invariant 7 —
+ * [CrawlerKeys] allow-lists keys and rejects unknown ones, so the tunnel token
+ * can never leak into the crawler config).
+ */
+data class CloudflaredSettings(
+    /** Whether the supervised `cloudflared` child runs (token-only tunnel mode). */
+    val enabled: Boolean = false,
+    /**
+     * Operator-supplied remotely-managed tunnel token. A secret, stored like
+     * [BackupSettings.r2SecretAccessKey] (plain SharedPreferences, same storage
+     * class as the control token): never logged, never interpolated into HTML,
+     * and handed to the daemon through its environment — never argv.
+     */
+    val tunnelToken: String = "",
+    /**
+     * Bare public hostname the tunnel serves (`abc.example.com`, no scheme).
+     * Blank until it is known; the daemon auto-detects it while connected.
+     */
+    val publicHostname: String = "",
+)
+
 data class AppConfig(
     val wizardCompleted: Boolean,
     val transmission: TransmissionSettings,
@@ -104,6 +128,7 @@ data class AppConfig(
     val crawler: CrawlerSettings,
     val backup: BackupSettings,
     val dataSubpath: String,
+    val cloudflared: CloudflaredSettings = CloudflaredSettings(),
 )
 
 object ConfigDefaults {
@@ -140,6 +165,7 @@ object ConfigDefaults {
         enabled = true,
     )
     val BACKUP = BackupSettings()
+    val CLOUDFLARED = CloudflaredSettings()
     val INITIAL = AppConfig(wizardCompleted = false, transmission = TRANSMISSION, ftp = FTP, crawler = CRAWLER, backup = BACKUP, dataSubpath = DATA_SUBPATH)
 
     fun randomPassword(len: Int = FTP_PASSWORD_LEN): String {
