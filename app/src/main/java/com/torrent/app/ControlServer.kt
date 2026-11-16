@@ -30,6 +30,7 @@ import com.torrent.app.config.CrawlerKeys
 import com.torrent.app.config.CrawlerSettings
 import com.torrent.app.config.CrawlerTaxonomy
 import com.torrent.app.config.BackupSettings
+import com.torrent.app.config.CloudflaredSettings
 
 class ControlServer(
     private val tokenManager: TokenManager,
@@ -353,15 +354,34 @@ class ControlServer(
                             is CrawlerSettingsFormResult.Ok -> {
                                 val s = parsed.settings
                                 val backup = backupSettingsFromForm(form, currentCfg.backup)
+                                // Stage 5: an enabled tunnel with no stored token is a
+                                // form mistake. Rejected here, before applyCrawler, so a
+                                // bad tunnel form never stops or rewrites the crawler.
+                                val cf = when (val cfParsed =
+                                    cloudflaredSettingsFromForm(form, currentCfg.cloudflared)) {
+                                    is CloudflaredFormResult.Bad -> {
+                                        redirectAuthed(call,
+                                            "/settings/crawler?msg=${urlEnc(cfParsed.message)}&ok=false")
+                                        return@post
+                                    }
+                                    is CloudflaredFormResult.Ok -> cfParsed.settings
+                                }
                                 val bloomChanged = current.bloomCapacity != s.bloomCapacity ||
                                     current.failureBloomCapacity != s.failureBloomCapacity ||
                                     current.bloomErrorRate != s.bloomErrorRate
                                 val r = applyCrawler(s)
                                 val rb = saveBackup(backup)
-                                val msg = if (r.ok && rb.ok) r.message else "${r.message} / backup: ${rb.message}"
+                                // Beside saveBackup, never inside applyCrawler: the
+                                // tunnel save writes the store and reconciles the
+                                // cloudflared child only, so the dht_crawler keeps
+                                // running untouched (criterion 9).
+                                val rc = saveCloudflared(cf)
+                                val okAll = r.ok && rb.ok && rc.ok
+                                val msg = if (okAll) r.message
+                                    else "${r.message} / backup: ${rb.message} / tunnel: ${rc.message}"
                                 val rebuild = if (bloomChanged) "&rebuildBloom=true" else ""
                                 redirectAuthed(call,
-                                    "/settings/crawler?msg=${urlEnc(msg)}&ok=${r.ok && rb.ok}$rebuild")
+                                    "/settings/crawler?msg=${urlEnc(msg)}&ok=$okAll$rebuild")
                             }
                         }
                     }
@@ -1283,6 +1303,7 @@ class ControlServer(
     internal fun buildCrawlerPanel(msg: String?, ok: Boolean, rebuildBloom: Boolean): String {
         val s = loadConfig().crawler
         val sBackup = loadConfig().backup
+        val sCf = loadConfig().cloudflared
         val banner = if (msg != null)
             """<div class="${if (ok) "ok" else "err"}">${esc(msg)}</div>""" else ""
         val checked = { b: Boolean -> if (b) "checked" else "" }
@@ -1322,6 +1343,9 @@ class ControlServer(
         // too, so a selection change takes effect without a save.
         val tvKindRowHidden =
             if ("tv" in savedCategories || "anime" in savedCategories) "" else " hidden"
+        // Stage 5: the tunnel token/hostname row only matters while the tunnel is
+        // enabled; the client-side toggle reveals it without a save or a reload.
+        val cfTokenRowHidden = if (sCf.enabled) "" else " hidden"
         return """
             <!DOCTYPE html><html><head><title>DHT crawler settings</title>
             <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1337,6 +1361,7 @@ class ControlServer(
             .pick label{display:inline-flex;align-items:center;width:auto;margin:.2em 1em .2em 0}
             #save-tv-kind-row h3{margin:10px 0 2px;font-size:.85rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
             #save-tv-kind-row[hidden]{display:none}
+            #cf-token-row[hidden]{display:none}
             .tabs{display:flex;gap:6px;margin:12px 0 6px}
             .tabs button{flex:1;margin:0;padding:.55em .7em;border:1px solid #dadce0;background:#fff;color:var(--blue);border-radius:8px;font:inherit;font-size:.9rem;cursor:pointer}
             .tabs button[aria-selected="true"]{background:var(--chip);border-color:var(--blue);font-weight:700}
@@ -1437,6 +1462,16 @@ class ControlServer(
                 ${infoText("crawler-http-port", "loopback")}
                 <label class="row"><input type="checkbox" name="lanDirect" ${checked(s.lanDirect)}> ${infoBtn("LAN direct", "lan-direct")}</label>
                 ${infoText("lan-direct", "bind 0.0.0.0, no proxy, no auth")}
+              </fieldset>
+              <fieldset class="card"><legend>${infoBtn("Cloudflare Tunnel", "cf-tunnel")}</legend>
+                ${infoText("cf-tunnel", "app-side only; not written to the crawler config")}
+                <label class="row"><input type="checkbox" name="cloudflaredEnabled" ${checked(sCf.enabled)}> Enable Cloudflare tunnel</label>
+                <div id="cf-token-row"$cfTokenRowHidden>
+                  <label>${infoBtn("Tunnel token", "cf-token")}<input type="password" name="cloudflaredToken" placeholder="unchanged"></label>
+                  ${infoText("cf-token", "leave blank to keep")}
+                  <label>${infoBtn("Public hostname", "cf-hostname")}<input name="cloudflaredHostname" value="${esc(sCf.publicHostname)}"></label>
+                  ${infoText("cf-hostname", "auto-detected when connected; edit only if detection is unavailable")}
+                </div>
               </fieldset>
               <fieldset class="card"><legend>${infoBtn("Backup", "backup")}</legend>
                 ${infoText("backup", "app-side only; not written to the crawler config")}
@@ -1562,6 +1597,21 @@ class ControlServer(
                 syncTvKindRow();
               }
               bindCategories();
+              // Stage 5: the tunnel token/hostname row follows the enable toggle.
+              // Re-bound inside reconcileForm() for the same reason as above —
+              // the form swap would otherwise leave a dead listener behind.
+              var cfEnableBox = document.querySelector('input[name="cloudflaredEnabled"]');
+              function syncCfTokenRow() {
+                var row = el('cf-token-row');
+                if (!row || !cfEnableBox) return;
+                if (cfEnableBox.checked) row.removeAttribute('hidden'); else row.setAttribute('hidden', '');
+              }
+              function bindCloudflared() {
+                cfEnableBox = document.querySelector('input[name="cloudflaredEnabled"]');
+                if (cfEnableBox) cfEnableBox.addEventListener('change', syncCfTokenRow);
+                syncCfTokenRow();
+              }
+              bindCloudflared();
               // ── live render: one frame carries the full state ─────────────
               // Seeded with the seq this page was rendered at (Stage 7): a page
               // loaded while an apply is already terminal must not refetch on
@@ -1592,6 +1642,7 @@ class ControlServer(
                       form.innerHTML = freshForm.innerHTML;
                       bindForm();
                       bindCategories();
+                      bindCloudflared();
                     }
                     var freshBanner = doc.getElementById('page-banner');
                     var banner = el('page-banner');
@@ -4927,6 +4978,14 @@ ${adultSelectionRow(adultSelection)}
         internal fun crawlerStatsJson(statsBody: String?, state: ProcessState? = null): String =
             if (statsBody.isNullOrBlank()) "{\"running\":false,\"state\":\"${state ?: ProcessState.STOPPED}\"}" else statsBody
 
+        /** One Cloudflare-tunnel form parse outcome (stage 5). */
+        internal sealed interface CloudflaredFormResult {
+            data class Ok(val settings: CloudflaredSettings) : CloudflaredFormResult
+
+            /** The form was rejected; [message] is shown in the panel's error banner. */
+            data class Bad(val message: String) : CloudflaredFormResult
+        }
+
         /** One crawler-settings form parse outcome (stage 4). */
         internal sealed interface CrawlerSettingsFormResult {
             data class Ok(val settings: CrawlerSettings) : CrawlerSettingsFormResult
@@ -5044,5 +5103,44 @@ ${adultSelectionRow(adultSelection)}
             bootstrapEnabled = current.bootstrapEnabled,
             bootstrapUrl = form["bootstrapUrl"] ?: current.bootstrapUrl,
         )
+
+        /**
+         * Builds CloudflaredSettings from the crawler panel form (checkbox
+         * presence = true, a blank token field keeps the stored secret, a
+         * pasted `https://` prefix is stripped off the hostname). Pure and
+         * unit-testable; the POST route redirects with the message on [Bad].
+         *
+         * The token is a secret: the form never renders it, so "blank" can only
+         * mean "keep the stored one". Enabling the tunnel with no stored token
+         * is rejected here rather than written and bounced by
+         * [ConfigValidator.validateCloudflared] later.
+         */
+        internal fun cloudflaredSettingsFromForm(
+            form: Map<String, String>,
+            current: CloudflaredSettings,
+        ): CloudflaredFormResult {
+            val enabled = form.containsKey("cloudflaredEnabled")
+            val token = form["cloudflaredToken"]?.trim().takeUnless { it.isNullOrEmpty() }
+                ?: current.tunnelToken
+            val hostname = (form["cloudflaredHostname"]?.trim() ?: current.publicHostname)
+                .let { h ->
+                    when {
+                        h.startsWith("https://", ignoreCase = true) -> h.substring(8)
+                        h.startsWith("http://", ignoreCase = true) -> h.substring(7)
+                        else -> h
+                    }
+                }
+                .trim()
+            if (enabled && token.isBlank())
+                return CloudflaredFormResult.Bad(
+                    "Tunnel token is required when the Cloudflare tunnel is enabled")
+            return CloudflaredFormResult.Ok(
+                CloudflaredSettings(
+                    enabled = enabled,
+                    tunnelToken = token,
+                    publicHostname = hostname,
+                )
+            )
+        }
     }
 }
