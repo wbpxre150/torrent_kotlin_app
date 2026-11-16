@@ -250,17 +250,18 @@ class CrawlerConfigTest {
         assertEquals("127.0.0.1", ini["http_bind"])
         assertEquals("2500", ini["udp_rate_limit_pps"])
         assertEquals("1", ini["tree_metadata_fresh_peer_retries"])
-        // Crawler patch 19 defaults: a shorter metadata deadline, the piece-idle eviction
-        // window, and the get_peers round-idle cap / silent-node penalty. All integers —
-        // the C parser uses atoi, so `= true` would mean 0.
-        assertEquals("30000", ini["tree_metadata_timeout_ms"])
-        assertEquals("15000", ini["tree_metadata_piece_idle_ms"])
-        assertEquals("1500", ini["tree_get_peers_round_idle_ms"])
-        // Patch 19 rev2: the miss penalty ships OFF (the ~1,000 penalties/s churned the
-        // routing tables), and the round-completion pair defaults to 2000 ms / on.
+        // Crawler patch 19 final: every behaviour knob ships at its legacy/off value — the five
+        // 30-minute windows measured the tuning net-negative, so the keys stay present and
+        // documented as opt-in. All integers — the C parser uses atoi, so `= true` would mean 0.
+        assertEquals("60000", ini["tree_metadata_timeout_ms"])
+        assertEquals("0", ini["tree_metadata_piece_idle_ms"])
+        assertEquals("0", ini["tree_get_peers_round_idle_ms"])
+        // The miss penalty, the per-slot budget and finish-on-peers all ship off; the parallel
+        // window stays at the legacy 2 (the narrowed 1..4 clamp is a correctness fix, not a default).
         assertEquals("0", ini["tree_get_peers_penalize_misses"])
-        assertEquals("2000", ini["tree_get_peers_slot_budget_ms"])
-        assertEquals("1", ini["tree_get_peers_finish_on_peers"])
+        assertEquals("0", ini["tree_get_peers_slot_budget_ms"])
+        assertEquals("0", ini["tree_get_peers_finish_on_peers"])
+        assertEquals("2", ini["tree_parallel_peers"])
         assertEquals("300", ini["bloom_persist_interval_sec"])
         // Stage 6 adult handling: classifier + calibrated thresholds + hard-block list
         assertEquals("1", ini["classifier_enabled"])

@@ -139,15 +139,20 @@ tree_get_peers_fanout = 8
 # total get_peers packets per infohash
 tree_get_peers_max_queries = 16
 # Cap on how long a get_peers round waits on silent nodes before exiting idle, in milliseconds (0 = off)
-tree_get_peers_round_idle_ms = 1500
+# opt-in; shipped off/legacy — see measurements.md
+tree_get_peers_round_idle_ms = 0
 # Charge a silent get_peers node a routing-table miss; an answer resets it (1 = on, 0 = off)
+# opt-in; shipped off/legacy — see measurements.md
 tree_get_peers_penalize_misses = 0
 # Per-slot get_peers answer budget in milliseconds: one dead node cannot pin its round (0 = off)
-tree_get_peers_slot_budget_ms = 2000
+# opt-in; shipped off/legacy — see measurements.md
+tree_get_peers_slot_budget_ms = 0
 # End a get_peers lookup as soon as peers are found instead of waiting for every slot (1 = on, 0 = off)
-tree_get_peers_finish_on_peers = 1
-# Peers to attempt in parallel per infohash
-tree_parallel_peers = 4
+# opt-in; shipped off/legacy — see measurements.md
+tree_get_peers_finish_on_peers = 0
+# Peers to attempt in parallel per infohash (1-4)
+# opt-in; shipped off/legacy — see measurements.md
+tree_parallel_peers = 2
 # TCP connection establishment timeout in milliseconds
 tree_tcp_connect_timeout_ms = 2000
 # Process-wide UDP send rate limit in packets/sec (0 = unlimited)
@@ -155,9 +160,11 @@ udp_rate_limit_pps = 2500
 # Fresh-peer re-lookup retries in the metadata failure path before a failure strike (0 = disable)
 tree_metadata_fresh_peer_retries = 1
 # Metadata fetch deadline per tree in milliseconds (5000-600000)
-tree_metadata_timeout_ms = 30000
+# opt-in; shipped off/legacy — see measurements.md
+tree_metadata_timeout_ms = 60000
 # Evict a metadata fetch whose peer makes no piece progress for this long, in milliseconds (0 = off)
-tree_metadata_piece_idle_ms = 15000
+# opt-in; shipped off/legacy — see measurements.md
+tree_metadata_piece_idle_ms = 0
 
 # ==== Rate-Based Respawn ====
 min_metadata_rate = 0.005

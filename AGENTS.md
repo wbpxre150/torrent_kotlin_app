@@ -299,12 +299,14 @@ deliberately not run in this release.
 `src/config.c`, `include/movie_kind.h` `MOVIE_KIND_MODEL_DIR_DEFAULT` and the `include/config.h`
 comment — so the vendored tree stays pristine), `inflight-dedup.patch` (18th) and
 `getpeers-metadata-tuning.patch` (19th and last: the `/stats` success-metric split + per-outcome metadata
-failure attribution + get_peers round-idle exit/miss penalties + metadata piece-idle eviction, window and
-deadline defaults); new patches go LAST, as the 20th slot. Upstream fixes belong in `patches/`.
+failure attribution + get_peers round-idle/slot-budget/finish-on-peers/miss-penalty mechanisms + metadata
+piece-idle eviction, all as **opt-in knobs shipped at legacy defaults** — five 30-minute on-device windows
+measured the tuning net-negative, so patch 19 ships the instrumentation and the keys, not the behaviour);
+new patches go LAST, as the 20th slot. Upstream fixes belong in `patches/`.
 See the vendored repo's `CLAUDE.md` for its architecture (thread trees, bloom filters, schema) and its
 `CONFIG_INI.md` for the patch-19 config keys.
 
-**`/stats` after patch 19 (interface only — no measurement recorded yet).** `aggregate` publishes both
+**`/stats` after patch 19 (measured — the instrumentation is the win, the tuning is not).** `aggregate` publishes both
 denominators beside their percentages: `metadata_attempts_total` with `metadata_fetch_success_percent`
 (`total_metadata_fetched * 100 / metadata_attempts_total`, 0.0 when the denominator is 0) and
 `get_peers_lookups_total` / `get_peers_lookups_with_peers` with `get_peers_yield_percent`; **`metadata_success_rate_percent`
@@ -318,14 +320,33 @@ one event per attempt** at the global-timeout break (every live slot is abandone
 `fresh_peer_retries`, `piece_idle_ms`); `supervisor.get_peers` and every `trees[].get_peers` gain
 `idle_exits_total`, `deadline_exits_total`, `unanswered_slots_total` and `miss_penalties_total` (the
 per-tree block also echoes `round_idle_ms` and `penalize_misses`), and each tree gains `metadata_attempts`
-beside `metadata_count`. Patch 19 also adds the config keys `tree_get_peers_round_idle_ms` (default 1500,
-clamp 0 or 250..6000, 0 = off = the legacy full-deadline round), `tree_get_peers_penalize_misses`
-(default 1, 0/1) and `tree_metadata_piece_idle_ms` (default 15000, clamp 0 or 3000..60000, 0 = off), and
-changes two compiled defaults — `tree_parallel_peers` 2→4 (clamp narrowed 1..10 → 1..4 to match
-`MAX_PARALLEL_PEERS`, so the accepted value is the effective one) and `tree_metadata_timeout_ms`
-60000→30000 — all fail-open to the pre-patch behaviour at 0/old values.
+beside `metadata_count`. Patch 19 also adds the config keys `tree_get_peers_round_idle_ms` (default 0 = off,
+opt-in clamp 250..6000), `tree_get_peers_penalize_misses` (default 0, 0/1), `tree_get_peers_slot_budget_ms`
+(default 0 = off, opt-in clamp 500..6000), `tree_get_peers_finish_on_peers` (default 0, 0/1) and
+`tree_metadata_piece_idle_ms` (default 0 = off, opt-in clamp 3000..60000), and narrows the
+`tree_parallel_peers` clamp from 1..10 to 1..4 to match `MAX_PARALLEL_PEERS` — a correctness fix, so the
+accepted value is the effective one — while `tree_parallel_peers` and `tree_metadata_timeout_ms` keep their
+legacy defaults **2** / **60000**. Every knob stays present, parseable, echoed and documented; all fail-open
+to the pre-patch behaviour at 0/old values.
 `tools/crawler/gp_probe.py` reads the new keys with a fallback to `metadata_success_rate_percent`, so one
 probe version measures pre- and post-patch-19 builds.
+
+**Measured over five 30-minute windows (1795 s each, 64 trees / 18 workers / cap 3000) — the tuning is
+net-negative, so it ships off.** The only valid contemporaneous comparison is TUNED vs LEGACY on the same
+build in the same hour: lookups/s 233.0 vs 236.6 (−1.5 %), yield 29.7 % vs 33.1 % (−3.4 pp), packets/lookup
+8.99 vs 8.46 (+6 %), metadata/s 5.86 vs 6.75 (−13 %). The 00:46 baseline (239.1 / 36.9 % / 9.23 / 7.16) is
+**not** a valid control — LEGACY on the new build measured 33.1 % yield against the baseline's 36.9 %, i.e.
+the DHT thinned overnight. get_peers is **discovery-bound** (per-tree drain 2.5–3.0 lookups/s vs a BEP51 fill
+of 3.0–3.5/s, `discovery_paused` 11–14 % in every configuration), so finishing lookups sooner cannot create
+more lookups; metadata is **peer-liveness-bound** (connect 82.8–84.1 %, handshake 14.8–16.1 %, stall 0.8 %,
+deadline 0.1–0.2 % across every window), so piece-idle eviction and the deadline knob address ≤1 % of the
+failure mass. The round-idle premise was **falsified**: 245 idle exits vs 246,380 deadline exits, because
+answers trickle in faster than 1.5 s. Criteria 4 (get_peers rate) and 5 (metadata rate/success) are recorded
+**NOT-IMPROVED** — the documented negative result the measure-and-report clause allows, not a pass. What
+patch 19 does deliver is the instrumentation (the split with published denominators, the eight
+`metadata_failures` counters, the exit/slot counters), which produced every finding above. `Δudp_throttled_sends_total`
+is non-zero in all new-build windows (17,782–47,439) including LEGACY vs 0 in the pre-change baseline — a
+build-level observation, cause unisolated, **not** attributed to the behaviour knobs.
 
 **Measured on b078fce (patch 18, 320,697-row DB, 64 trees).** `/stats` carries an `inflight` object
 (`enabled/capacity/held/claimed/refused/released/expired/tree_released/clears`). Over an 18-minute run
