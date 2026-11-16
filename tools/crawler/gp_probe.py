@@ -71,6 +71,30 @@ GP_KEYS = (
     "from_retry_total",
 )
 
+# Per-outcome metadata connection-failure counters (crawler patch 19). Each failed
+# connection is counted once, under the outcome that first detected it, so the sum
+# over a window bounds the failed attempts; `deadline_total` counts attempts (every
+# live window slot is abandoned together), not connections.
+MF_KEYS = (
+    "connect_total",
+    "handshake_total",
+    "stall_total",
+    "ut_reject_total",
+    "size_total",
+    "hash_total",
+    "deadline_total",
+    "other_total",
+)
+
+# Effective metadata knobs echoed under `supervisor.metadata` (crawler patch 19).
+META_CFG_KEYS = (
+    "parallel_peers",
+    "metadata_timeout_ms",
+    "metadata_workers",
+    "tcp_connect_timeout_ms",
+    "fresh_peer_retries",
+)
+
 
 # --------------------------------------------------------------------------- helpers
 
@@ -134,6 +158,22 @@ def _gp_norm(obj):
     return out or None
 
 
+def _mf_norm(obj):
+    """Normalise a metadata-failure counter object; None when not emitted."""
+    if not isinstance(obj, dict):
+        return None
+    out = {key: num(obj.get(key)) for key in MF_KEYS if key in obj}
+    return out or None
+
+
+def _meta_cfg_norm(obj):
+    """Normalise the `supervisor.metadata` config echo; None when not emitted."""
+    if not isinstance(obj, dict):
+        return None
+    out = {key: num(obj.get(key)) for key in META_CFG_KEYS if key in obj}
+    return out or None
+
+
 def parse_stats(body, t=None):
     """Normalise one `/stats` body into a flat sample dict.
 
@@ -146,6 +186,11 @@ def parse_stats(body, t=None):
     `metadata_attempts_total`. `metadata_success_percent` falls back to the
     pre-patch-19 `aggregate.metadata_success_rate_percent`, so one probe version
     measures the old build (baseline) and the new one.
+
+    The `supervisor` block is also read for the metadata failure attribution:
+    `supervisor.metadata_failures` (the eight per-outcome totals) and the
+    `supervisor.metadata` config echo. Both are absent on pre-patch-19 builds and
+    become None, which the derivation treats as "not measured" rather than zero.
     """
     if not isinstance(body, dict):
         return None
@@ -205,6 +250,8 @@ def parse_stats(body, t=None):
         "fresh_peer_rescues": num(sup.get("fresh_peer_rescues_total")),
         "draining_trees": num(sup.get("draining_trees_count")),
         "gp": _gp_norm(sup.get("get_peers")),
+        "mf": _mf_norm(sup.get("metadata_failures")),
+        "meta_cfg": _meta_cfg_norm(sup.get("metadata")),
         "dispatcher": (
             {
                 "total_responses": num(dig(sup, "dispatcher", "total_responses")),
@@ -514,6 +561,10 @@ def derive(samples, health, meta):
         "metadata_success_percent": None,
         "metadata_fetch_success_percent": None,
         "metadata_attempts_total": None,
+        "metadata_fail_deltas": None,
+        "metadata_fail_total_delta": None,
+        "metadata_failed_attempts_delta": None,
+        "meta_cfg": None,
         "gp_yield_percent": None,
         "dropped_per_s": None,
         "queue_full_drops_per_s": None,
@@ -596,6 +647,25 @@ def derive(samples, health, meta):
     strike = series_delta(samples, lambda s: s.get("first_strike"))
     if strike:
         out["first_strike_per_s"] = strike["per_s"]
+
+    # Metadata failure attribution (new binary only). Window deltas per outcome,
+    # so criterion 3 (sum of the eight >= failed attempts > 0) is readable from a
+    # single table row instead of two raw snapshots.
+    out["meta_cfg"] = last.get("meta_cfg")
+    mf = last.get("mf") or {}
+    fail_deltas = {}
+    for key in MF_KEYS:
+        if key not in mf:
+            continue
+        delta = series_delta(samples, lambda s, k=key: dig(s, "mf", k))
+        if delta:
+            fail_deltas[key] = delta["delta"]
+    if fail_deltas:
+        out["metadata_fail_deltas"] = fail_deltas
+        out["metadata_fail_total_delta"] = sum(fail_deltas.values())
+    attempts = series_delta(samples, lambda s: s.get("metadata_attempts_total"))
+    if attempts and fetched:
+        out["metadata_failed_attempts_delta"] = attempts["delta"] - fetched["delta"]
 
     # Shared dispatcher drops.
     dropped = series_delta(samples, lambda s: dig(s, "dispatcher", "dropped_responses"))
@@ -792,6 +862,40 @@ def render_table(derived, meta):
             f"first strike /s {f2(d.get('first_strike_per_s'))}; " + success_note,
         )
     )
+    meta_cfg = d.get("meta_cfg")
+    if meta_cfg:
+        rows.append(
+            (
+                "metadata config",
+                f"{fint(meta_cfg.get('parallel_peers'))} peers, "
+                f"{fint(meta_cfg.get('metadata_timeout_ms'), ' ms')} deadline",
+                "`supervisor.metadata` echo: "
+                + " ".join(f"{key}={fint(value)}" for key, value in meta_cfg.items()),
+            )
+        )
+    fail_deltas = d.get("metadata_fail_deltas")
+    if fail_deltas:
+        total = d.get("metadata_fail_total_delta") or 0
+        parts = []
+        for key in MF_KEYS:
+            if key not in fail_deltas:
+                continue
+            share = f"{fail_deltas[key] / total * 100.0:.1f} %" if total else "n/a"
+            parts.append(f"`{key[:-len('_total')]}` {fbig(fail_deltas[key])} ({share})")
+        failed_attempts = d.get("metadata_failed_attempts_delta")
+        if failed_attempts is None:
+            verdict = "failed attempts n/a"
+        elif total >= failed_attempts:
+            verdict = f"failed attempts {fbig(failed_attempts)} — criterion 3: sum >= failed"
+        else:
+            verdict = f"failed attempts {fbig(failed_attempts)} — criterion 3 FAILED: sum < failed"
+        rows.append(
+            (
+                "metadata failures (window)",
+                f"sum {fbig(total)}",
+                "; ".join(parts) + f"; {verdict}",
+            )
+        )
     rows.append(
         (
             "dispatcher drops /s",
