@@ -58,6 +58,7 @@ object CrawlerKeys {
         "tree_bep51_query_interval_ms", "tree_get_peers_workers", "tree_peers_queue_capacity",
         "tree_get_peers_timeout_ms", "tree_metadata_workers", "tree_tcp_connect_timeout_ms",
         "tree_get_peers_deadline_ms", "tree_get_peers_fanout", "tree_get_peers_max_queries",
+        "tree_get_peers_round_idle_ms", "tree_get_peers_penalize_misses",
         "tree_parallel_peers", "udp_rate_limit_pps",
         "tree_metadata_fresh_peer_retries",
         "tree_metadata_timeout_ms",

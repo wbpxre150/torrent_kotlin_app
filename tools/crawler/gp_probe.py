@@ -69,6 +69,26 @@ GP_KEYS = (
     "mean_lookup_ms",
     "answers_total",
     "from_retry_total",
+    # Crawler patch 19 stage 3: exit-reason split + silent-node penalties.
+    "idle_exits_total",
+    "deadline_exits_total",
+    "unanswered_slots_total",
+    "miss_penalties_total",
+)
+
+# Per-tree `get_peers` knob echoes (crawler patch 19 stage 3). Read from the first
+# tree so a sample carries the settings its counters were produced under.
+GP_CFG_KEYS = (
+    "round_idle_ms",
+    "penalize_misses",
+)
+
+# Window deltas of the exit-reason / penalty counters, in display order.
+GP_EXIT_KEYS = (
+    "idle_exits_total",
+    "deadline_exits_total",
+    "unanswered_slots_total",
+    "miss_penalties_total",
 )
 
 # Per-outcome metadata connection-failure counters (crawler patch 19). Each failed
@@ -158,6 +178,14 @@ def _gp_norm(obj):
     return out or None
 
 
+def _gp_cfg_norm(obj):
+    """Normalise a per-tree `get_peers` knob echo; None when it is not emitted."""
+    if not isinstance(obj, dict):
+        return None
+    out = {key: num(obj.get(key)) for key in GP_CFG_KEYS if key in obj}
+    return out or None
+
+
 def _mf_norm(obj):
     """Normalise a metadata-failure counter object; None when not emitted."""
     if not isinstance(obj, dict):
@@ -223,6 +251,7 @@ def parse_stats(body, t=None):
                 "conns": num(raw.get("active_connections")),
                 "metadata_count": num(raw.get("metadata_count")),
                 "gp": _gp_norm(raw.get("get_peers")),
+                "gp_cfg": _gp_cfg_norm(raw.get("get_peers")),
             }
         )
 
@@ -566,6 +595,9 @@ def derive(samples, health, meta):
         "metadata_failed_attempts_delta": None,
         "meta_cfg": None,
         "gp_yield_percent": None,
+        "gp_cfg": None,
+        "gp_exit_deltas": None,
+        "gp_idle_exit_percent": None,
         "dropped_per_s": None,
         "queue_full_drops_per_s": None,
         "dispatcher_drops_delta": None,
@@ -631,6 +663,25 @@ def derive(samples, health, meta):
     if latency:
         out["mean_lookup_ms"] = latency["mean_ms"]
         out["lookups_in_window"] = latency["lookups"]
+
+    # Exit-reason split + silent-node penalties (patch-19 stage-3 binary only).
+    # `deadline_exits_total` still dominating an after-window falsifies the
+    # deadline-bound diagnosis; a rising `idle_exits_total` beside a falling
+    # mean_lookup_ms is the round-idle exit doing its job.
+    out["gp_cfg"] = next(
+        (tree["gp_cfg"] for tree in reversed(last["trees"]) if tree.get("gp_cfg")), None
+    )
+    exit_deltas = {}
+    for key in GP_EXIT_KEYS:
+        delta = series_delta(samples, lambda s, k=key: dig(s, "gp", k))
+        if delta:
+            exit_deltas[key] = delta["delta"]
+    if exit_deltas:
+        out["gp_exit_deltas"] = exit_deltas
+        idle = exit_deltas.get("idle_exits_total")
+        deadline = exit_deltas.get("deadline_exits_total")
+        if idle is not None and deadline is not None and idle + deadline > 0:
+            out["gp_idle_exit_percent"] = idle / (idle + deadline) * 100.0
 
     # UDP.
     sends = series_delta(samples, lambda s: s.get("udp_sends_total"))
@@ -713,6 +764,8 @@ def missing_features(samples):
         missing.append("supervisor.dispatcher (dropped/queue_full_drops)")
     if not any(t.get("push_attempts") is not None for s in samples for t in s["trees"]):
         missing.append("queues.infohash_push_attempts/infohash_duplicates_rejected")
+    if not any(dig(s, "gp", "idle_exits_total") is not None for s in samples):
+        missing.append("supervisor.get_peers.idle_exits_total (round-idle / penalty counters)")
     return missing
 
 
@@ -837,6 +890,25 @@ def render_table(derived, meta):
             "d(`mean_lookup_ms`*`lookups_total`)/d`lookups_total` — run-local, not lifetime",
         )
     )
+    exit_deltas = d.get("gp_exit_deltas")
+    if exit_deltas:
+        gp_cfg = d.get("gp_cfg") or {}
+        parts = [f"`{key[:-len('_total')]}` {fbig(exit_deltas.get(key))}" for key in GP_EXIT_KEYS]
+        note = "window deltas of `supervisor.get_peers`: " + "; ".join(parts)
+        if d.get("gp_idle_exit_percent") is not None:
+            note += f"; idle share of exits {f1(d['gp_idle_exit_percent'], ' %')}"
+        if gp_cfg:
+            note += "; `trees[].get_peers` " + " ".join(
+                f"{key}={fint(value)}" for key, value in gp_cfg.items()
+            )
+        rows.append(
+            (
+                "lookup exits (window)",
+                f"idle {fbig(exit_deltas.get('idle_exits_total'))}"
+                f" / deadline {fbig(exit_deltas.get('deadline_exits_total'))}",
+                note,
+            )
+        )
     rows.append(
         (
             "pps",

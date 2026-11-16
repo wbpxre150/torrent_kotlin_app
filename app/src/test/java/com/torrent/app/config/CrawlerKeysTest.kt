@@ -154,6 +154,27 @@ class CrawlerKeysTest {
         assertFalse("tree_metadata_timeout_ms must not be form-managed", "tree_metadata_timeout_ms" in CrawlerKeys.FORM_MANAGED_KEYS)
     }
 
+    @Test fun parseAdvanced_allowsGetPeersRoundIdleAndPenaltyKeys() {
+        // Crawler patch 19 stage 3: the round-idle cap and the silent-node penalty.
+        // Both are fail-open (0 restores the pre-patch-19 behaviour) and the C side
+        // clamps, so the textarea only has to be allowed to state them.
+        val keys = listOf("tree_get_peers_round_idle_ms", "tree_get_peers_penalize_misses")
+        for (key in keys) {
+            assertTrue("$key must be known", key in CrawlerKeys.KNOWN_KEYS)
+            assertTrue("$key must be advanced-overridable", key in CrawlerKeys.ALLOWED_ADVANCED_KEYS)
+            assertFalse("$key must not be form-managed", key in CrawlerKeys.FORM_MANAGED_KEYS)
+            assertFalse("$key must not be path-managed", key in CrawlerKeys.PATH_KEYS)
+            assertFalse("$key must not be backup-managed", key in CrawlerKeys.BACKUP_KEYS)
+        }
+        val r = CrawlerKeys.parseAdvanced(
+            "tree_get_peers_round_idle_ms = 1500\n" +
+                "tree_get_peers_penalize_misses = 1\n"
+        )
+        assertTrue("advanced entries must parse: ${r.errors}", r.ok)
+        assertEquals("1500", r.entries["tree_get_peers_round_idle_ms"])
+        assertEquals("1", r.entries["tree_get_peers_penalize_misses"])
+    }
+
     @Test fun parseAdvanced_laterDuplicatesWin() {
         val r = CrawlerKeys.parseAdvanced("batch_size=100\nbatch_size=200\n")
         assertTrue(r.ok)
