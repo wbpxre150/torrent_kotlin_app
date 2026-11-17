@@ -588,7 +588,14 @@ tasks.register("prepareDhtCrawlerSrc") {
             // connect-failure memory (tree_metadata_peer_blacklist_ttl_sec,
             // default 0 = off) + the skip-to-empty guard and the /stats block.
             // See include/meta_peer_fail.h.
-            "metadata-peer-fail-map.patch"
+            "metadata-peer-fail-map.patch",
+            // 22nd: peer-fail map capacity 8192 -> 131072 (Stage-3 W3 sizing
+            // blocker). The 3/4-load clear threshold (98,304) must exceed the
+            // whole 600 s TTL working set (~66-80k entries at the measured
+            // ~110-133 NEW distinct fail addresses/s), otherwise the table
+            // churns and no entry ever reaches its TTL. One constant plus
+            // comments - no behaviour, key or /stats schema change.
+            "meta-peer-fail-capacity.patch"
         )) {
             project.exec {
                 commandLine("patch", "-p1", "-d", destDir.absolutePath, "-i", file("$destDir/patches/$patchName").absolutePath)

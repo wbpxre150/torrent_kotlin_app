@@ -250,3 +250,83 @@ band is read against.
      exit-criteria roll-up. Keep the RECORD SET columns above so every window stays comparable, and remember
      the Stage-1 correction: use the queue drain (or total lookups minus Δ`gp.from_retry_total`) for the
      worker-capacity comparator. -->
+
+---
+
+## Stage 6 (corrective) — the peer-fail map was capacity-churn-bound, not TTL-bound
+
+Patch 22 (`patches/meta-peer-fail-capacity.patch`, 22nd slot; patches 20/21 are not amended). One constant
+plus comments: `META_PEER_FAIL_CAPACITY` 8192 → 131,072. No key change (`tree_metadata_peer_blacklist_ttl_sec`
+keeps its compiled default `0`), no `CrawlerKeys`/template change, no `gp_probe.py` change, no `/stats` schema
+change (`metadata_peer_fail.capacity` echoes the constant), no change to the eight `metadata_failures`
+counters or the count-once discipline.
+
+### The blocker (parent-measured, `reports/w3-sizing-blocker.md`)
+
+On the patch-21 build at `tree_metadata_peer_blacklist_ttl_sec = 600`, the 8192-slot map admitted
+~110–133 **NEW distinct** connect-failure addresses per second. The load-factor clear fires at 3/4 load
+(6,144), so the whole table was wiped every ~50–70 s: `clears_total` went 1 → 2 → 3 inside 90 s, `held`
+sawtoothed 200 → 4,190 → 2,031 → 5,577, and `expired_total` stayed **0 at every sample**. Entries were dying
+by capacity clear, never by TTL, so a W3 window on that build would have measured table churn and not the
+Stage-3 hypothesis. The map's own counters proved it, which is exactly what patch 21's instrumentation was
+for.
+
+### The sizing decision and its arithmetic (option (a), capacity 131,072)
+
+The rule, stated so the next reader can re-derive it: **the 3/4-load clear threshold must hold the whole TTL
+working set without a clear.**
+
+| quantity | value |
+|---|---|
+| measured NEW distinct fail addresses/s | ~110–133 |
+| TTL under test | 600 s |
+| worst-case TTL working set | 66,000–79,800 entries |
+| chosen capacity | 131,072 slots (power of two) |
+| 3/4-load clear threshold | **98,304** (> worst case, ~23 % margin) |
+| footprint | 131,072 × 32 B = **4 MiB** ≈ 0.2 % of the measured 2.04 GB crawler RSS |
+
+Rejected alternatives: 65,536 slots (clear at 49,152) and the old 16,384 fallback (12,288) both still clear
+below the measured working set, so TTL could never dominate eviction; option (c) — shortening the TTL to fit
+8192 slots — needs ≤ 45 s, below the key's 60 s clamp floor and shorter than the ~95 s discovery-pause
+episodes, so it would not test "remember a dead peer for ten minutes". No new thread, one mutex unchanged,
+the slot-size static assertion still holds at 32 B.
+
+Residual bound: if the sustained new-address rate exceeds ~164/s (98,304 / 600 s), clears recur and W3 is
+INVALID → recorded NOT-IMPROVED (churn) per exit criterion 3, with **no further capacity escalation** in this
+run.
+
+### What W3 now tests
+
+With capacity churn removed, W3 measures the actual Stage-3 hypothesis: a stable, TTL-aged working set of
+~66–80 k dead addresses consulted at window selection, with entries dying by 600 s expiry (and retried once
+after expiry) instead of by table wipes. Expected observable signature: `held` ramps for ~10 min then
+plateaus (no sawtooth below ~1,000), `clears_total` stays 0 (≤2 tolerated), `expired_total` becomes > 0 after
+the first TTL horizon, and skips/s rises well above the amnesiac map's 63–99/s.
+
+### Install-time validation (patch-22 build, not a measurement window)
+
+1. **ttl = 0 (shipped default), after install:** `metadata_peer_fail` = `{enabled:false, capacity:0,
+   held:0, ttl_sec:0, clears_total:0, expired_total:0, metadata_peers_skipped_total:0,
+   metadata_connect_fail_addresses_total:0}` — fail-open unchanged.
+2. **ttl = 600, 6 minutes of `/stats`:** `capacity` echoed **131072**; `held` 707 → 2,151 → 3,618 → 4,933 →
+   **6,413** → 7,976 → 9,560 → 11,198 → 12,933 → 14,798 → 16,581 → 18,333 → 20,197 → 21,917 → 25,010 →
+   35,823 → **44,296**, i.e. it crossed the old 6,144 clear threshold and kept climbing straight past the old
+   capacity; `clears_total` **0** at every sample; `metadata_peers_skipped_total` 109 → 65,398 (skips/s > 0
+   throughout); `[ERROR]` lines in `dht_crawler.log` **0**. Skip-guard check: `first_strike_failures` per
+   1,000 `metadata_attempts_total` measured **483.2** at ttl=600 vs **480.8** at the ttl=0 control
+   (+0.5 % — no spike, so the skip-to-empty guard is intact and no infohash was starved).
+3. **ttl reverted to 0 and applied:** `enabled:false`, `capacity:0`, every counter 0 — the device is clean for
+   W2b. Final device config: `log_level=INFO`, `num_trees=64`, `tree_parallel_peers=2`,
+   `tree_bep51_workers=3`, `tree_get_peers_workers=18`, `tree_metadata_workers=10`,
+   `udp_rate_limit_pps=3000`, `tree_metadata_timeout_ms=60000`, patch-19 knobs all 0,
+   `tree_metadata_peer_blacklist_ttl_sec=0`.
+
+### W2b / W3 — table and verdict (PARENT RUNS THESE WINDOWS)
+
+> **PENDING.** W2b (fresh ttl=0 control on this resized build) and W3 (ttl=600) are run by the parent after
+> this commit, same hour, same build, one variable, 30 min each, `gp_probe --minutes 30 --interval 5`. A later
+> commit records: the RECORD SET per window, the four `metadata_peer_fail` deltas
+> (`metadata_peers_skipped_total`, `metadata_connect_fail_addresses_total`, `clears_total`, `expired_total`),
+> the `held` trajectory, R = Δ`connect_total` / Δ`metadata_attempts_total` for both arms, the failure
+> distribution, threads/RSS/temperature, the validity gate (Δ`expired_total` > 0 AND Δ`clears_total` ≤ 2) and
+> the verdict per exit criterion 3 (PASS ⇒ device stays at 600; NOT-IMPROVED or INVALID ⇒ back to 0).

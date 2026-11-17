@@ -290,7 +290,7 @@ deliberately not run in this release.
   archive — override `TPARSE_LIB` or you measure the wrong parser.
 - Adding a `torrent_class` column means five places in the C tree plus the Kotlin mirror — see invariant 14.
 
-**dht_crawler patches (order is fixed, applied by `prepareDhtCrawlerSrc`):** the 20-entry list in
+**dht_crawler patches (order is fixed, applied by `prepareDhtCrawlerSrc`):** the 22-entry list in
 `app/build.gradle.kts` opens with the three upstream fixes — `bencode-cap-fix.patch` →
 `bencode-init-fix.patch` → `civetweb-stop-flag-atomic.patch` — and closes with
 `movie-kind-v10-streaming.patch` (last-token pooling + inline ingest classification),
@@ -304,9 +304,11 @@ piece-idle eviction, all as **opt-in knobs shipped at legacy defaults** — five
 measured the tuning net-negative, so patch 19 ships the instrumentation and the keys, not the behaviour),
 `stats-last-interval.patch` (20th: last-interval "windowed" rates in `/stats aggregate` — the
 pure `stats_window` module plus a sampler on the supervisor monitor thread; additive only, every lifetime
-key keeps its exact meaning), and `metadata-peer-fail-map.patch` (21st and last: the fail-open per-address
-TCP connect-failure memory — `src/meta_peer_fail.c` + `include/meta_peer_fail.h`, host-tested by
-`make tests-meta-peer-fail`); new patches go LAST, as the 22nd slot. Upstream fixes belong in `patches/`.
+key keeps its exact meaning), `metadata-peer-fail-map.patch` (21st: the fail-open per-address TCP
+connect-failure memory — `src/meta_peer_fail.c` + `include/meta_peer_fail.h`, host-tested by
+`make tests-meta-peer-fail`) and `meta-peer-fail-capacity.patch` (22nd and last: the capacity corrective,
+8192 → 131,072 slots — constant + comments only, no behaviour change); new patches go LAST, as the 23rd
+slot. Upstream fixes belong in `patches/`.
 See the vendored repo's `CLAUDE.md` for its architecture (thread trees, bloom filters, schema) and its
 `CONFIG_INI.md` for the patch-19/21 config keys.
 
@@ -370,9 +372,13 @@ counters are untouched.
 connect that never completes (patch-19 measurement), and the peer list handed to a fetch is
 arrival-ordered with **no address dedup**, so the same unreachable peer is re-tried across infohashes and
 across trees. Patch 21 adds `tree_metadata_peer_blacklist_ttl_sec` (compiled default **0 = off**, opt-in
-clamp 60..3600, warn-and-clamp) and one supervisor-shared map (`src/meta_peer_fail.c`: 8192 slots × 32 B =
-256 KiB, open addressing + FNV-1a, one `pthread_mutex_t`, lazy TTL ageing on the lookup/insert path only —
-no new thread; the load-factor clear at 3/4 is fail-open). Fail-open is absolute: `ttl_sec = 0` never
+clamp 60..3600, warn-and-clamp) and one supervisor-shared map (`src/meta_peer_fail.c`: 131,072 slots × 32 B =
+4 MiB, open addressing + FNV-1a, one `pthread_mutex_t`, lazy TTL ageing on the lookup/insert path only —
+no new thread; the load-factor clear at 3/4 is fail-open). **Capacity is sized by the TTL working set**
+(patch 22, `meta-peer-fail-capacity.patch`): 131,072 × 3/4 = 98,304 clear threshold > the ~66,000–79,800
+entries a 600 s TTL accumulates at the measured ~110–133 NEW distinct fail addresses/s (~23 % margin), and
+4 MiB ≈ 0.2 % of the measured 2.04 GB crawler RSS. The original 8192 slots (clear at 6,144) were wiped every
+~50–70 s at that rate, so `expired_total` stayed 0 and entries died by capacity clear, never by TTL. Fail-open is absolute: `ttl_sec = 0` never
 creates the map, so every lookup answers "do not skip" and selection is byte-identical to legacy; a
 creation failure is non-fatal and lands in the same state. Recording is **additive only** — every site that
 counts `metadata_failures.connect_total` (the seven direct `meta_count_fail(tree, META_FAIL_CONNECT)` sites
