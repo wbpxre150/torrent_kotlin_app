@@ -4,6 +4,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
+import android.os.SystemClock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -13,6 +14,11 @@ import kotlinx.coroutines.flow.asStateFlow
 class WifiGateMonitor(private val context: Context) {
 
     data class State(val wifi: Boolean, val ip: String?)
+
+    /** Dropout counters fed from the same samples that drive [state] (Stage 1 of the
+     *  pps/wifi/thermal envelope plan): the only instrument that survives a crawler
+     *  restart, because it lives in the app process, not in the daemon. */
+    val gateStats = WifiGateStats()
 
     private val _state = MutableStateFlow(State(false, null))
     val state: StateFlow<State> = _state.asStateFlow()
@@ -33,14 +39,19 @@ class WifiGateMonitor(private val context: Context) {
                         NetworkCapabilities.TRANSPORT_VPN)) {
                     if (caps.hasTransport(t)) transports.add(t)
                 }
-                if (WifiGateReducer.isWifi(transports)) {
+                val wifi = WifiGateReducer.isWifi(transports)
+                gateStats.onSample(wifi, SystemClock.elapsedRealtime())
+                if (wifi) {
                     _state.value = State(true, wifiIpAddress())
                 } else {
                     _state.value = State(false, null)
                 }
             }
 
-            override fun onLost(network: Network) { _state.value = State(false, null) }
+            override fun onLost(network: Network) {
+                gateStats.onSample(false, SystemClock.elapsedRealtime())
+                _state.value = State(false, null)
+            }
         }
         cm!!.registerDefaultNetworkCallback(cb)
         callback = cb
@@ -49,8 +60,14 @@ class WifiGateMonitor(private val context: Context) {
     fun stop() {
         callback?.let { cm?.unregisterNetworkCallback(it) }
         callback = null
+        // A deliberate shutdown must not be recorded as a dropout.
+        gateStats.noteDeliberateStop(SystemClock.elapsedRealtime())
         _state.value = State(false, null)
     }
+
+    /** One instant's dropout counters, for the control dashboard's `api/status`. */
+    fun gateStatsSnapshot(): WifiGateStats.Snapshot =
+        gateStats.snapshot(SystemClock.elapsedRealtime())
 
     private fun wifiIpAddress(): String? {
         val wm = context.applicationContext

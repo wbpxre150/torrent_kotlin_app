@@ -73,6 +73,18 @@ class ControlServerStatsPageTest {
         assertTrue(page.contains("defaultOpen"))
     }
 
+    /**
+     * Operator request: every section starts collapsed. The page must open as
+     * a list of top-level headings only — no depth-based auto-expand may
+     * survive, and an explicit click stays the only way to expand a section.
+     */
+    @Test fun page_startsEverySectionCollapsed() {
+        val defaultOpenBody = page.substringAfter("function defaultOpen(depth) {").substringBefore("}")
+        assertTrue("defaultOpen must return false", defaultOpenBody.contains("return false;"))
+        assertFalse("defaultOpen must not auto-expand by depth", defaultOpenBody.contains("return depth"))
+        assertTrue(page.contains("openOverrides[path] = !isOpen(path, depth)"))
+    }
+
     @Test fun page_titlesTreeAndPartitionItems() {
         assertTrue(page.contains("'tree '"))
         assertTrue(page.contains("tree_id"))

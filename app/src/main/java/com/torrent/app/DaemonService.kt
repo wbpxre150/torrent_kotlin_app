@@ -34,6 +34,7 @@ import com.torrent.app.net.CloudflaredTunnel
 import com.torrent.app.net.CloudflaredTunnelState
 import com.torrent.app.net.FtpHangWatchdog
 import com.torrent.app.net.WifiGateMonitor
+import com.torrent.app.net.WifiGateStats
 import com.torrent.app.net.connectionUrl
 import com.torrent.app.net.parseReady
 import kotlinx.coroutines.Job
@@ -428,6 +429,12 @@ class DaemonService : Service() {
             saveCloudflared = ::saveCloudflaredSettings,
             crawlerApplyStatus = { crawlerApplyStatus },
             crawlerPausedNoWifi = { crawlerPausedNoWifi },
+            // Stage 1 of the pps/wifi/thermal envelope plan: the gate counters are read
+            // lazily (wifiGateMonitor is built a few lines below this constructor call).
+            wifiGateStats = {
+                if (::wifiGateMonitor.isInitialized) wifiGateMonitor.gateStatsSnapshot()
+                else WifiGateStats.Snapshot.EMPTY
+            },
             crawlerHttpPort = ::crawlerHttpPort,
             crawlerDbSize = ::crawlerDbSize,
             internalFreeSpace = ::internalFreeSpace,

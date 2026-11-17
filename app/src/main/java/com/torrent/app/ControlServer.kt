@@ -31,6 +31,7 @@ import com.torrent.app.config.CrawlerSettings
 import com.torrent.app.config.CrawlerTaxonomy
 import com.torrent.app.config.BackupSettings
 import com.torrent.app.config.CloudflaredSettings
+import com.torrent.app.net.WifiGateStats
 
 class ControlServer(
     private val tokenManager: TokenManager,
@@ -64,6 +65,12 @@ class ControlServer(
         { com.torrent.app.config.ApplyResult(false, "cloudflared is not wired", false) },
     private val crawlerApplyStatus: () -> CrawlerApplyStatus = { CrawlerApplyStatus() },
     private val crawlerPausedNoWifi: () -> Boolean = { false },
+    /**
+     * Wifi-gate dropout counters published on `api/status` (plan/pps-wifi-thermal-envelope.md,
+     * Stage 1). Injected as a snapshot lambda like [wifiIp]: the counters live in
+     * `WifiGateMonitor`, and the app process is the only thing that outlives a crawler restart.
+     */
+    private val wifiGateStats: () -> WifiGateStats.Snapshot = { WifiGateStats.Snapshot.EMPTY },
     private val crawlerHttpPort: () -> Int = { 8081 },
     // Stats websocket push period (webui stage 1); injectable for tests.
     private val wsPushPeriodMs: Long = 10_000L,
@@ -1034,6 +1041,13 @@ class ControlServer(
             append(",\"rolledBack\":").append(lastApplyRolledBack())
             append(",\"usb\":{\"granted\":").append(s.granted).append(",\"freeBytes\":").append(usb ?: "null").append("}")
             append(",\"wifiUp\":").append(f.wifiUp)
+            val gs = wifiGateStats()
+            append(",\"wifiDropoutsTotal\":").append(gs.edgesTotal)
+            append(",\"wifiDropoutsOver2sTotal\":").append(gs.edgesOver2sTotal)
+            append(",\"wifiDownMsTotal\":").append(gs.downMsTotal)
+            append(",\"wifiMaxDownMs\":").append(gs.maxDownMs)
+            append(",\"wifiDownNowMs\":").append(gs.downNowMs)
+            append(",\"lastWifiDropoutAt\":").append(gs.lastDropoutAtMs ?: "null")
             append(",\"ftp\":{").append("\"running\":").append(f.running).append(",\"state\":").append(jsonStr(f.state)).append(",\"port\":").append(f.port).append("}")
             append(",\"cloudflared\":{\"enabled\":").append(cf.enabled)
                 .append(",\"state\":").append(jsonStr(cf.state.lowercase()))
@@ -4580,9 +4594,13 @@ ${adultSelectionRow(adultSelection)}
 
 
               function defaultOpen(depth) {
-                // Top-level sections and per-item objects start expanded;
-                // deeper nesting (e.g. a tree's queues) starts collapsed.
-                return depth <= 2;
+                // Every section starts collapsed (operator request): the page
+                // opens as a list of top-level headings only, so one stats
+                // frame never paints hundreds of rows on first push. An
+                // explicit click still wins through openOverrides and survives
+                // every re-render. `depth` is kept so the call sites and the
+                // click handler stay symmetric.
+                return false;
               }
 
               function isOpen(path, depth) {
