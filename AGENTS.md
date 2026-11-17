@@ -114,7 +114,7 @@ prefix is required by the packaging step — they are **exec'd as PIE binaries, 
 | Output | Source | Built by | Role |
 |---|---|---|---|
 | `libtransmissiond.so` | transmission **4.1.2** tarball + `src/main/cpp/transmission-fork/` | `buildTransmission` → `apply_fork.py` → CMake/NDK | BitTorrent daemon; disk I/O routed to SAF gateway via `/saf/usb` sentinel path |
-| `libdhtcrawler.so` | vendored `src/main/cpp/dht_crawler/` | `buildDhtCrawler` → `prepareDhtCrawlerSrc` (copy + 19 patches) → CMake | DHT keyspace crawler; SQLite DB; civetweb HTTP API; bloom-filter dedup |
+| `libdhtcrawler.so` | vendored `src/main/cpp/dht_crawler/` | `buildDhtCrawler` → `prepareDhtCrawlerSrc` (copy + 23 patches) → CMake | DHT keyspace crawler; SQLite DB; civetweb HTTP API; bloom-filter dedup |
 | `libftpserver.so` | `src/main/cpp/ftp-server/` (C11) | `buildFtpServer` → CMake/NDK | FTP server for media clients; posix or SAF backend (SAF talks to `SafIpcServer`) |
 
 **Task graph:** `buildMbedtls` (mbedTLS **3.6.6**) → `buildCurl` (curl **8.20.0**) → `buildTransmission`;
@@ -290,7 +290,7 @@ deliberately not run in this release.
   archive — override `TPARSE_LIB` or you measure the wrong parser.
 - Adding a `torrent_class` column means five places in the C tree plus the Kotlin mirror — see invariant 14.
 
-**dht_crawler patches (order is fixed, applied by `prepareDhtCrawlerSrc`):** the 22-entry list in
+**dht_crawler patches (order is fixed, applied by `prepareDhtCrawlerSrc`):** the 23-entry list in
 `app/build.gradle.kts` opens with the three upstream fixes — `bencode-cap-fix.patch` →
 `bencode-init-fix.patch` → `civetweb-stop-flag-atomic.patch` — and closes with
 `movie-kind-v10-streaming.patch` (last-token pooling + inline ingest classification),
@@ -306,11 +306,13 @@ measured the tuning net-negative, so patch 19 ships the instrumentation and the 
 pure `stats_window` module plus a sampler on the supervisor monitor thread; additive only, every lifetime
 key keeps its exact meaning), `metadata-peer-fail-map.patch` (21st: the fail-open per-address TCP
 connect-failure memory — `src/meta_peer_fail.c` + `include/meta_peer_fail.h`, host-tested by
-`make tests-meta-peer-fail`) and `meta-peer-fail-capacity.patch` (22nd and last: the capacity corrective,
-8192 → 131,072 slots — constant + comments only, no behaviour change); new patches go LAST, as the 23rd
-slot. Upstream fixes belong in `patches/`.
+`make tests-meta-peer-fail`), `meta-peer-fail-capacity.patch` (22nd: the capacity corrective, 8192 →
+131,072 slots — constant + comments only, no behaviour change) and `bep51-funnel-stats.patch` (23rd and
+last: the BEP51 query + dedup-funnel counters — per-tree `trees[].bep51` and summed `supervisor.bep51`,
+counters only, no behaviour change and no config key); new patches go LAST, as the 24th slot. Upstream
+fixes belong in `patches/`.
 See the vendored repo's `CLAUDE.md` for its architecture (thread trees, bloom filters, schema) and its
-`CONFIG_INI.md` for the patch-19/21 config keys.
+`CONFIG_INI.md` for the patch-19/21 config keys and the patch-20/22 `/stats` blocks.
 
 **`/stats` after patch 19 (measured — the instrumentation is the win, the tuning is not).** `aggregate` publishes both
 denominators beside their percentages: `metadata_attempts_total` with `metadata_fetch_success_percent`
@@ -342,9 +344,13 @@ net-negative, so it ships off.** The only valid contemporaneous comparison is TU
 build in the same hour: lookups/s 233.0 vs 236.6 (−1.5 %), yield 29.7 % vs 33.1 % (−3.4 pp), packets/lookup
 8.99 vs 8.46 (+6 %), metadata/s 5.86 vs 6.75 (−13 %). The 00:46 baseline (239.1 / 36.9 % / 9.23 / 7.16) is
 **not** a valid control — LEGACY on the new build measured 33.1 % yield against the baseline's 36.9 %, i.e.
-the DHT thinned overnight. get_peers is **discovery-bound** (per-tree drain 2.5–3.0 lookups/s vs a BEP51 fill
-of 3.0–3.5/s, `discovery_paused` 11–14 % in every configuration), so finishing lookups sooner cannot create
-more lookups; metadata is **peer-liveness-bound** (connect 82.8–84.1 %, handshake 14.8–16.1 %, stall 0.8 %,
+the DHT thinned overnight. get_peers is **latency-bound, not discovery-bound** — corrected by this run's seven windows (below): the
+per-tree worker drain equals `1000 × 18 / mean_lookup_ms` to within 1.1 % in every window (98.9–99.6 %),
+`idle_exits_total` is 0, every lookup burns the 6 s deadline, and raising BEP51 fill 3.73 → 7.14 /s/tree (W5)
+left the drain at 3.13 → 3.14. The patch-19 numbers were already consistent with that model — 1000 × 18 /
+7,044 ms = 2.56 /s sits inside the observed 2.5–3.0 drain band — so "discovery-bound" was a queue-pressure
+observation (fill 3.0–3.5 vs drain 2.5–3.0, `discovery_paused` 11–14 %), not a discovery cap; metadata is
+**peer-liveness-bound** (connect 82.8–84.1 %, handshake 14.8–16.1 %, stall 0.8 %,
 deadline 0.1–0.2 % across every window), so piece-idle eviction and the deadline knob address ≤1 % of the
 failure mass. The round-idle premise was **falsified**: 245 idle exits vs 246,380 deadline exits, because
 answers trickle in faster than 1.5 s. Criteria 4 (get_peers rate) and 5 (metadata rate/success) are recorded
@@ -395,6 +401,59 @@ zero-connection attempt would feed the irreversible infohash strike bloom. `/sta
 the key at 0 even if a later A/B wins: the device carries the winning value, the template ships off.
 `gp_probe.py` reads the block (`MPF_KEYS`, a `peer-fail map` row, a missing-feature check) so a window
 report can never show a blank column.
+
+**BEP51 query + dedup-funnel counters (patch 23).** `bep51-funnel-stats.patch` is the 23rd and last patch and
+changes **no behaviour and no config key**: eight per-tree atomics — `queries_sent_total`,
+`responses_received_total`, `timeouts_total`, `samples_offered_total`, `bloom_rejected_total`,
+`inflight_refused_total`, `queue_full_total`, `samples_pushed_total` — are published per tree as
+`trees[].bep51.*` and summed as `supervisor.bep51.*`, cumulative-folded at respawn like the other `gp_*`
+counters. The four gates are mutually exclusive, so per window
+`offered = bloom_rejected + inflight_refused + queue_full + pushed` (±1 % slack for in-flight boundary
+effects); `tools/crawler/gp_probe.py` reads both blocks (`BEP51_KEYS`, `_bep51_norm()`, three table rows) and
+prints the identity gap, so a blank funnel column is impossible. No host test: `thread_tree.c` /
+`http_api.c` have no harness and the change is additive atomic increments plus cJSON emission — it is
+validated on device by key presence and the accounting identity, and the 13 `tests:` targets (14 binaries)
+all pass with no existing target changed.
+
+**Measured on this run — seven 30-minute windows (2026-11-17, 64 trees / get_peers 18 / BEP51 3 /
+metadata 10 workers, pp 2, pps cap 3000, `log_level=INFO`; full record `plan/getpeers-metadata-results.md`).**
+Three same-hour, same-build pairs, one variable each:
+
+- **`tree_parallel_peers` 2 vs 4 (W0/W1) — 2 ships.** metadata/s 6.834 vs 6.408 (−6.2 %, outside the <5 % tie
+  band), connect events 405,152 vs 427,348 with attempts 84,789 vs 88,063 and window success 14.47 % vs
+  13.06 %: pp=4 bought more concurrent connections (10.60 → 11.28 per tree) and more attempts, and no more
+  fetches. The template already carried 2, so nothing changed in the repo. This reverses the patch-19 run's
+  confounded LEGACY 6.75 vs SHIPPED 5.12 comparison.
+- **`tree_metadata_peer_blacklist_ttl_sec` 0 vs 600 on the resized map (W2b/W3) — PASS, the device ships
+  600.** Validity gate met (Δ`expired_total` 4,071 > 0, Δ`clears_total` 1 ≤ 2), then R 4.665 → 2.525,
+  metadata/s 6.128 → 6.706 (+9.4 %), 230,086 skipped slots (2.44 per attempt), connect share 83.2 % →
+  72.4 % with handshake rising 15.7 % → 25.8 % — the distribution **shifted**, it did not merely shrink.
+  Side effects: failure mass 462,119 → 329,453 (−28.7 %), yield 31.9 % → 36.2 %, active conns per tree
+  10.03 → 7.13, drain flat 3.05 → 3.07. The first attempt at 8192 slots was capacity-churn-bound (clears
+  1→2→3 in 90 s, `expired_total` 0) and produced no verdict; patch 22 resized the map and W2b replaced the
+  stale W2 as the control. That mattered: W2 (8192 build, ttl=0) read 6.63 against W2b's 6.13 on identical
+  settings, so reusing W2 would have turned +9.4 % into +1.2 %.
+- **BEP51 workers 3 vs 12 (W4/W5) — NOT-IMPROVED on rate; the funnel is the win.** queries/s/tree 3.51 →
+  5.04 (+44 %), offered/s/tree 44.34 → 65.78 (+48 %), but pushed fell 362,156 → 356,005 (−1.7 %) and
+  lookups/s 249.1 → 246.4 with metadata/s 7.24 → 7.29 flat; the accepted share fell 7.1 % → 4.7 % because
+  bloom (65.9 → 62.1 %) and in-flight (27.0 → 33.1 %) refuse the extra duplicates. Fill 3.73 → 7.14 /s/tree
+  (+91 %) did not move the drain (3.13 → 3.14), and `discovery_paused` rose 10.9 % → 68.1 % exactly as the
+  90 %/33 % sawtooth predicts ((fill−drain)/fill ≈ 56 % predicted vs 68.1 % measured). **The binding term is
+  the deadline-dominated drain**: `mean_lookup_ms` 5,707 ≈ the 6,000 ms deadline, idle exits 0, throttle
+  ratio 0.15 % of sends (W5: 0 throttled of 4.74 M sends). Raising BEP51 offer rate does not raise lookups/s.
+  Threads 2,383 → 2,959 (+576 = 64 × 9, as predicted), RSS 2,119,252 → 2,241,568 KiB, pps 2,577 → 2,640 of
+  the 3,000 cap.
+
+**Ruled out by this run — do not retry without a new discriminator.** (i) **BEP51 worker scaling as a
+lookups/s lever**: measured above — accepted samples are novelty-bound (bloom + in-flight gates) and more
+offers multiply duplicates. (ii) **The 8192-slot peer-fail map**: at ~110–133 NEW distinct fail addresses/s
+the 3/4-load clear wiped it every ~50–70 s and `expired_total` stayed 0, so the TTL mechanism never ran —
+capacity must be sized from the TTL working set, not guessed. (iii) **The UDP token bucket as the drain
+cap**: the throttle ratio is 0.15–0.53 % of sends in every window (W5 0.000 %) while pps sat at 2,407–2,640
+of the 3,000 cap. (iv) **The discovery-fill premise itself**: doubling fill moved the drain by 0.3 %, so
+discovery is not what bounds lookups/s. Every safe latency lever is already in the patch-19 dead-ends list
+(round-idle inert, slot-budget / finish-on-peers −13 % metadata/s, miss-penalties −10.8 pp yield), and more
+get_peers workers stays forbidden by the concurrency budget.
 
 **Measured on b078fce (patch 18, 320,697-row DB, 64 trees).** `/stats` carries an `inflight` object
 (`enabled/capacity/held/claimed/refused/released/expired/tree_released/clears`). Over an 18-minute run
