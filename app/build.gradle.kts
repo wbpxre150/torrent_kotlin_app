@@ -595,7 +595,13 @@ tasks.register("prepareDhtCrawlerSrc") {
             // ~110-133 NEW distinct fail addresses/s), otherwise the table
             // churns and no entry ever reaches its TTL. One constant plus
             // comments - no behaviour, key or /stats schema change.
-            "meta-peer-fail-capacity.patch"
+            "meta-peer-fail-capacity.patch",
+            // 23rd: BEP51 query + dedup-funnel instrumentation (per-tree and
+            // summed /stats blocks: queries sent, responses received, timeouts,
+            // and the bloom / in-flight / queue-full / pushed split of the
+            // samples a response offers). Counters only - no behaviour change,
+            // no new key, no existing key changes meaning.
+            "bep51-funnel-stats.patch"
         )) {
             project.exec {
                 commandLine("patch", "-p1", "-d", destDir.absolutePath, "-i", file("$destDir/patches/$patchName").absolutePath)

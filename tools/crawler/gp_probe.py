@@ -101,6 +101,23 @@ GP_EXIT_KEYS = (
     "early_finish_total",
 )
 
+# BEP51 query + dedup-funnel counters (crawler patch 23), published per tree as
+# `trees[].bep51` and summed as `supervisor.bep51`. The four gates are mutually
+# exclusive, so per window `samples_offered_total` == `bloom_rejected_total` +
+# `inflight_refused_total` + `queue_full_total` + `samples_pushed_total`; the
+# derivation checks that identity and prints the gap. This is the only view of
+# the pre-queue funnel — `queues.infohash_push_attempts` is POST-gate.
+BEP51_KEYS = (
+    "queries_sent_total",
+    "responses_received_total",
+    "timeouts_total",
+    "samples_offered_total",
+    "bloom_rejected_total",
+    "inflight_refused_total",
+    "queue_full_total",
+    "samples_pushed_total",
+)
+
 # Per-outcome metadata connection-failure counters (crawler patch 19). Each failed
 # connection is counted once, under the outcome that first detected it, so the sum
 # over a window bounds the failed attempts; `deadline_total` counts attempts (every
@@ -236,6 +253,14 @@ def _mpf_norm(obj):
     return out or None
 
 
+def _bep51_norm(obj):
+    """Normalise a BEP51 query/funnel counter object; None when not emitted."""
+    if not isinstance(obj, dict):
+        return None
+    out = {key: num(obj.get(key)) for key in BEP51_KEYS if key in obj}
+    return out or None
+
+
 def _meta_cfg_norm(obj):
     """Normalise the `supervisor.metadata` config echo; None when not emitted."""
     if not isinstance(obj, dict):
@@ -294,6 +319,7 @@ def parse_stats(body, t=None):
                 "metadata_count": num(raw.get("metadata_count")),
                 "gp": _gp_norm(raw.get("get_peers")),
                 "gp_cfg": _gp_cfg_norm(raw.get("get_peers")),
+                "bep51": _bep51_norm(raw.get("bep51")),
             }
         )
 
@@ -323,6 +349,7 @@ def parse_stats(body, t=None):
         "gp": _gp_norm(sup.get("get_peers")),
         "mf": _mf_norm(sup.get("metadata_failures")),
         "mpf": _mpf_norm(body.get("metadata_peer_fail")),
+        "bep51": _bep51_norm(sup.get("bep51")),
         "meta_cfg": _meta_cfg_norm(sup.get("metadata")),
         "dispatcher": (
             {
@@ -640,6 +667,16 @@ def derive(samples, health, meta):
         "mpf_skipped_delta": None,
         "mpf_skipped_per_attempt": None,
         "mpf_addresses_delta": None,
+        "bep51": None,
+        "bep51_deltas": None,
+        "bep51_queries_per_s_tree": None,
+        "bep51_responses_per_query": None,
+        "bep51_offered_per_s_tree": None,
+        "bep51_accepted_percent": None,
+        "bep51_bloom_percent": None,
+        "bep51_inflight_percent": None,
+        "bep51_queue_full_percent": None,
+        "bep51_identity_gap_percent": None,
         "meta_cfg": None,
         "gp_yield_percent": None,
         "gp_cfg": None,
@@ -787,6 +824,46 @@ def derive(samples, health, meta):
     )
     if addresses:
         out["mpf_addresses_delta"] = addresses["delta"]
+
+    # BEP51 query + dedup funnel (patch 23). `supervisor.bep51` is the summed
+    # cumulative+live fold, so its window delta is the whole-crawler funnel; the
+    # four gates partition `samples_offered_total`, which is what makes the
+    # identity checkable from a single row. Per-tree rates divide by the sampled
+    # tree count so they compare directly with `fill /s per tree`.
+    out["bep51"] = last.get("bep51")
+    bep51_deltas = {}
+    for key in BEP51_KEYS:
+        delta = series_delta(samples, lambda s, k=key: dig(s, "bep51", k))
+        if delta:
+            bep51_deltas[key] = delta["delta"]
+    if bep51_deltas:
+        out["bep51_deltas"] = bep51_deltas
+        queries = bep51_deltas.get("queries_sent_total")
+        responses = bep51_deltas.get("responses_received_total")
+        offered = bep51_deltas.get("samples_offered_total")
+        pushed = bep51_deltas.get("samples_pushed_total")
+        bloom = bep51_deltas.get("bloom_rejected_total")
+        inflight = bep51_deltas.get("inflight_refused_total")
+        queue_full = bep51_deltas.get("queue_full_total")
+        trees_n = out.get("active_trees") or 0
+        rate_ok = bool(out["span_s"]) and out["span_s"] > 0 and trees_n > 0
+        if queries is not None and rate_ok:
+            out["bep51_queries_per_s_tree"] = queries / trees_n / out["span_s"]
+        if queries:
+            out["bep51_responses_per_query"] = (responses or 0) / queries
+        if offered is not None and rate_ok:
+            out["bep51_offered_per_s_tree"] = offered / trees_n / out["span_s"]
+        if offered:
+            out["bep51_accepted_percent"] = (pushed or 0) / offered * 100.0
+            for name, value in (
+                ("bloom", bloom),
+                ("inflight", inflight),
+                ("queue_full", queue_full),
+            ):
+                if value is not None:
+                    out[f"bep51_{name}_percent"] = value / offered * 100.0
+            gated = sum(v for v in (bloom, inflight, queue_full, pushed) if v is not None)
+            out["bep51_identity_gap_percent"] = (offered - gated) / offered * 100.0
 
     # Shared dispatcher drops.
     dropped = series_delta(samples, lambda s: dig(s, "dispatcher", "dropped_responses"))
@@ -1077,6 +1154,36 @@ def render_table(derived, meta):
                 f" ({f2(d.get('mpf_skipped_per_attempt'), ' /attempt')}),"
                 f" d new addresses {fbig(d.get('mpf_addresses_delta'))}"
                 " — `metadata_peer_fail` (skips are SLOTS; addresses are distinct entries)",
+            )
+        )
+    bep51_deltas = d.get("bep51_deltas")
+    if bep51_deltas:
+        rows.append(
+            (
+                "BEP51 queries /s per tree",
+                f2(d.get("bep51_queries_per_s_tree")),
+                f"d`queries_sent_total` / trees / span; responses/query "
+                f"{f2(d.get('bep51_responses_per_query'))}, timeouts "
+                f"{fbig(bep51_deltas.get('timeouts_total'))} — `supervisor.bep51` window deltas",
+            )
+        )
+        rows.append(
+            (
+                "BEP51 samples offered /s per tree",
+                f2(d.get("bep51_offered_per_s_tree")),
+                f"d`offered_total` {fbig(bep51_deltas.get('samples_offered_total'))}, "
+                f"pushed {fbig(bep51_deltas.get('samples_pushed_total'))}",
+            )
+        )
+        rows.append(
+            (
+                "BEP51 funnel (window)",
+                f"accepted {f1(d.get('bep51_accepted_percent'), ' %')}",
+                f"share of offered: bloom {f1(d.get('bep51_bloom_percent'), ' %')}, "
+                f"in-flight {f1(d.get('bep51_inflight_percent'), ' %')}, "
+                f"queue full {f1(d.get('bep51_queue_full_percent'), ' %')}; "
+                f"identity gap {f2(d.get('bep51_identity_gap_percent'), ' %')} "
+                "(offered - (bloom + in-flight + queue-full + pushed); must be ~0)",
             )
         )
     rows.append(

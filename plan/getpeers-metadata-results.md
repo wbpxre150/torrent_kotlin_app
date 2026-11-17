@@ -330,3 +330,201 @@ the first TTL horizon, and skips/s rises well above the amnesiac map's 63–99/s
 > the `held` trajectory, R = Δ`connect_total` / Δ`metadata_attempts_total` for both arms, the failure
 > distribution, threads/RSS/temperature, the validity gate (Δ`expired_total` > 0 AND Δ`clears_total` ≤ 2) and
 > the verdict per exit criterion 3 (PASS ⇒ device stays at 600; NOT-IMPROVED or INVALID ⇒ back to 0).
+
+---
+
+## Stage 4 — patch 23: BEP51 query + dedup-funnel instrumentation, and the ceiling investigation
+
+Patch 23 (`patches/bep51-funnel-stats.patch`, 23rd and last slot; patches 20/21/22 are not amended). **No
+behaviour change, no config key, no existing `/stats` key changes meaning** — eight per-tree atomics, their
+supervisor fold, two new `/stats` objects and the probe support. Citations below are the **prepared** tree
+(`app/build/native/src/dht_crawler/`, i.e. after patch 23), re-anchored by symbol; the pristine submodule has
+no patch content and different line numbers.
+
+### What shipped
+
+| counter (`trees[].bep51.*`, summed in `supervisor.bep51.*`) | bumped at |
+|---|---|
+| `queries_sent_total` | the `sample_infohashes` send — `thread_tree.c:504-509` |
+| `responses_received_total` | the `rc == 0` branch of the 1000 ms wait — `thread_tree.c:525-528` |
+| `timeouts_total` | the `else` branch of the same wait — `thread_tree.c:533-535` |
+| `samples_offered_total` | every infohash examined in a response — `thread_tree.c:568-569` |
+| `bloom_rejected_total` | shared-bloom hit — `thread_tree.c:571-574` |
+| `inflight_refused_total` | `inflight_set_claim()` refusal — `thread_tree.c:585-588` |
+| `queue_full_total` | `tree_infohash_queue_try_push()` refused (claim released) — `thread_tree.c:601-606` |
+| `samples_pushed_total` | push accepted — `thread_tree.c:591-592` |
+
+The four gates are mutually exclusive (every examined sample leaves the loop through exactly one of them), so
+per window `offered = bloom + inflight + queue_full + pushed`. Zero-init in `thread_tree_create`
+(`thread_tree.c:1650-1658`), cumulative fold beside the existing `gp_*` fold in the respawn path
+(`supervisor.c:1347-1354` loads, `:1385-1392` adds), summed accessor `supervisor_bep51_stats()`
+(`supervisor.c:1737`), per-tree object beside `trees[].get_peers` (`http_api.c:1424-1445`), supervisor object
+beside `supervisor.get_peers` (`http_api.c:1086-1105`). The three worker locals (`queries_sent`,
+`responses_received`, `timeouts`) are kept unchanged as per-worker **log-throttle cursors**, so the DEBUG line
+sequence is byte-identical to before; only the published counters are new.
+
+`tools/crawler/gp_probe.py`: `BEP51_KEYS`, `_bep51_norm()`, both blocks parsed (`supervisor.bep51`,
+`trees[].bep51`), and three new table rows — `BEP51 queries /s per tree` (with responses/query and timeouts),
+`BEP51 samples offered /s per tree`, `BEP51 funnel (window)` (accepted %, the bloom / in-flight / queue-full
+shares of offered, and the identity gap). A synthetic-body check of the derivation prints an identity gap of
+**0.00 %** and the expected shares, so a blank column in a window report is now impossible.
+
+**Host-test decision (explicit).** No host test for this stage, per plan Assumption 2 and the stage text:
+`thread_tree.c` / `http_api.c` have no test harness, and the change is additive atomic increments plus cJSON
+emission. Factoring the funnel into a pure module was considered and rejected — the gates *are* calls into
+`bloom_filter_check()`, `inflight_set_claim()` and `tree_infohash_queue_try_push()`, so a pure accounting
+module would have to re-implement the gate decision (or the worker loop would have to hand its control flow
+to it), which is exactly the behaviour change this patch forbids. The identity is therefore validated on
+device (below), not faked in a test. The existing 13 host test targets still pass unchanged.
+
+### (i) RULED OUT BY CODE — no window spent
+
+**Lead: "the BEP51 cache is full (50,000/50,000), so submission is throttled."** False, by construction.
+
+- The cache is **one supervisor-global** object (`supervisor.c`, `sup->bep51_cache`), not one per tree: 50,000
+  nodes shared across 64 trees ≈ 781/tree. `/stats` already publishes it as the top-level `bep51_cache` block,
+  beside `capacity` 50,000 and `submit_percent` 17.
+- It is **written on the response path, admission-sampled**: `if (rand() % 100 < sup->bep51_cache_submit_percent)`
+  then `bep51_cache_add_node(...)` — `thread_tree.c:556-565`. `submit_percent` is a **sampling rate for
+  admission**, not a throttle: it decides how many responders get remembered for the *next cold start*.
+- It is **read only at warm-start**: `bep51_cache_get_random()` appears exactly twice in the tree —
+  `thread_tree.c:1467` (bootstrap) and `refresh_thread.c:349` (refresh warm start). There is **no read of the
+  cache anywhere between node-pick and `sample_infohashes` send** (`thread_tree.c:459-509`).
+- **Full ⇒ FIFO evict-and-insert, never a reject**: `if (cache->count >= cache->capacity) { … HASH_DEL … }`
+  then insert (`bep51_cache.c:188-203`); `count` never exceeds `capacity` and the caller ignores the return
+  value. A full cache cannot drop a query, a response or a sample.
+- The prompt's `tree_bep51_cache_capacity` key **does not exist**. The real keys are
+  `bep51_cache_capacity` = 50000 and `bep51_cache_submit_percent` = 17 (device `config.ini`, verified).
+
+**Lead: "64 partitions re-query the same nodes / the trees over-query."** The overlap is real; the
+over-querying is not.
+
+- Partitioning sets **only the tree's own node ID**: `keyspace_generate_node_id()`
+  (`keyspace.c:28`, centre-bit assignment at `70-109`) writes a deterministic ID at the partition centre.
+- Routing tables are **global**: `find_node` workers query `generate_random_target()` across the whole 160-bit
+  space (`thread_tree.c:94-265`), and every responder plus up to 256 returned nodes is added
+  (`tree_protocol.c:697-711`). The 64 trees therefore sample the same node population.
+- Node selection is a **capable-only reservoir plus a cooldown**: `tree_routing_get_random_bep51_nodes()`
+  (`tree_routing.c:615-680`) requires `BEP51_CAPABLE` and `now - last_queried >= bep51_node_cooldown_sec`
+  (shipped 3 s), then stamps `last_queried`. At the shipped rate that is ≈1 re-query per node per ~130 s —
+  far above the cooldown, so per-node over-querying is not occurring.
+- `trees[].bep51_nodes_cached` counts **cache admissions**, not distinct nodes queried; it must not be read as
+  "50,000 nodes per tree".
+
+**Lead: "the 5 ms query interval is throttling fill."** Arithmetically inert, no window spent: the cycle is
+send → (RTT or the 1000 ms wait) → `usleep(5 ms)` (`thread_tree.c:518-520`, `thread_tree.c:609-612`), so the
+interval is ~1 % of a cycle dominated by the response wait. The device measures **responses/query 0.952**
+(below), i.e. most cycles are RTT-bound, which makes the interval an even smaller share.
+
+### (ii) CORRECTED PREMISE
+
+The task prompt's figures (10 BEP51 workers, 10 ms interval) are **not** what the device runs. Live
+`config.ini`: **`tree_bep51_workers = 3`**, **`tree_bep51_query_interval_ms = 5`**, `num_trees = 64`,
+`tree_get_peers_workers = 18`, `tree_metadata_workers = 10`, `tree_parallel_peers = 2`,
+`udp_rate_limit_pps = 3000`, `log_level = INFO`, `tree_metadata_peer_blacklist_ttl_sec = 600`.
+
+And `discovery_paused` is **backpressure, not starvation**: set at 90 % of `tree_infohash_queue_capacity`,
+cleared at 33 % (`thread_tree.c:287-309`), sampled every 2 s. Under that sawtooth the paused duty cycle is
+`paused ≈ (fill − drain) / fill` — independent of queue capacity. **A fill-only rise RAISES the paused
+fraction**, so the prompt's criterion "fill must rise AND `discovery_paused` must fall" is self-contradictory
+and is replaced by exit criterion 4 (the discriminator, below). The three same-build windows already show the
+predicted monotonicity:
+
+| window | fill /s/tree | paused (measured) | paused = (fill−drain)/fill |
+|---|---|---|---|
+| W0 | 3.587 | 8.2 % | 13.4 % |
+| W3 | 3.740 | 13.4 % | 17.8 % |
+| W2b | 3.825 | 16.0 % | 20.2 % |
+
+Measured sits below the model in every window (a 2 s duty-cycle sample and least-squares fits on a sawtooth
+are coarse), but the ordering is monotone in fill — which is the falsifiable part.
+
+### (iii) THE DISCRIMINATOR — measured on W0 (same build, same hour as W1)
+
+Per-tree get_peers drain versus the worker-capacity model `1000 × workers / mean_lookup_ms`:
+
+```
+W0: measured drain              3.107 lookups/s/tree   (queue slope while paused, 98 runs / 53 trees)
+    worker-side lookups         3.117 /s/tree          (Δlookups 431,928 − Δfrom_retry 73,781 = 358,147,
+                                                         / 64 trees / 1795.1 s)
+    model 1000×18/5722 ms       3.146 /s/tree
+    → 99.1 % of the model, 100.3 % of the drain fit    ⇒ EQUALITY ⇒ latency-bound drain
+```
+
+Corroboration, same window: **idle exits 0 vs deadline exits 268,355** (idle share 0.0 %), `round_idle_ms` /
+`slot_budget_ms` / `finish_on_peers` all 0, `mean_lookup_ms` 5722 **> the 6000 ms deadline**, and the UDP
+bucket is not the cause — throttled acquires 9,177 against 2,512 pps × 1795.1 s = 4.51 M sends, i.e. a
+**0.20 % throttle ratio**, so the bucket binds only on bursts (burst = 128 tokens). The bucket is ruled out as
+the ceiling; `udp_rate_limit_pps` is forbidden anyway (exit criterion 6).
+
+**The `gp_lookups` double-counting correction (Risk 1, now closed).** `supervisor.get_peers.lookups_total`
+counts **two producers**: the 18 get_peers workers *and* the metadata fresh-peer retry path, which calls
+`tree_lookup_peers()` again (`from_retry_total`, 17.1 % of W0's lookups). Against the raw total, W0 reads
+3.760 lookups/s/tree — 19.5 % above the 3.146 model, which is the historical "233 vs 164" puzzle. Separating
+the retry producer closes the arithmetic to **within 1 %** (99.1 % of the model; 0.3 % against the drain fit —
+the same closure the task prompt quotes as 0.27 %). The reconciliation was done here, before naming a ceiling,
+as Risk 1 requires: the retry lookups are real work but they are not worker capacity, and any future
+worker-count argument must use `Δlookups − Δfrom_retry_total` (or the drain fit). The same separation on W2b
+gives 3.066 vs 3.083 (99.5 %) and on W3 3.081 vs 3.100 (99.4 %), so the equality is not a W0 artefact.
+
+### Install-time validation (patch-23 build, not a measurement window)
+
+1. **Clean apply:** 23 patches, zero `.rej`, no "Hunk FAILED"; the applied tree matches the authored files
+   byte-for-byte.
+2. **Blocks present:** `trees[].bep51` on **64 / 64** trees and `supervisor.bep51` summed, in the existing cJSON
+   style; every pre-existing key still present with unchanged meaning (`supervisor.get_peers`,
+   `metadata_peer_fail`, `aggregate`, `inflight` untouched).
+3. **2-minute curl pair** (`/tmp/s1.json` → `/tmp/s2.json`, span 126 s, 64 trees):
+
+   | quantity | value |
+   |---|---|
+   | Δ`queries_sent_total` | 30,244 → **3.75 queries/s/tree** (3 workers ⇒ 0.80 s cycle) |
+   | Δ`responses_received_total` / Δ`timeouts_total` | 28,787 / 1,449 ⇒ responses/query **0.952**, timeouts 4.8 % |
+   | Δ`samples_offered_total` | 374,400 → **46.4 offered/s/tree** |
+   | Δ`bloom_rejected_total` | 236,259 (63.10 % of offered) |
+   | Δ`inflight_refused_total` | 109,145 (29.15 %) |
+   | Δ`queue_full_total` | 0 (0.00 % — the queue never refused in this window) |
+   | Δ`samples_pushed_total` | 28,996 (7.74 % accepted) → 3.60 pushed/s/tree |
+   | **identity** | offered 374,400 vs gates 374,400 → **gap 0, +0.0000 %** (bar ±1 %) |
+   | behaviour drift | lookups/s 241.6, yield 39.58 %, packets/lookup 8.76, metadata/s 7.08, pps 2,582 / cap 3,000, `mean_lookup_ms` 5,621 — inside W3's drift band (242-ish lookups/s, 36.2 %, 8.57, 6.71, 2,487, 5,807) |
+
+   The funnel is now measurable and it says what the arithmetic predicted: **~92 % of the offered samples never
+   reach the queue, and the two dedup gates (bloom 63 %, in-flight 29 %) own essentially all of it** — queue-full
+   backpressure is 0 % in a normal window. `queries_sent/s/tree` 3.75 is inside the expected 3 workers ×
+   ~1–2/s band (3 × 1.25/s at the measured 0.80 s cycle).
+4. **Stage-3 state undisturbed:** `metadata_peer_fail` = `{enabled:true, capacity:131072, ttl_sec:600,
+   clears_total:0, held:17,570}` and `config.ini` still `tree_metadata_peer_blacklist_ttl_sec = 600`. The device
+   is left exactly as Stage 3 passed it.
+5. **Submodule hygiene:** `git -C app/src/main/cpp/dht_crawler status --porcelain` shows only `?? build/` plus
+   this commit's `patches/bep51-funnel-stats.patch`.
+
+### (iv) W4 / W5 — table and ceiling statement (PARENT RUNS THESE WINDOWS)
+
+> **PENDING.** W4 (control) and W5 (the one authorised concurrency excursion) are run by the parent on this
+> build, same hour, one variable, 30 min each:
+>
+> - **W4 (control):** confirm `tree_bep51_workers = 3` — it is a **FORM-managed** key, so the dashboard crawler
+>   settings form field **`treeBep51Workers`** (not the advanced textarea), with `tree_parallel_peers` 2 and
+>   `tree_metadata_peer_blacklist_ttl_sec` 600 at their stage winners; Apply if anything moved; wait 5 min;
+>   `python3 tools/crawler/gp_probe.py --minutes 30 --interval 5 --serial 'adb-b078fce-dgRfE0._adb-tls-connect._tcp' --json …/reports/w4.json`.
+> - **W5:** set the same form field `treeBep51Workers` to **12**, Apply, confirm via `config.ini` + the log,
+>   wait 5 min, probe → `…/reports/w5.json`. Record threads/RSS (expect ~+576 threads: 64 × 9 extra BEP51
+>   workers), pps vs the 3,000 cap, Δ`udp_throttled_sends_total`, and the funnel deltas.
+> - **Revert:** set the form field back to **3**, Apply, verify `config.ini` `tree_bep51_workers = 3`.
+>
+> A later commit (Stage 5) records for both windows: the RECORD SET, the eight `supervisor.bep51` deltas, the
+> funnel shares, `queries/s/tree` and `offered/s/tree`, the discriminator recomputed with
+> `Δlookups − Δfrom_retry_total`, threads/RSS/temperature, and the verdict.
+>
+> **Ceiling statement (pre-registered, to be confirmed or corrected by W4/W5).** On the code and the three
+> windows already measured, the binding term is **drain latency at the 6000 ms deadline**, not discovery fill:
+> the drain equals the worker-capacity model to within 1 % (W0 99.1 %, W2b 99.5 %, W3 99.4 %), idle exits are
+> 0 in every window while deadline exits are ~265–274 k, `mean_lookup_ms` exceeds the deadline in every window,
+> and the throttle ratio is ≤ 0.53 %. If W5 raises `offered/s/tree` (the funnel's `samples_offered_total`) while
+> lookups/s and metadata/s stay flat — the expected result — then the honest record is **Stage 4 NOT-IMPROVED
+> on rate; ceiling = deadline-dominated drain; discovery fill is not binding; the funnel counters ship as the
+> durable win**, which is a success under the measure-and-report rule, not a plan failure. Every safe latency
+> lever is already in the prompt's binding Dead-ends table (round-idle inert, slot-budget / finish-on-peers
+> −13 % metadata/s, miss-penalties −10.8 pp yield) and more get_peers workers is forbidden by exit criterion 6.
+> If instead W5 shows `offered/s/tree` flat at 4× the workers, the binding term is novelty per query and the
+> same NOT-IMPROVED record stands with a different named ceiling. No W4/W5 number is asserted here.
