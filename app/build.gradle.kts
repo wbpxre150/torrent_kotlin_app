@@ -578,7 +578,12 @@ tasks.register("prepareDhtCrawlerSrc") {
             // /stats publishes. See include/inflight_set.h.
             "inflight-dedup.patch",
             // 19th: get_peers/metadata rate tuning + honest stats split
-            "getpeers-metadata-tuning.patch"
+            "getpeers-metadata-tuning.patch",
+            // 20th: last-interval ("windowed") rates in /stats aggregate, sampled
+            // by the supervisor monitor thread every 10 s. See
+            // include/stats_window.h. Additive only: every lifetime key keeps
+            // its exact meaning.
+            "stats-last-interval.patch"
         )) {
             project.exec {
                 commandLine("patch", "-p1", "-d", destDir.absolutePath, "-i", file("$destDir/patches/$patchName").absolutePath)

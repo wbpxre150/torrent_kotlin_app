@@ -290,7 +290,7 @@ deliberately not run in this release.
   archive — override `TPARSE_LIB` or you measure the wrong parser.
 - Adding a `torrent_class` column means five places in the C tree plus the Kotlin mirror — see invariant 14.
 
-**dht_crawler patches (order is fixed, applied by `prepareDhtCrawlerSrc`):** the 19-entry list in
+**dht_crawler patches (order is fixed, applied by `prepareDhtCrawlerSrc`):** the 20-entry list in
 `app/build.gradle.kts` opens with the three upstream fixes — `bencode-cap-fix.patch` →
 `bencode-init-fix.patch` → `civetweb-stop-flag-atomic.patch` — and closes with
 `movie-kind-v10-streaming.patch` (last-token pooling + inline ingest classification),
@@ -298,11 +298,13 @@ deliberately not run in this release.
 `movie-kind-v13-default.patch` (flips only the compiled-in model-dir default — three literals in
 `src/config.c`, `include/movie_kind.h` `MOVIE_KIND_MODEL_DIR_DEFAULT` and the `include/config.h`
 comment — so the vendored tree stays pristine), `inflight-dedup.patch` (18th) and
-`getpeers-metadata-tuning.patch` (19th and last: the `/stats` success-metric split + per-outcome metadata
+`getpeers-metadata-tuning.patch` (19th: the `/stats` success-metric split + per-outcome metadata
 failure attribution + get_peers round-idle/slot-budget/finish-on-peers/miss-penalty mechanisms + metadata
 piece-idle eviction, all as **opt-in knobs shipped at legacy defaults** — five 30-minute on-device windows
-measured the tuning net-negative, so patch 19 ships the instrumentation and the keys, not the behaviour);
-new patches go LAST, as the 20th slot. Upstream fixes belong in `patches/`.
+measured the tuning net-negative, so patch 19 ships the instrumentation and the keys, not the behaviour),
+and `stats-last-interval.patch` (20th and last: last-interval "windowed" rates in `/stats aggregate` — the
+pure `stats_window` module plus a sampler on the supervisor monitor thread; additive only, every lifetime
+key keeps its exact meaning); new patches go LAST, as the 21st slot. Upstream fixes belong in `patches/`.
 See the vendored repo's `CLAUDE.md` for its architecture (thread trees, bloom filters, schema) and its
 `CONFIG_INI.md` for the patch-19 config keys.
 
@@ -347,6 +349,20 @@ patch 19 does deliver is the instrumentation (the split with published denominat
 `metadata_failures` counters, the exit/slot counters), which produced every finding above. `Δudp_throttled_sends_total`
 is non-zero in all new-build windows (17,782–47,439) including LEGACY vs 0 in the pre-change baseline — a
 build-level observation, cause unisolated, **not** attributed to the behaviour knobs.
+
+**`/stats` last-interval rates (patch 20).** The lifetime `aggregate` counters are cumulative since process
+start, so a single snapshot cannot say how fast anything is happening *now*. Patch 20 adds seven additive
+siblings — `metadata_attempts_last_interval`, `metadata_fetched_last_interval`,
+`metadata_fetch_success_percent_last_interval`, `get_peers_lookups_last_interval`,
+`get_peers_lookups_with_peers_last_interval`, `get_peers_yield_percent_last_interval` and
+`stats_interval_sec` — sampled by the supervisor monitor thread on its existing hard-coded 10 s tick (no new
+config key: `stats_interval_sec` is the *measured* elapsed time, so rate = value / `stats_interval_sec`).
+The sampler (`src/stats_window.c`, pure C99, host-tested by `make tests-stats-window`) folds the same
+totals `stats_handler` publishes (cumulative respawn buckets + live trees) and stores the delta since its
+previous tick; the first tick only records the baseline, so a freshly started crawler publishes zeros with
+`stats_interval_sec` 0 rather than a spike, and a counter that moves backwards saturates at 0 instead of
+wrapping. Lifetime keys, their percentages, `supervisor.get_peers.*` and the eight `metadata_failures`
+counters are untouched.
 
 **Measured on b078fce (patch 18, 320,697-row DB, 64 trees).** `/stats` carries an `inflight` object
 (`enabled/capacity/held/claimed/refused/released/expired/tree_released/clears`). Over an 18-minute run
