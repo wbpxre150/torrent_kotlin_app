@@ -73,7 +73,7 @@ prompt had answered the other way.
 | per-tree drain (queue consumption while paused) | **3.107 /s** | least-squares over 98 paused runs / 53 trees (1,866 samples, ≥8 each); **198.9 /s** across 64 trees |
 | worker-capacity model `1000 × tree_get_peers_workers / mean_lookup_ms` | **3.146 /s** | 1000 × 18 / 5722 = 3.146; **201.4 /s** across 64 trees |
 | measured ÷ model | **98.8 %** | 3.107 / 3.146 — **equality** (1.2 % short, i.e. the workers are busy essentially 100 % of the time) |
-| idle exits vs deadline exits (window Δ) | **0 / 268,355** | 100 % of lookups end at the 6 s deadline; idle share of exits 0.0 % (`round_idle_ms`=0, `penalize_misses`=0) |
+| idle exits vs deadline exits (window Δ) | **0 / 268,355** | idle share of counted exits 0.0 % (`round_idle_ms`=0, `penalize_misses`=0); deadline exits = **62.1 % of all-caller lookups** (268,355 / 431,928) and **74.9 % of worker-side lookups** (268,355 / 358,147, worker-side = Δ`lookups_total` − Δ`from_retry_total`); the remainder exits via peers-found / budget-exhausted / no-nodes paths (see *exit-census reconciliation* below) |
 | unanswered slots (window Δ) | 984,586 | 2.28 per lookup — the slots that never got an answer |
 | Δ`udp_throttled_sends_total` / Δ`udp_sends_total` | **9,177 / 4,509,710 = 0.203 %** | the UDP token bucket is not the cap (pps 2,512 of a 3,000 cap) |
 
@@ -81,7 +81,8 @@ prompt had answered the other way.
 each of the 18 per-tree get_peers workers is busy for the full duration of every lookup and the queue is not
 starving them — so finishing lookups sooner cannot create more lookups, and more workers would raise the drain
 only linearly while pushing pps into the cap. The corroboration is independent: `idle_exits_total` is **0** in
-both arms (nothing ever exits early), every lookup burns the whole deadline, and throttling is 0.2 % of sends.
+both arms (no round-idle exits — the mechanism is off), roughly a third of lookups exit early with peers
+(33.3 % / 33.8 % of all-caller lookups), ~62 % burn the full deadline, and throttling is 0.2 % of sends.
 
 This **reverses the task prompt's "discovery-bound, not latency-bound" claim**, and it disposes of the
 233-vs-164 lookups/s puzzle in the same stroke (see the next section).
@@ -532,7 +533,8 @@ W0: measured drain              3.107 lookups/s/tree   (queue slope while paused
 ```
 
 Corroboration, same window: **idle exits 0 vs deadline exits 268,355** (idle share 0.0 %), `round_idle_ms` /
-`slot_budget_ms` / `finish_on_peers` all 0, `mean_lookup_ms` 5722 **> the 6000 ms deadline**, and the UDP
+`slot_budget_ms` / `finish_on_peers` all 0, `mean_lookup_ms` 5722 sits at **95.4 % of the 6,000 ms deadline**
+(5,678–5,857 ms = 94.6–97.6 % of it in every window — just under, never above), and the UDP
 bucket is not the cause — throttled acquires 9,177 against 2,512 pps × 1795.1 s = 4.51 M sends, i.e. a
 **0.20 % throttle ratio**, so the bucket binds only on bursts (burst = 128 tokens). The bucket is ruled out as
 the ceiling; `udp_rate_limit_pps` is forbidden anyway (exit criterion 6).
@@ -546,6 +548,51 @@ the same closure the task prompt quotes as 0.27 %). The reconciliation was done 
 as Risk 1 requires: the retry lookups are real work but they are not worker capacity, and any future
 worker-count argument must use `Δlookups − Δfrom_retry_total` (or the drain fit). The same separation on W2b
 gives 3.066 vs 3.083 (99.5 %) and on W3 3.081 vs 3.100 (99.4 %), so the equality is not a W0 artefact.
+
+### Exit-census reconciliation — deadline + idle exits do not partition lookups (Risk 1, part 2)
+
+`gp_exit_t` names **seven** terminal causes — PEERS / IDLE / DEADLINE / SLOT_BUDGET / EXHAUSTED / SHUTDOWN /
+NO_NODES (prepared `thread_tree.c:676-684`, comment block at :672-675) — but the `done:` switch increments a
+`/stats` counter for **only two**: `gp_idle_exits` and `gp_deadline_exits` (`thread_tree.c:1230-1238`, cases at
+:1231 and :1234). PEERS is observable separately as `gp_lookups_with_peers` (`thread_tree.c:1226`), and
+EXHAUSTED (:858 packet budget, :901 no eligible candidate), SHUTDOWN (:862) and NO_NODES (:794) are counted
+nowhere. With `round_idle_ms = 0` and `slot_budget_ms = 0` the IDLE and SLOT_BUDGET exits cannot fire either
+(`GP_EXIT_SLOT_BUDGET` :1210 and `GP_EXIT_IDLE` :1219 sit behind those knobs). So the identity the counters must
+satisfy is
+
+**Δ`lookups_total` = Δ`deadline_exits` + Δ`idle_exits` + Δ`lookups_with_peers` + residual**, where
+residual = EXHAUSTED + NO_NODES + SHUTDOWN (uncounted by the code).
+
+Computed from the exact first→last sample deltas of the probe JSON (`reports/w*.json`, 5 s samples, 0 skipped),
+not from the rounded percentages:
+
+| window | Δ`lookups_total` | Δ`deadline_exits` | Δ`idle_exits` | Δ`lookups_with_peers` | residual | residual % | deadline % of all-caller |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| W0 | 431,928 | 268,355 | 0 | 143,886 | 19,687 | 4.56 % | 62.1 % |
+| W1 | 429,340 | 270,578 | 0 | 145,065 | 13,697 | 3.19 % | 63.0 % |
+| W2 (history) | 433,753 | 266,252 | 0 | 146,809 | 20,692 | 4.77 % | 61.4 % |
+| W2b | 424,833 | 274,074 | 0 | 135,696 | 15,063 | 3.55 % | 64.5 % |
+| W3 | 437,808 | 264,178 | 0 | 158,463 | 15,167 | 3.46 % | 60.3 % |
+| W4 | 447,118 | 257,421 | 0 | 170,396 | 19,301 | 4.32 % | 57.6 % |
+| W5 | 442,225 | 260,945 | 0 | 165,206 | 16,074 | 3.63 % | 59.0 % |
+
+**The identity CLOSES in every window**: the residual is positive and 3.2–4.8 % of Δ`lookups_total`, inside the
+≤ 10 % acceptance bar, so no window needs a timing-skew caveat. W0's 19,687 (4.56 %) is the number the plan
+predicted (~19,700). The residual can only be the uncounted causes — lookups that ended by packet budget
+(`get_peers_max_queries`), with no eligible candidate left, or because the tree was shutting down.
+
+One honest caveat on the algebra: `gp_lookups_with_peers` is not strictly disjoint from `gp_deadline_exits` — a
+lookup that collected peers in an early round and then hit the wall clock increments both. That overlap can
+only make the residual *smaller* than the true uncounted mass, and the residual stays positive in all seven
+windows, so the uncounted causes dominate it. `slot_expired_total` and `early_finish_total` are 0 in every
+window, consistent with their knobs being off.
+
+**Two consequences for the record.** (i) Deadline + idle exits do **not** partition all lookups: in W0 they are
+62.1 % of all-caller lookups and 74.9 % of worker-side lookups (268,355 / 358,147, worker-side = Δ`lookups_total`
+− Δ`from_retry_total`), ~33 % exit early with peers and ~4.6 % exit exhausted. (ii) The historical expectation
+of a ratio of ≈ 1.0 between deadline exits and lookups (plan Risk 1, explorer-5) was **wrong** — it assumed the
+two counted causes were the only ones, when the code counts 2 of 7. The deadline-dominated-drain reading is
+unaffected: it rests on the drain≈model equality and W5's flat drain, not on that ratio.
 
 ### Install-time validation (patch-23 build, not a measurement window)
 
@@ -670,6 +717,8 @@ again during Stage 5), and `metadata_peer_fail` is untouched by this stage (`ena
 > If instead W5 shows `offered/s/tree` flat at 4× the workers, the binding term is novelty per query and the
 > same NOT-IMPROVED record stands with a different named ceiling. No W4/W5 number is asserted here.
 
+**Correction (revision 2, post-review):** the clause 'mean_lookup_ms exceeds the deadline in every window' was factually wrong when written — every window's mean is 5,678–5,857 ms, 94.6–97.6 % of the 6,000 ms deadline. The verdict does not rest on that clause; it rests on the drain≈model equality (98.8–99.5 %) and W5's flat drain under +91.5 % fill, both supported.
+
 ---
 
 ## Final record — all seven windows, one table
@@ -719,6 +768,17 @@ same property at 12.86 % / 35.12 % windowed vs 13.44 % / 36.10 % lifetime). The 
 this document's Δ-derived rates, which never read these keys. *Note:* `gp_probe.py` does **not** consume the
 last-interval keys — Stage 1 deliberately made no probe change (the probe differences cumulative counters
 host-side), so this criterion's evidence is a direct `/stats` read, not a probe column.
+
+**Sub-checks (c) and (e) — not separately evidenced in this record (post-review, P2c).** Criterion 1 as
+pre-registered has five sub-checks. This roll-up evidences (a) all seven keys present and non-zero, (b) exact
+internal consistency (59 / 470, 688 / 2,358) and (d) windowed-vs-lifetime divergence, plus the independent
+Δ cross-check above — but **(c)** (`get_peers_lookups_last_interval / stats_interval_sec` within ±50 % of the
+Δ-derived rate) and **(e)** (lifetime counters restart near 0 while the last-interval keys track) were **not**
+separately evidenced. They cannot be computed retroactively either: every probe artifact
+(`reports/w0.json` … `reports/w5.json`, including w2 and w2b) contains **zero** `*_last_interval` keys —
+`gp_probe.py` never reads them, by design — so no raw `/stats` snapshot carrying those keys exists in the run
+artifacts to recompute from. The mechanism is validated via (a), (b), (d) and the independent Δ cross-check; no
+PASS is claimed for (c) or (e), and no device re-run is made for them here.
 
 **2. PASS — `tree_parallel_peers` ships at the same-hour A/B winner, numbers recorded.** W0 6.834 vs W1
 6.408 metadata/s, a 6.24 % relative gap on the higher arm's base (6.65 % on the lower), outside the <5 % tie
@@ -772,6 +832,20 @@ before W0 and every one of the seven windows ran at INFO (device re-read in Stag
 rationale — DEBUG had written ~4.6 GB at ~2.5 GB/h, a disk-I/O confound inside every window — is recorded in
 the header section of this file. Consequence for comparison: these windows are **not** directly comparable to
 the patch-19 run's, which ran at DEBUG.
+
+## Review disposition (revision 2, post-review)
+
+The independent review (`reports/reviewer.md`) raised one P1 and four P2s. The P1 is fixed by this revision —
+the deadline wording at :76, :83-84 and :535, the marked note appended to the verbatim pre-registered ceiling
+quote, `AGENTS.md:349`, and the exit-census reconciliation above. The P2s are dispositioned here rather than
+silently dropped:
+
+| finding | disposition |
+|---|---|
+| **P2a** — `meta_peer_fail_stats` scans all 131,072 slots under the map mutex (`meta_peer_fail.c:378-386`) | **NOT FIXED.** The full-table scan is sub-millisecond at `gp_probe`'s 5 s poll cadence, so the contention is negligible; an incremental `held` counter is a future-run improvement, not worth a new patch + rebuild + reinstall now. |
+| **P2b** — `faf354b`'s message implies the untracked next-steps plan is in that commit | **NOT FIXED.** The file is untracked by design (plan Assumption 10 keeps plan files out of commit scope), and rewriting published history is worse than the cosmetic inaccuracy; this revision's commit message states its contents exactly. |
+| **P2c** — exit criterion 1's sub-checks (c) and (e) claimed without recorded evidence | **FIXED** in this revision — see the criterion-1 roll-up: both are marked not separately evidenced, and they are not computable retroactively because the probe artifacts carry no last-interval keys. |
+| **P2d** — temperature never sampled in-window | **NOT FIXED.** Temperature cannot be sampled retroactively; it is already self-reported as a confound in every window table. Adding `dumpsys battery` to the probe's health sampler is future work. |
 
 ## Dead-ends — updated with what this run ruled out
 

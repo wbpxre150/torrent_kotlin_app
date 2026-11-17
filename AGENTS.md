@@ -346,7 +346,8 @@ build in the same hour: lookups/s 233.0 vs 236.6 (−1.5 %), yield 29.7 % vs 33.
 **not** a valid control — LEGACY on the new build measured 33.1 % yield against the baseline's 36.9 %, i.e.
 the DHT thinned overnight. get_peers is **latency-bound, not discovery-bound** — corrected by this run's seven windows (below): the
 per-tree worker drain equals `1000 × 18 / mean_lookup_ms` to within 1.1 % in every window (98.9–99.6 %),
-`idle_exits_total` is 0, every lookup burns the 6 s deadline, and raising BEP51 fill 3.73 → 7.14 /s/tree (W5)
+`idle_exits_total` is 0, deadline exits are ~62 % of all-caller lookups and `mean_lookup` sits at 94.6–97.6 %
+of the 6 s deadline, and raising BEP51 fill 3.73 → 7.14 /s/tree (W5)
 left the drain at 3.13 → 3.14. The patch-19 numbers were already consistent with that model — 1000 × 18 /
 7,044 ms = 2.56 /s sits inside the observed 2.5–3.0 drain band — so "discovery-bound" was a queue-pressure
 observation (fill 3.0–3.5 vs drain 2.5–3.0, `discovery_paused` 11–14 %), not a discovery cap; metadata is
