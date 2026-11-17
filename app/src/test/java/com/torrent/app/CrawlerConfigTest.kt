@@ -255,6 +255,10 @@ class CrawlerConfigTest {
         // documented as opt-in. All integers — the C parser uses atoi, so `= true` would mean 0.
         assertEquals("60000", ini["tree_metadata_timeout_ms"])
         assertEquals("0", ini["tree_metadata_piece_idle_ms"])
+        // Crawler patch 21: the per-address TCP connect-failure memory ships OFF even though the
+        // A/B winner may be carried on a device — the fail-open shipping rule (0 = no map at all,
+        // selection byte-identical to legacy) is what the template promises.
+        assertEquals("0", ini["tree_metadata_peer_blacklist_ttl_sec"])
         assertEquals("0", ini["tree_get_peers_round_idle_ms"])
         // The miss penalty, the per-slot budget and finish-on-peers all ship off; the parallel
         // window stays at the legacy 2 (the narrowed 1..4 clamp is a correctness fix, not a default).

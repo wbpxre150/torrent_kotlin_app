@@ -63,6 +63,10 @@ object CrawlerKeys {
         "tree_parallel_peers", "udp_rate_limit_pps",
         "tree_metadata_fresh_peer_retries",
         "tree_metadata_timeout_ms", "tree_metadata_piece_idle_ms",
+        // Per-address TCP connect-failure memory (patch 21). Fail-open: 0 (the
+        // shipped default) disables the map entirely, so peer selection is
+        // byte-identical to legacy. Advanced-textarea only, no form field.
+        "tree_metadata_peer_blacklist_ttl_sec",
         // Rate-based respawn
         "min_metadata_rate", "dynamic_rate_margin", "tree_rate_check_interval_sec",
         "tree_rate_grace_period_sec", "tree_min_lifetime_minutes", "tree_require_empty_queue",

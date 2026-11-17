@@ -302,11 +302,13 @@ comment — so the vendored tree stays pristine), `inflight-dedup.patch` (18th) 
 failure attribution + get_peers round-idle/slot-budget/finish-on-peers/miss-penalty mechanisms + metadata
 piece-idle eviction, all as **opt-in knobs shipped at legacy defaults** — five 30-minute on-device windows
 measured the tuning net-negative, so patch 19 ships the instrumentation and the keys, not the behaviour),
-and `stats-last-interval.patch` (20th and last: last-interval "windowed" rates in `/stats aggregate` — the
+`stats-last-interval.patch` (20th: last-interval "windowed" rates in `/stats aggregate` — the
 pure `stats_window` module plus a sampler on the supervisor monitor thread; additive only, every lifetime
-key keeps its exact meaning); new patches go LAST, as the 21st slot. Upstream fixes belong in `patches/`.
+key keeps its exact meaning), and `metadata-peer-fail-map.patch` (21st and last: the fail-open per-address
+TCP connect-failure memory — `src/meta_peer_fail.c` + `include/meta_peer_fail.h`, host-tested by
+`make tests-meta-peer-fail`); new patches go LAST, as the 22nd slot. Upstream fixes belong in `patches/`.
 See the vendored repo's `CLAUDE.md` for its architecture (thread trees, bloom filters, schema) and its
-`CONFIG_INI.md` for the patch-19 config keys.
+`CONFIG_INI.md` for the patch-19/21 config keys.
 
 **`/stats` after patch 19 (measured — the instrumentation is the win, the tuning is not).** `aggregate` publishes both
 denominators beside their percentages: `metadata_attempts_total` with `metadata_fetch_success_percent`
@@ -363,6 +365,30 @@ previous tick; the first tick only records the baseline, so a freshly started cr
 `stats_interval_sec` 0 rather than a spike, and a counter that moves backwards saturates at 0 instead of
 wrapping. Lifetime keys, their percentages, `supervisor.get_peers.*` and the eight `metadata_failures`
 counters are untouched.
+
+**Per-address TCP connect-failure memory (patch 21).** `~83 %` of the metadata failure mass is a TCP
+connect that never completes (patch-19 measurement), and the peer list handed to a fetch is
+arrival-ordered with **no address dedup**, so the same unreachable peer is re-tried across infohashes and
+across trees. Patch 21 adds `tree_metadata_peer_blacklist_ttl_sec` (compiled default **0 = off**, opt-in
+clamp 60..3600, warn-and-clamp) and one supervisor-shared map (`src/meta_peer_fail.c`: 8192 slots × 32 B =
+256 KiB, open addressing + FNV-1a, one `pthread_mutex_t`, lazy TTL ageing on the lookup/insert path only —
+no new thread; the load-factor clear at 3/4 is fail-open). Fail-open is absolute: `ttl_sec = 0` never
+creates the map, so every lookup answers "do not skip" and selection is byte-identical to legacy; a
+creation failure is non-fatal and lands in the same state. Recording is **additive only** — every site that
+counts `metadata_failures.connect_total` (the seven direct `meta_count_fail(tree, META_FAIL_CONNECT)` sites
+plus `meta_count_conn_fail()` when it classifies CONNECT) also records the address, while the eight
+counters, the exit counters and the count-once discipline are untouched (`parallel_conn_t` gained `peer`
+because the poll-loop sites have no other handle on the address). **The skip-to-empty guard is mandatory:**
+the selection cursor never passes the last candidate of an attempt and an attempt whose whole window was
+skipped refills once with the map ignored (the cursor is NOT reset — re-trying an address already failed
+would inflate `connect_total` and make `R = connect_total/attempts` unreadable); without it a
+zero-connection attempt would feed the irreversible infohash strike bloom. `/stats` publishes
+`metadata_peer_fail` beside `inflight`: `enabled`, `capacity`, `held`, `ttl_sec`, `clears_total`,
+`expired_total`, `metadata_peers_skipped_total` (skipped **SLOTS** — peers are not deduplicated) and
+`metadata_connect_fail_addresses_total` (NEW distinct addresses admitted, not events). The template ships
+the key at 0 even if a later A/B wins: the device carries the winning value, the template ships off.
+`gp_probe.py` reads the block (`MPF_KEYS`, a `peer-fail map` row, a missing-feature check) so a window
+report can never show a blank column.
 
 **Measured on b078fce (patch 18, 320,697-row DB, 64 trees).** `/stats` carries an `inflight` object
 (`enabled/capacity/held/claimed/refused/released/expired/tree_released/clears`). Over an 18-minute run

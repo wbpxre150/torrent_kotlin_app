@@ -169,6 +169,22 @@ class CrawlerKeysTest {
         assertEquals("15000", r.entries["tree_metadata_piece_idle_ms"])
     }
 
+    @Test fun parseAdvanced_allowsTreeMetadataPeerBlacklistTtlSecKey() {
+        // Crawler patch 21: the per-address TCP connect-failure memory window.
+        // Fail-open: 0 (the shipped default) does not even create the map, so peer
+        // selection is byte-identical to legacy; the C side clamps a non-zero value
+        // into 60-3600, so the textarea only has to be allowed to state it.
+        val key = "tree_metadata_peer_blacklist_ttl_sec"
+        assertTrue("$key must be known", key in CrawlerKeys.KNOWN_KEYS)
+        assertTrue("$key must be advanced-overridable", key in CrawlerKeys.ALLOWED_ADVANCED_KEYS)
+        assertFalse("$key must not be form-managed", key in CrawlerKeys.FORM_MANAGED_KEYS)
+        assertFalse("$key must not be path-managed", key in CrawlerKeys.PATH_KEYS)
+        assertFalse("$key must not be backup-managed", key in CrawlerKeys.BACKUP_KEYS)
+        val r = CrawlerKeys.parseAdvanced("tree_metadata_peer_blacklist_ttl_sec = 600\n")
+        assertTrue("advanced entries must parse: ${r.errors}", r.ok)
+        assertEquals("600", r.entries["tree_metadata_peer_blacklist_ttl_sec"])
+    }
+
     @Test fun parseAdvanced_allowsGetPeersRoundIdleAndPenaltyKeys() {
         // Crawler patch 19 stage 3: the round-idle cap and the silent-node penalty.
         // Both are fail-open (0 restores the pre-patch-19 behaviour) and the C side

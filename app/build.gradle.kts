@@ -583,7 +583,12 @@ tasks.register("prepareDhtCrawlerSrc") {
             // by the supervisor monitor thread every 10 s. See
             // include/stats_window.h. Additive only: every lifetime key keeps
             // its exact meaning.
-            "stats-last-interval.patch"
+            "stats-last-interval.patch",
+            // 21st: fail-open, TTL-aged, supervisor-shared per-address TCP
+            // connect-failure memory (tree_metadata_peer_blacklist_ttl_sec,
+            // default 0 = off) + the skip-to-empty guard and the /stats block.
+            // See include/meta_peer_fail.h.
+            "metadata-peer-fail-map.patch"
         )) {
             project.exec {
                 commandLine("patch", "-p1", "-d", destDir.absolutePath, "-i", file("$destDir/patches/$patchName").absolutePath)

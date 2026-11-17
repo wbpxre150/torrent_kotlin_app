@@ -116,6 +116,24 @@ MF_KEYS = (
     "other_total",
 )
 
+# Per-address TCP connect-failure memory (crawler patch 21), a supervisor-level
+# sibling of `inflight`. `metadata_peers_skipped_total` counts skipped window
+# SLOTS (peers are not deduplicated, so one address can be skipped several times
+# per attempt); `metadata_connect_fail_addresses_total` counts NEW distinct
+# addresses admitted, not events. `enabled`/`ttl_sec` say whether the map was
+# created at all — at the shipped ttl 0 it is not, and the block still publishes
+# zeros, so a blank column here is never evidence of a selection bug.
+MPF_KEYS = (
+    "enabled",
+    "capacity",
+    "held",
+    "ttl_sec",
+    "clears_total",
+    "expired_total",
+    "metadata_peers_skipped_total",
+    "metadata_connect_fail_addresses_total",
+)
+
 # Effective metadata knobs echoed under `supervisor.metadata` (crawler patch 19).
 META_CFG_KEYS = (
     "parallel_peers",
@@ -205,6 +223,19 @@ def _mf_norm(obj):
     return out or None
 
 
+def _mpf_norm(obj):
+    """Normalise the `metadata_peer_fail` block; None when not emitted (pre-patch-21)."""
+    if not isinstance(obj, dict):
+        return None
+    out = {}
+    for key in MPF_KEYS:
+        if key not in obj:
+            continue
+        # `enabled` is the one bool in the block; num() deliberately rejects bools.
+        out[key] = bool(obj.get(key)) if key == "enabled" else num(obj.get(key))
+    return out or None
+
+
 def _meta_cfg_norm(obj):
     """Normalise the `supervisor.metadata` config echo; None when not emitted."""
     if not isinstance(obj, dict):
@@ -291,6 +322,7 @@ def parse_stats(body, t=None):
         "draining_trees": num(sup.get("draining_trees_count")),
         "gp": _gp_norm(sup.get("get_peers")),
         "mf": _mf_norm(sup.get("metadata_failures")),
+        "mpf": _mpf_norm(body.get("metadata_peer_fail")),
         "meta_cfg": _meta_cfg_norm(sup.get("metadata")),
         "dispatcher": (
             {
@@ -604,6 +636,10 @@ def derive(samples, health, meta):
         "metadata_fail_deltas": None,
         "metadata_fail_total_delta": None,
         "metadata_failed_attempts_delta": None,
+        "mpf": None,
+        "mpf_skipped_delta": None,
+        "mpf_skipped_per_attempt": None,
+        "mpf_addresses_delta": None,
         "meta_cfg": None,
         "gp_yield_percent": None,
         "gp_cfg": None,
@@ -736,6 +772,22 @@ def derive(samples, health, meta):
     if attempts and fetched:
         out["metadata_failed_attempts_delta"] = attempts["delta"] - fetched["delta"]
 
+    # Per-address TCP connect-failure memory (patch 21). Read `enabled` FIRST: at
+    # the shipped ttl 0 the map is never created, so zeros here mean "disabled",
+    # not "the selection bug". When it IS enabled, skips ~0 with held > 0 is a
+    # selection bug (the map is not being consulted), not a NOT-IMPROVED result.
+    out["mpf"] = last.get("mpf")
+    skipped = series_delta(samples, lambda s: dig(s, "mpf", "metadata_peers_skipped_total"))
+    if skipped:
+        out["mpf_skipped_delta"] = skipped["delta"]
+        if attempts and attempts["delta"] > 0:
+            out["mpf_skipped_per_attempt"] = skipped["delta"] / attempts["delta"]
+    addresses = series_delta(
+        samples, lambda s: dig(s, "mpf", "metadata_connect_fail_addresses_total")
+    )
+    if addresses:
+        out["mpf_addresses_delta"] = addresses["delta"]
+
     # Shared dispatcher drops.
     dropped = series_delta(samples, lambda s: dig(s, "dispatcher", "dropped_responses"))
     if dropped:
@@ -789,6 +841,8 @@ def missing_features(samples):
             "supervisor.get_peers.slot_expired_total/early_finish_total "
             "(rev2 round-completion counters)"
         )
+    if not any(s.get("mpf") is not None for s in samples):
+        missing.append("metadata_peer_fail (per-address connect-failure memory, patch 21)")
     return missing
 
 
@@ -1007,6 +1061,22 @@ def render_table(derived, meta):
                 "metadata failures (window)",
                 f"sum {fbig(total)}",
                 "; ".join(parts) + f"; {verdict}",
+            )
+        )
+    mpf = d.get("mpf")
+    if mpf:
+        enabled = bool(mpf.get("enabled"))
+        rows.append(
+            (
+                "peer-fail map",
+                "on" if enabled else "off",
+                f"ttl {fint(mpf.get('ttl_sec'), ' s')}, held {fbig(mpf.get('held'))}"
+                f" / cap {fbig(mpf.get('capacity'))}, clears {fbig(mpf.get('clears_total'))},"
+                f" expired {fbig(mpf.get('expired_total'))};"
+                f" d skips {fbig(d.get('mpf_skipped_delta'))} slots"
+                f" ({f2(d.get('mpf_skipped_per_attempt'), ' /attempt')}),"
+                f" d new addresses {fbig(d.get('mpf_addresses_delta'))}"
+                " — `metadata_peer_fail` (skips are SLOTS; addresses are distinct entries)",
             )
         )
     rows.append(
