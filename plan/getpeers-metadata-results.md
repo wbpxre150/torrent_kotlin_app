@@ -769,16 +769,41 @@ this document's Δ-derived rates, which never read these keys. *Note:* `gp_probe
 last-interval keys — Stage 1 deliberately made no probe change (the probe differences cumulative counters
 host-side), so this criterion's evidence is a direct `/stats` read, not a probe column.
 
-**Sub-checks (c) and (e) — not separately evidenced in this record (post-review, P2c).** Criterion 1 as
-pre-registered has five sub-checks. This roll-up evidences (a) all seven keys present and non-zero, (b) exact
-internal consistency (59 / 470, 688 / 2,358) and (d) windowed-vs-lifetime divergence, plus the independent
-Δ cross-check above — but **(c)** (`get_peers_lookups_last_interval / stats_interval_sec` within ±50 % of the
-Δ-derived rate) and **(e)** (lifetime counters restart near 0 while the last-interval keys track) were **not**
-separately evidenced. They cannot be computed retroactively either: every probe artifact
-(`reports/w0.json` … `reports/w5.json`, including w2 and w2b) contains **zero** `*_last_interval` keys —
-`gp_probe.py` never reads them, by design — so no raw `/stats` snapshot carrying those keys exists in the run
-artifacts to recompute from. The mechanism is validated via (a), (b), (d) and the independent Δ cross-check; no
-PASS is claimed for (c) or (e), and no device re-run is made for them here.
+**Per-sub-check roll-up (revision 3, Stage 8 — supersedes the Stage-7 step-5 wording; independent verification
+`reports/tester-c1.md`, verdict PASS, no device re-run made for this stage).**
+
+- **(a) PASS — all seven keys present and non-zero** on the ingesting crawler, read twice 15 s apart
+  (`reports/tester-c1.md` §3); the exact-consistency re-read above (59 / 470, 688 / 2,358) stands.
+- **(b) PASS — both percentage identities exact in both snapshots**, rounding error 0.0 for all four
+  (`reports/tester-c1.md` §4), on top of that Stage-5 re-read.
+- **(c) EVIDENCED — magnitude sanity PASS.** Windowed `get_peers_lookups_last_interval / stats_interval_sec`
+  = 2,659 / 10 = **265.90 lookups/s** against the Δ-derived Δ`get_peers_lookups_total` 3,708 / 15 s =
+  **247.20 lookups/s**, i.e. **+7.56 %**, well inside the ±50 % bar (`reports/tester-c1.md` §5 and its evidence
+  block: snap1 → snap2 epochs 1794901471 → 1794901486).
+- **(d) PASS on SUBSTITUTED EVIDENCE — limitation stated.** The artifact the criterion named, `reports/w0.json`,
+  structurally cannot carry this evidence: `grep -c last_interval reports/w0.json` = 0, a recursive key walk
+  finds no `*_last_interval` and no `stats_interval_sec`, and Stage 1's scope deliberately left `gp_probe.py`
+  unchanged, so the probe never parses the keys. The substitution, stated plainly: (d) is verified on **live
+  `/stats` of the shipped build** — yield lifetime 40.9796 % vs last-interval 44.8289 % = **3.85 pp**, success
+  11.1607 % vs 10.0167 % = **1.14 pp** — and independently on the **install-time record**
+  (`reports/implementer-1.md:25`): yield 36.76 % vs 39.82 % = **3.06 pp**. Both exceed the >1 pp bar, and **the
+  >1 pp bar itself was NOT weakened** — only the evidence source was corrected (plan revision 3). The parent
+  approved the substitution (option B, `reports/tester-c1.md` Parent-advice line), and the artifact blindness is
+  independently confirmed in `reports/reviewer-fix.md:17`.
+- **(e) EVIDENCED — restart behaviour PASS.** At `uptime` `0:01` (~65 s post-restart) the lifetime counters were
+  near zero against the pre-restart scale — 3,379 `metadata_attempts_total` / 16,136 `get_peers_lookups_total`
+  against W0's 96,792 / 431,928 over 1,795 s — while the last-interval keys already tracked live activity (513
+  attempts / 2,263 lookups / `stats_interval_sec` 10) and stayed **non-cumulative** across the 15 s pair (2,263 →
+  2,659 while lifetime grew by 3,708), i.e. genuine windows, not lifetime (`reports/tester-c1.md` §6). Observation
+  mode, stated honestly: this is a **fresh-restart snapshot pair**, not a before/after pair spanning the
+  settings-apply itself — the reset-and-track property is nonetheless shown.
+
+**Criterion-defect note (revision 3, Stage 8).** The exit-criterion-1(d) text carried this artifact defect from
+the original plan until revision 3, which corrected the Verify method to live `/stats` with an explicit
+substitution rule; the >1 pp bar was never weakened. The shipped code was never defective — the probe's key
+blindness is a recorded Stage-1 scope decision, not a bug. This is the same honesty pattern Stage 7 applied to
+the pre-registered deadline quote: the record says what changed and when, instead of rewriting history to make
+the criterion look as if it had always been correct.
 
 **2. PASS — `tree_parallel_peers` ships at the same-hour A/B winner, numbers recorded.** W0 6.834 vs W1
 6.408 metadata/s, a 6.24 % relative gap on the higher arm's base (6.65 % on the lower), outside the <5 % tie
@@ -844,7 +869,7 @@ silently dropped:
 |---|---|
 | **P2a** — `meta_peer_fail_stats` scans all 131,072 slots under the map mutex (`meta_peer_fail.c:378-386`) | **NOT FIXED.** The full-table scan is sub-millisecond at `gp_probe`'s 5 s poll cadence, so the contention is negligible; an incremental `held` counter is a future-run improvement, not worth a new patch + rebuild + reinstall now. |
 | **P2b** — `faf354b`'s message implies the untracked next-steps plan is in that commit | **NOT FIXED.** The file is untracked by design (plan Assumption 10 keeps plan files out of commit scope), and rewriting published history is worse than the cosmetic inaccuracy; this revision's commit message states its contents exactly. |
-| **P2c** — exit criterion 1's sub-checks (c) and (e) claimed without recorded evidence | **FIXED** in this revision — see the criterion-1 roll-up: both are marked not separately evidenced, and they are not computable retroactively because the probe artifacts carry no last-interval keys. |
+| **P2c** — exit criterion 1's sub-checks (c) and (e) claimed without recorded evidence | **FIXED** — Stage 7 recorded both as *not separately evidenced*; that wording is **SUPERSEDED (revision 3, Stage 8)**: (c) and (e) are now EVIDENCED from `reports/tester-c1.md` in the criterion-1 roll-up, and (d) passes on explicitly-named substituted evidence. The probe artifacts still carry no last-interval keys — which is exactly why (d) names its substitute source instead of the plan-named `reports/w0.json`. |
 | **P2d** — temperature never sampled in-window | **NOT FIXED.** Temperature cannot be sampled retroactively; it is already self-reported as a confound in every window table. Adding `dumpsys battery` to the probe's health sampler is future work. |
 
 ## Dead-ends — updated with what this run ruled out
