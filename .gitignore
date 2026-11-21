@@ -45,3 +45,9 @@ gradle/wrapper/gradle-wrapper.jar
 
 # graphify knowledge graph artifacts (regenerable via `graphify update .`)
 graphify-out/
+
+# Local agent / browser-automation artifacts (machine-specific, not project sources)
+.pi/
+.playwright-cli/
+__pycache__/
+*.pyc
