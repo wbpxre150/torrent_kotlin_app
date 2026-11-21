@@ -1397,6 +1397,12 @@ class ControlServer(
             <div class="wrap">
             ${pageHeader("DHT crawler")}
             <div id="page-banner">$banner</div>
+            <!-- The apply status sits at the PAGE top, above the Feed line and the
+                 tab bar, so an apply is visible from every tab. It stays outside
+                 #settings-form on purpose: reconcileForm() swaps that form's
+                 innerHTML and would otherwise rebuild it on every terminal frame. -->
+            <div id="apply-status"$applyClass>$applyText</div>
+            <pre id="apply-log" class="apply-log loglines"$applyLogStyle>$applyLogText</pre>
             <p class="meta">Feed: <span id="live" class="live wait">connecting…</span></p>
             <div class="tabs" role="tablist">
               <button type="button" role="tab" id="tabbtn-backup" data-tab="backup"
@@ -1519,8 +1525,6 @@ class ControlServer(
               <button type="submit" class="btn">Save tunnel</button>
             </form>
             $rebuildHint
-            <div id="apply-status"$applyClass>$applyText</div>
-            <pre id="apply-log" class="apply-log loglines"$applyLogStyle>$applyLogText</pre>
             </div>
             <div id="tab-maintenance" class="tabpanel" role="tabpanel" aria-labelledby="tabbtn-maintenance" hidden>
             $maintenanceSection
