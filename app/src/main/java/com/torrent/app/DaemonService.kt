@@ -155,7 +155,7 @@ class DaemonService : Service() {
     private val shutdownRequested = java.util.concurrent.atomic.AtomicBoolean(false)
     // Thread id of the graceful-shutdown run. Only that run AWAITS the crawler's
     // SIGTERM grace; onDestroy falls back to the historical fire-and-forget
-    // crawler stop, since a ~60 s block on the main thread would ANR.
+    // crawler stop, since a ~20 s block on the main thread would ANR.
     @Volatile private var shutdownThreadId: Long? = null
     // Stage 1 of "stop everything, then close the app": [requestShutdownAndExit]
     // records the exit intent here FIRST and only then asks for the teardown, so
@@ -340,7 +340,7 @@ class DaemonService : Service() {
             clearLastSuccessDate = { configStore.clearDbBackupSuccessDate() },
         )
         // DB restore (plan 2, Stage 4): one-shot, no scheduler. Reuses the
-        // crawler-control executor (the 60 s stop + the one-shot must not run
+        // crawler-control executor (the 20 s stop + the one-shot must not run
         // on a request thread) and the same bookmark file as the backup.
         dbRestore = DbRestoreManager(
             loadSettings = { configStore.load().backup },
@@ -578,7 +578,7 @@ class DaemonService : Service() {
         // teardown and this call is reached from its stopSelf() (still in flight,
         // so it no-ops); when the system/service destroy came first, the same
         // ordered teardown runs inline here (the crawler stop stays
-        // fire-and-forget on this thread — blocking the main thread for its 60 s
+        // fire-and-forget on this thread — blocking the main thread for its 20 s
         // SIGTERM grace would ANR).
         // This inline run is also the last teardown the instance gets, so it starts
         // a fresh cycle even if a previous one had already completed.
@@ -1195,7 +1195,7 @@ class DaemonService : Service() {
     /**
      * Validates and queues the crawler settings-apply job, returning
      * immediately as "started". The job (save → LKG snapshots → stop with the
-     * 60 s grace → write config.ini → start if the wifi gate allows → watch
+     * 20 s grace → write config.ini → start if the wifi gate allows → watch
      * for a crash loop) runs on the crawler-control executor, serialized with
      * every other crawler stop/start.
      */
@@ -1209,7 +1209,7 @@ class DaemonService : Service() {
         // order wrote it after `execute`, so a fast run could be overwritten
         // by "apply started…" while already WRITING/STARTING (explorer-4 §1).
         setCrawlerApplyStatus(
-            CrawlerApplyPhase.STOPPING, "apply started; stopping crawler first (up to 60 s)")
+            CrawlerApplyPhase.STOPPING, "apply started; stopping crawler first (up to 20 s)")
         try {
             crawlerControlExecutor.execute {
                 try {
@@ -1337,7 +1337,7 @@ class DaemonService : Service() {
         configStore.saveCrawler(effective)
         crawlerConfig.snapshotLastKnownGood()
 
-        setCrawlerApplyStatus(CrawlerApplyPhase.STOPPING, "stopping crawler (60 s grace)")
+        setCrawlerApplyStatus(CrawlerApplyPhase.STOPPING, "stopping crawler (20 s grace)")
         stopCrawlerSupervisors()
 
         setCrawlerApplyStatus(CrawlerApplyPhase.WRITING, "writing config.ini")
@@ -1484,7 +1484,7 @@ class DaemonService : Service() {
 
     /**
      * Dashboard start/stop/restart actions. A stop blocks for the daemon's
-     * SIGTERM grace (60 s for the crawler), so these never run on the caller's
+     * SIGTERM grace (20 s for the crawler), so these never run on the caller's
      * thread (a Ktor request handler or the main thread): they are queued on a
      * per-label single-thread executor, which keeps one daemon's actions in
      * click order without a slow crawler stop delaying a transmission action.
@@ -2169,9 +2169,9 @@ class DaemonService : Service() {
      * service instance survives a graceful stop (the activity stays bound, so
      * stopSelf() does not destroy it).
      *
-     * The teardown is sequential: worst case is roughly the crawler grace (62 s)
+     * The teardown is sequential: worst case is roughly the crawler grace (22 s)
      * plus the FTP/transmission graces and the Ktor stop timeout — do not
-     * promise callers a ~60 s completion.
+     * promise callers a ~20 s completion.
      *
      * @return false when a shutdown is already in flight.
      */
@@ -2433,7 +2433,16 @@ class DaemonService : Service() {
         // The /ready body is `{"status":200,"readyConnections":N,…}`; N is the
         // number of edge connections the tunnel has registered.
         private val READY_CONNECTIONS_RE = Regex("\"readyConnections\"\\s*:\\s*(\\d+)")
-        const val CRAWLER_GRACE_MS = 60_000L
+        // SIGTERM grace for dht_crawler. It is a CEILING, not a wait: since the
+        // crawler aborts its in-flight metadata fetches on supervisor shutdown
+        // (crawler patch 24) a clean stop takes ~2-5 s, and what is left after
+        // the joins - batch flush, bloom save, the WAL TRUNCATE checkpoint - is
+        // exactly the part that must never be SIGKILLed. 20 s leaves several
+        // times that headroom while keeping a hung crawler from stalling a
+        // settings apply or an app exit for a full minute. It deliberately no
+        // longer coincides with the crawler's 60 s metadata deadline, which is
+        // what used to let a slow stop be killed mid-checkpoint.
+        const val CRAWLER_GRACE_MS = 20_000L
         // Shutdown control: start-command action meaning "stop every daemon, then
         // close the app" (onStartCommand → requestShutdownAndExit). The in-app
         // button calls the binder method directly; Stage 2's notification action
@@ -2446,7 +2455,7 @@ class DaemonService : Service() {
         private const val CRAWLER_APPLY_WATCH_MS = 30_000L
         private const val CRAWLER_APPLY_POLL_MS = 2_000L
 
-        // The dht_crawler supervisor gets a long (60 s) SIGTERM grace (plan 09 §5),
+        // The dht_crawler supervisor gets a long (20 s) SIGTERM grace (plan 09 §5),
         // so its stop/start are serialized on one process-wide single-thread executor
         // (never shut down): onDestroy never blocks on the crawler, and a pending stop
         // from a previous service instance always finishes before a new child is
@@ -2483,7 +2492,7 @@ class DaemonService : Service() {
         // (the activity stays bound, so stopSelf() does not destroy it), so a
         // second shutdown cycle must queue behind the first instead of being
         // rejected — and every cycle runs off the caller (binder/main) thread,
-        // where the crawler's 60 s SIGTERM grace would ANR.
+        // where the crawler's 20 s SIGTERM grace would ANR.
         private val shutdownExecutor = Executors.newSingleThreadExecutor(ThreadFactory {
             Thread(it, "graceful-shutdown").apply { isDaemon = true }
         })

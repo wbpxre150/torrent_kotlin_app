@@ -318,7 +318,7 @@ class DbRestoreManager(
         // but a stale handle must not survive into that retry.
         var sink: RestoreStatementSink? = null
         try {
-            status = status.copy(message = "stopping crawler (up to 60 s)")
+            status = status.copy(message = "stopping crawler (up to 20 s)")
             stopCrawler()
 
             // Housekeeping before anything else: the previous flow concatenated

@@ -290,7 +290,7 @@ deliberately not run in this release.
   archive — override `TPARSE_LIB` or you measure the wrong parser.
 - Adding a `torrent_class` column means five places in the C tree plus the Kotlin mirror — see invariant 14.
 
-**dht_crawler patches (order is fixed, applied by `prepareDhtCrawlerSrc`):** the 23-entry list in
+**dht_crawler patches (order is fixed, applied by `prepareDhtCrawlerSrc`):** the 24-entry list in
 `app/build.gradle.kts` opens with the three upstream fixes — `bencode-cap-fix.patch` →
 `bencode-init-fix.patch` → `civetweb-stop-flag-atomic.patch` — and closes with
 `movie-kind-v10-streaming.patch` (last-token pooling + inline ingest classification),
@@ -307,10 +307,16 @@ pure `stats_window` module plus a sampler on the supervisor monitor thread; addi
 key keeps its exact meaning), `metadata-peer-fail-map.patch` (21st: the fail-open per-address TCP
 connect-failure memory — `src/meta_peer_fail.c` + `include/meta_peer_fail.h`, host-tested by
 `make tests-meta-peer-fail`), `meta-peer-fail-capacity.patch` (22nd: the capacity corrective, 8192 →
-131,072 slots — constant + comments only, no behaviour change) and `bep51-funnel-stats.patch` (23rd and
-last: the BEP51 query + dedup-funnel counters — per-tree `trees[].bep51` and summed `supervisor.bep51`,
-counters only, no behaviour change and no config key); new patches go LAST, as the 24th slot. Upstream
-fixes belong in `patches/`.
+131,072 slots — constant + comments only, no behaviour change), `bep51-funnel-stats.patch` (23rd: the BEP51 query + dedup-funnel counters — per-tree `trees[].bep51` and
+summed `supervisor.bep51`, counters only, no behaviour change and no config key) and
+`shutdown-abort-metadata-fetch.patch` (24th and last: `tree_fetch_metadata_parallel()` breaks when
+`shutdown_reason` is `SHUTDOWN_REASON_SUPERVISOR` — the metadata workers only re-check the stop *between*
+fetches and `thread_tree_destroy()` joins them unbounded, so one in-flight 60 s attempt held every crawler
+stop (settings apply, app exit, maintenance one-shot) for the whole metadata deadline; the same hunk makes
+that deadline monotonic-ms instead of `time(NULL)` seconds, whose `difftime > timeout/1000` test could
+overrun to 61 s and cross the app's SIGTERM grace. `SHUTDOWN_REASON_RATE_BASED` respawns are excluded by
+the reason gate, and no counter, key or `/stats` field changes); new patches go LAST, as the 25th slot.
+Upstream fixes belong in `patches/`.
 See the vendored repo's `CLAUDE.md` for its architecture (thread trees, bloom filters, schema) and its
 `CONFIG_INI.md` for the patch-19/21 config keys and the patch-20/22 `/stats` blocks.
 
@@ -398,8 +404,9 @@ would inflate `connect_total` and make `R = connect_total/attempts` unreadable);
 zero-connection attempt would feed the irreversible infohash strike bloom. `/stats` publishes
 `metadata_peer_fail` beside `inflight`: `enabled`, `capacity`, `held`, `ttl_sec`, `clears_total`,
 `expired_total`, `metadata_peers_skipped_total` (skipped **SLOTS** — peers are not deduplicated) and
-`metadata_connect_fail_addresses_total` (NEW distinct addresses admitted, not events). The template ships
-the key at 0 even if a later A/B wins: the device carries the winning value, the template ships off.
+`metadata_connect_fail_addresses_total` (NEW distinct addresses admitted, not events). **The template now
+ships the key at the measured A/B winner, `600`** (W3, +9.4 % metadata/s) — the C default stays `0`, so
+the fail-open rule still holds for a config that omits the key; only the shipped Android config turns it on.
 `gp_probe.py` reads the block (`MPF_KEYS`, a `peer-fail map` row, a missing-feature check) so a window
 report can never show a blank column.
 
@@ -425,8 +432,7 @@ Three same-hour, same-build pairs, one variable each:
   13.06 %: pp=4 bought more concurrent connections (10.60 → 11.28 per tree) and more attempts, and no more
   fetches. The template already carried 2, so nothing changed in the repo. This reverses the patch-19 run's
   confounded LEGACY 6.75 vs SHIPPED 5.12 comparison.
-- **`tree_metadata_peer_blacklist_ttl_sec` 0 vs 600 on the resized map (W2b/W3) — PASS, the device ships
-  600.** Validity gate met (Δ`expired_total` 4,071 > 0, Δ`clears_total` 1 ≤ 2), then R 4.665 → 2.525,
+  600, and so does the shipped default.** Validity gate met
   metadata/s 6.128 → 6.706 (+9.4 %), 230,086 skipped slots (2.44 per attempt), connect share 83.2 % →
   72.4 % with handshake rising 15.7 % → 25.8 % — the distribution **shifted**, it did not merely shrink.
   Side effects: failure mass 462,119 → 329,453 (−28.7 %), yield 31.9 % → 36.2 %, active conns per tree

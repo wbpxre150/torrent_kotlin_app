@@ -153,7 +153,7 @@ internal fun MaintenanceStatus.withProgress(p: MaintenanceProgress): Maintenance
  *  - a [MaintenanceAction.needsSpaceCheck] action lacks free internal space for a
  *    DB-sized copy.
  *
- * All work runs on [executor] (the crawler-control executor) so the 60 s
+ * All work runs on [executor] (the crawler-control executor) so the 20 s
  * crawler stop never blocks a request thread.
  */
 class CrawlerMaintenance(
@@ -218,7 +218,7 @@ class CrawlerMaintenance(
 
     private fun runAction(action: MaintenanceAction) {
         val lines = ArrayDeque<String>()
-        status = status.copy(message = "stopping crawler (up to 60 s)")
+        status = status.copy(message = "stopping crawler (up to 20 s)")
         try {
             stopCrawler()
             status = status.copy(message = "running ${action.flag}")

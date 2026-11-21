@@ -307,7 +307,7 @@ class DbRestoreManagerTest {
         return Triple(manager, flags, bookmarkFile)
     }
 
-    /** Counts the crawler stop/restart calls (the 60 s stop seam). */
+    /** Counts the crawler stop/restart calls (the 20 s stop seam). */
     private class FakeFlags {
         var stopCount = 0
         var startCount = 0

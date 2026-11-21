@@ -601,7 +601,16 @@ tasks.register("prepareDhtCrawlerSrc") {
             // and the bloom / in-flight / queue-full / pushed split of the
             // samples a response offers). Counters only - no behaviour change,
             // no new key, no existing key changes meaning.
-            "bep51-funnel-stats.patch"
+            "bep51-funnel-stats.patch",
+            // 24th: abort an in-flight metadata fetch on supervisor shutdown,
+            // and make its global deadline monotonic-ms instead of
+            // time(NULL) seconds. Without the abort, tree_metadata_worker_func
+            // only re-checks the stop between fetches and thread_tree_destroy()
+            // joins the workers unbounded, so every crawler stop (settings
+            // apply, app exit, maintenance one-shot) waited out the 60 s
+            // metadata deadline. RATE_BASED respawns are excluded by the
+            // reason gate, and no counter, key or /stats field changes.
+            "shutdown-abort-metadata-fetch.patch"
         )) {
             project.exec {
                 commandLine("patch", "-p1", "-d", destDir.absolutePath, "-i", file("$destDir/patches/$patchName").absolutePath)
