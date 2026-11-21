@@ -240,25 +240,25 @@ class CrawlerConfigTest {
         assertEquals("0", ini["ssh_backup_enabled"])
         assertEquals("0", ini["rclone_backup_enabled"])
         assertEquals("10", ini["nice_level"])
-        assertEquals("32", ini["num_trees"])
-        assertEquals("3", ini["tree_bep51_workers"])
-        assertEquals("18", ini["tree_get_peers_workers"])
+        assertEquals("64", ini["num_trees"])
+        assertEquals("5", ini["tree_bep51_workers"])
+        assertEquals("22", ini["tree_get_peers_workers"])
         assertEquals("12", ini["tree_metadata_workers"])
         assertEquals("500", ini["tree_infohash_queue_capacity"])
         assertEquals("500", ini["tree_peers_queue_capacity"])
         assertEquals("8081", ini["http_port"])
         assertEquals("127.0.0.1", ini["http_bind"])
-        assertEquals("2500", ini["udp_rate_limit_pps"])
+        assertEquals("3700", ini["udp_rate_limit_pps"])
         assertEquals("1", ini["tree_metadata_fresh_peer_retries"])
         // Crawler patch 19 final: every behaviour knob ships at its legacy/off value — the five
         // 30-minute windows measured the tuning net-negative, so the keys stay present and
         // documented as opt-in. All integers — the C parser uses atoi, so `= true` would mean 0.
         assertEquals("60000", ini["tree_metadata_timeout_ms"])
         assertEquals("0", ini["tree_metadata_piece_idle_ms"])
-        // Crawler patch 21: the per-address TCP connect-failure memory ships OFF even though the
-        // A/B winner may be carried on a device — the fail-open shipping rule (0 = no map at all,
-        // selection byte-identical to legacy) is what the template promises.
-        assertEquals("0", ini["tree_metadata_peer_blacklist_ttl_sec"])
+        // Crawler patch 21: the per-address TCP connect-failure memory ships ON at the measured A/B
+        // winner (W3, +9.4 % metadata/s) — the device value is now the shipped default, while the
+        // C-side default stays 0 (fail-open: no map at all, selection byte-identical to legacy).
+        assertEquals("600", ini["tree_metadata_peer_blacklist_ttl_sec"])
         assertEquals("0", ini["tree_get_peers_round_idle_ms"])
         // The miss penalty, the per-slot budget and finish-on-peers all ship off; the parallel
         // window stays at the legacy 2 (the narrowed 1..4 clamp is a correctness fix, not a default).
@@ -338,7 +338,7 @@ class CrawlerConfigTest {
             assertEquals("0", ini["ssh_backup_enabled"])
             assertEquals("0", ini["rclone_backup_enabled"])
             assertEquals("10", ini["nice_level"])
-            assertEquals("32", ini["num_trees"])
+            assertEquals("64", ini["num_trees"])
 
             assertEquals("500", ini["tree_infohash_queue_capacity"])
             assertEquals("500", ini["tree_peers_queue_capacity"])
@@ -907,7 +907,7 @@ class CrawlerConfigTest {
             assertTrue(cfg.readIni().isEmpty())
             cfg.ensureLayout()
             val ini = cfg.readIni()
-            assertEquals("32", ini["num_trees"])
+            assertEquals("64", ini["num_trees"])
             assertEquals("127.0.0.1", ini["http_bind"])
         }
 

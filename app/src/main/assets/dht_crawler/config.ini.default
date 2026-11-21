@@ -108,7 +108,7 @@ global_bootstrap_timeout_sec = 600
 global_bootstrap_workers = 20
 
 # ==== Thread Tree Architecture ====
-num_trees = 32
+num_trees = 64
 use_keyspace_partitioning=1
 dead_partition_threshold = 3
 max_trees_per_partition = 4
@@ -117,9 +117,9 @@ max_trees_per_partition = 4
 # find_node workers per tree
 tree_find_node_workers = 3
 # BEP51 sample_infohashes workers per tree
-tree_bep51_workers = 3
+tree_bep51_workers = 5
 # get_peers workers per tree
-tree_get_peers_workers = 18
+tree_get_peers_workers = 22
 # Metadata workers per tree
 tree_metadata_workers = 12
 # Infohash queue capacity per tree
@@ -156,7 +156,7 @@ tree_parallel_peers = 2
 # TCP connection establishment timeout in milliseconds
 tree_tcp_connect_timeout_ms = 2000
 # Process-wide UDP send rate limit in packets/sec (0 = unlimited)
-udp_rate_limit_pps = 2500
+udp_rate_limit_pps = 3700
 # Fresh-peer re-lookup retries in the metadata failure path before a failure strike (0 = disable)
 tree_metadata_fresh_peer_retries = 1
 # Metadata fetch deadline per tree in milliseconds (5000-600000)
@@ -167,8 +167,9 @@ tree_metadata_timeout_ms = 60000
 tree_metadata_piece_idle_ms = 0
 # Remember a peer address whose TCP connect failed for this many seconds and step over it when
 # picking metadata peers (0 = off; a non-zero value is clamped into 60-3600)
-# opt-in; shipped off/legacy — fail-open shipping rule, see plan/getpeers-metadata-results.md
-tree_metadata_peer_blacklist_ttl_sec = 0
+# Shipped ON at the measured A/B winner (W3: metadata/s 6.128 -> 6.706, connect share 83.2 % -> 72.4 %,
+# failure mass -28.7 %); see plan/getpeers-metadata-results.md. The C default stays 0.
+tree_metadata_peer_blacklist_ttl_sec = 600
 
 # ==== Rate-Based Respawn ====
 min_metadata_rate = 0.005

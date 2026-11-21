@@ -270,10 +270,10 @@ class ConfigStoreTest {
         assertEquals("INFO", c.logLevel)
         assertEquals(6881, c.dhtPort)
         assertEquals(10, c.niceLevel)
-        assertEquals(32, c.numTrees)
+        assertEquals(64, c.numTrees)
         assertEquals(3, c.treeFindNodeWorkers)
-        assertEquals(3, c.treeBep51Workers)
-        assertEquals(18, c.treeGetPeersWorkers)
+        assertEquals(5, c.treeBep51Workers)
+        assertEquals(22, c.treeGetPeersWorkers)
         assertEquals(12, c.treeMetadataWorkers)
         assertEquals(500, c.treeInfohashQueueCapacity)
         assertEquals(500, c.treePeersQueueCapacity)
@@ -288,7 +288,9 @@ class ConfigStoreTest {
         assertEquals(30_000_000, c.failureBloomCapacity)
         assertEquals(0.001, c.bloomErrorRate, 1e-6)
         assertEquals(
-            "tree_metadata_timeout_ms = 60000\nudp_rate_limit_pps = 2500", c.advancedOverrides)
+            "tree_metadata_timeout_ms = 60000\nudp_rate_limit_pps = 3700\n" +
+                "tree_metadata_peer_blacklist_ttl_sec = 600",
+            c.advancedOverrides)
         assertEquals(8080, c.proxyPort)
         assertEquals(8081, c.crawlerHttpPort)
         assertFalse(c.lanDirect)
