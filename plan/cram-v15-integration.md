@@ -1,6 +1,9 @@
 # cram-v15-integration — CRAM for category, tv_kind and adult; fastText retired
 
-Status: **proposed, rev 2** (written 2026-11-22, revised same day). Source of truth for the
+Status: **shipped** (2026-11-22; CRAM generation **v15**, `versionCode` 4 / `versionName` "0.4.0").
+All sixteen exit criteria are recorded in §15 with their numbers — including the misses. Commits
+`ab7aa22`, `ff4971c`, `03183f2`, `e6a7eb0`, `7144fc4`, `54bcfbe` (app), submodule `f564155`, `fc40c43`,
+`2adfd11`, cram workspace `e6ce723`. Source of truth for the
 model: `~/apps/cram/PLAN_cram_replacement.md` (shipped + tv_kind v2 correction + the
 **adult-coverage measurement, commit `718f9f4`**) and `~/apps/cram/tvkind/scripts/cram_repl.py`.
 This plan is the *integration* of that result into the dht_crawler and the app — it does not
@@ -522,3 +525,102 @@ adb -s "$ANDROID_SERIAL" install app/build/outputs/apk/debug/app-debug.apk
 - **No schema change, no new config key, no movie_kind change.**
 - **No production-DB validation.** Every device gate runs on the clean install; the
   6.1 M-row production DB and its rollback copies are not touched by this plan.
+
+---
+
+## 15. Gate results (recorded 2026-11-22 — every criterion, including misses)
+
+Recording rule, per §10's decision rule and the plan's criterion 16: every gate carries a
+**PASS / FAIL / PARTIAL / NOT-EXERCISED** with its measured numbers, and a bar revision is recorded as a
+revision — never as a silent pass. Device: serial `b93dac74`, **clean install** of `versionCode` 4 /
+`"0.4.0"`, empty crawler DB, live DHT ingest only, `log_level=INFO`. Commits `ab7aa22`, `ff4971c`,
+`03183f2`, `e6a7eb0`, `7144fc4`, `54bcfbe` (app); submodule `f564155`, `fc40c43`, `2adfd11`; cram
+workspace `e6ce723`.
+
+| # | gate | result |
+|---|---|---|
+| 1 | G0 export parity (host) | **PASS** — dense reconstruction from the exported CSR is **bit-identical to all 11 npz arrays, 0 mismatches**; val re-score category **1,846**/19,913 (delta **0**), `val_all` kind **177**/3,999 and **57**/817 (delta **0**); val ECE at T **0.022218** (band 0.0222 ± 0.0005); val adult witnesses accuracy@0.5 **0.9571**, AUC **0.98720**. Heldout never read. Staged shas match `manifest.json`. |
+| 2 | G0 vocab proof (host) | **PASS** — `ncols` **1,195,982** = named **147,406** (structs **1,315** / words **48,757** / bigrams **97,334**) + char tail **1,048,576**; train nnz **26,628,710**, val nnz **3,289,873**; container nnz **920,915**. |
+| 3 | Host suite green, patch 25 registered | **PASS** — `:app:prepareDhtCrawlerSrc` exit 0 with `cram-category-tvkind.patch` as the **last** applied patch (entry 25 of 25 in `app/build.gradle.kts`); `patch -p1` onto a fresh prepared base + `diff -rq` identity silent; `make -j…` clean; **all 14 `tests:` targets (15 binaries) green**, including the new `tests-cram` and `tests-asan-cram`; `clf-backfill` compile guard builds. |
+| 4 | G1 feature-text parity (host) | **PASS under a recorded bar revision** — the original 10,000/10,000 bar was **MISSED at 9,710/10,000**; post-strip **10,000/10,000 exact**, sample ∩ the 20-id corpus set = **∅**, full corpus **120,000/120,000 with mismatch id set `[]`**, 20-row opposite-direction witness 0/20 category, 0/20 tv_kind, 0/20 adult, max \|Δadult_p\| **0.00982432**. Details in *Deviations* below. |
+| 5 | G2 host verdict parity | **PASS** — category / tv_kind / adult **10,000/10,000 = 100 %** each (bar ≥ 99.9 %); max \|Δadult_p\| **1.443e-15**; max \|Δconfidence\| **1.554e-15**; **max \|ΔE\| over all 48 states = 0.0**; 0 mismatches; diversity **12 categories / 6 kinds / both adult values**. |
+| 6 | Kotlin tests + APK content + version bump | **PASS** — `:app:testDebugUnitTest` green; `assembleDebug` ok; the APK (**540,330,690 B**) lists exactly `assets/dht_crawler/models/v15/{cram.bin,cram_vocab.bin,manifest.json}` plus the unchanged v13 set, **zero `.ftz` entries and zero `models/v11/` entries**; `versionCode` 4 / `versionName` `"0.4.0"`. |
+| 7 | Dashboard CRAM line (phone) | **PASS** — server-rendered row `<span class="k">Classifier</span>… data-field="cramStatsLine"` → `CRAM v15 (sha 834159b642d6): N predicted, 0 load failures`, updating over the WS frame key `cramStatsLine`; pinned test `ControlServerHelpersTest.kt:392`; 39 tests green. |
+| 8 | Install + operator wizard | **PASS** (operator-confirmed) — clean install of the 540,330,690 B APK, launched, **operator completed the first-run wizard manually**; crawler running at `log_level=INFO` with `classifier_enabled=1`, `classifier_model_dir=models/v15`, `adult_hide_threshold=0.375`, `.assets_version` `4\|models/v15\|models/v13`, `models/` = {v15, v13}. |
+| 9 | G2 device leg | **PASS** — 600 rows from the live DB: **100 % / 100 % / 100 %** category/tv_kind/adult, max \|Δadult_p\| **1.221e-15**; three-way check (host x86 C harness vs arm64 DB verdicts) **600/600, \|Δadult_p\| = 0.000e+00** (bit-identical float64); the ungated raw kind head would match only **225/600 = 37.5 %**, so the "concrete kind ⇒ tv/anime" gate is demonstrably live; 10 rows in [0.375, 0.5) so the operating point is exercised; diversity 11/12 categories, 5 concrete kinds, adult 126/474 = 21.0 % (DB-wide 21.8 %). |
+| 10 | G3 clean ingest smoke | **PASS** — window **6 h 08 m**, 37 samples, **192,599** stored rows (38× the 5,000 bar); `clf_ver` **15 on all 192,599** and `adult_clf_ver` **15 on all 192,599**; top category movie **39.66 %** (bar < 60 %), 12 categories present; **0 rows** with a concrete `tv_kind` outside tv/anime; `classifier.enabled` true, `cram.enabled` true, `cram.load_failures` 0, `parser_only_fallback` 0, `model_load_failures` 0 in **every** sample; `PRAGMA quick_check` ok on the 1,642,405,888 B checkpointed DB. Log-corruption caveat in *Deviations*. |
+| 11 | G4 adult operating point | **PASS with two recorded deviations** — threshold **0.375 in all four places** (`/stats`, device `config.ini`, `models/v15/manifest.json`, `config.ini.default`); `adult_p` min **6.23e-08**, max **0.99999999999999867**; boundary consistency `adult=1 ⟺ adult_p ≥ 0.375` with **0 violations**; live tag rate **21.89 %** (42,161/192,599) reported beside the heldout anchor (base 17.65 %, recall 0.90 / precision 0.848 at 0.375). |
+| 12 | G5 cost | **PASS on the measured path** — window mean **2.853 ms/item** (Δ540,079,636 µs / 189,281 items; every 10-min interval 2.05–3.52 ms) against the 10 ms bar, lifetime mean 2.848 ms at window end; peak crawler `VmHWM` **1,822,308 kB = 1.7379 GiB** against the 2.3 GiB bar, **flat from uptime 0:58 for the remaining 4 h 50 m** while the DB grew to 192 k torrents; **−0.21 to −0.30 GiB** below the v13-era 1.95–2.04 GiB whole-process figure; 0/0/0 error counters across all 37 samples; `movie_kind.thermal_pauses` 0 and `movie_kind_backfill.thermal_pauses` 0. Warm-restart plateau **unmeasured** — see *Deviations*. |
+| 13 | G6 schema/backup guard | **PASS on the exercised legs** — `tools/rebuild-db-v2.sh --check-schema` exit 0 ("16 statements match"); `CrawlerDbSchemaTest` 13 tests green; `PRAGMA table_info(torrent_class)` **identical** to the `backup/CrawlerDbSchema.kt` replica (15 columns, same names/order/types). Backup/restore round-trip **NOT EXERCISED**. Premise correction in *Deviations*. |
+| 14 | G7 restart persistence | **PARTIAL** — every persistence leg PASS: `.assets_version` `4\|models/v15\|models/v13` identical before the deliberate restart, after it, **and after an unplanned cold boot**; `models/` exactly `{v13, v15}` in all three; v15 model mtimes identical across all three (**no restage**, including across power loss); `/stats` cram/vocab shas and `clf_ver` identical before vs after; `classifier_meta` = `clf_ver` 15, `adult_clf_ver` 15, both cram shas, `adult_hide_threshold` 0.375000; `clf_ver` / `adult_clf_ver` 100 % at 15 over 192,599 rows. **The ingest-resumption leg was SKIPPED** — see *Deviations*. |
+| 15 | G8 movie-kind untouched | **PASS** — `movie_kind` generation **13**, `model_ready` true; backbone `28270fa01100687969b541282814371062ab9e1a560bb7ea755243c822cf0d4c` and head `2f994cbe792441be182717cc6faa46f3ff245db6d17af30d72cfc47bbefb7ae3` char-identical across `/stats`, the v13 manifest and on-device `sha256sum`; **1,947/1,947** adult0-movie rows at `movie_kind_clf_ver` 13 (**0 NULL, 0 other**); masks non-NULL on all 1,947 with real genre bitmasks; v13 files byte-unchanged. |
+| 16 | Record | **PASS** — AGENTS.md's classifier section rewritten for v15 (measured numbers only, accepted costs carried, the serving-side `__adult_*` canonicalisation recorded as a permanent property), patch-list paragraph 24 → **25** with the "26th slot" note, *Tests* 13 targets/14 binaries → **14 targets/15 binaries**, this section added, Status → shipped. |
+
+### Deviations, misses and open items
+
+**G1 — the recorded bar revision (criterion 4).** The original bar was 10,000/10,000 identical `ft` on
+the deterministic seed-15 stratified sample (1,111 tv/anime ≥ 500; 708 rows `files_total > 50` ≥ 200). It
+was **MISSED at 9,710/10,000**: all **290** mismatches were adult-token-only (`__adult_jav` 160,
+`__adult_site` 129, `__adult_set` 3; **0 missing tokens, 0 numeric-field differences**), full corpus
+116,700/120,000 = 2.75 %. Cause: `features.jsonl`
+(sha `e9eec4486e5cf7edaa8c94907340e0f4776035417086ac510c5568ac3084a04d`, rewritten 2026-11-21) carries
+`__adult_*` on only **20 of 270,390** rows while the vendored parser emits them unconditionally. Measured
+verdict impact on the 290 affected rows: category **0/290**, tv_kind **0/290**, adult **1/290**, max
+\|Δadult_p\| **0.0098** — the engine was correct and G2 passed 100 % on the same rows. The operator
+authorised a **serving-side strip** (`cram_strip_adult_tokens()` in `src/cram.c`, called from
+`classifier.c`'s shared CRAM helper after `tp_feature_text` and before `cram_features`), deliberately NOT
+in tparse/`adult_terms.h`/`adult_backfill.c` because `adult_backfill.c`'s own `ab_gate_text()` scans the
+raw text and a tparse-level strip would silently no-op the `--adult-backfill` one-shot. Post-strip:
+**10,000/10,000 exact**; sample ∩ the 20-id corpus set = ∅; full corpus **120,000/120,000** with mismatch
+id set `[]` equal to the intersected id set. The 20-row opposite-direction witness (the corpus *does*
+carry the tokens on those ids) measured 0/20 category, 0/20 tv_kind, 0/20 adult, max \|Δadult_p\|
+**0.00982432**.
+
+**G4 (a) — 21 rows carry `adult_p` marginally above 1.** Values `1.0000000000000002` …
+`1.0000000000000007` (1–3 ULP), all `adult=1`, verdict unaffected and reference-consistent: the adult
+marginal is summed unclamped. Recorded, not fixed (a clamp would be a serving-path change with no verdict
+effect).
+
+**G4 (b) — the spot check MISSED.** Of the 120-name corpus fixture only **3** were present in the live DB
+at 76,695 rows: 1 known-adult tagged `adult=1` at p=0.8383, 2 known-clean untagged at p=0.0008 / 0.0001 —
+**all 3 correct**, but ≥20-per-class is unreachable by live DHT ingest of a fixture drawn from an older
+corpus (extrapolated ≈1.5 M rows for 20 of each). Recorded as a miss with numbers; **no rows were
+injected** and the operator declined a criterion revision.
+
+**G5 — the warm-restart plateau is unmeasured.** The PASS covers the cold-start / grow-with-the-DB path.
+After the deliberate restart the fresh process read **2,006 → 2,181 MB (≈2.13 GiB) in 12 minutes** before
+the phone's battery died; its plateau was **never observed** and the operator instructed that the
+re-measurement be skipped. A warm restart over an already-1.6 GB DB therefore sits closer to the 2.3 GiB
+bar and has no measurement behind it.
+
+**G6 — the premise was wrong and one observation is unexplained.** A destination **is** configured on this
+device (`backup_db_enabled=true`, bucket `dht-backup`, prefix `db`, `backup_last_success_date`
+2026-11-22), so the plan's "clean device, no backup destination" does not hold; the operator confirmed it
+is a separate bucket and instructed no change. The round-trip therefore stays **NOT EXERCISED** — the
+schema guard, the DDL replica and the `PRAGMA` diff are the exercised protection. Recorded verbatim and
+unexplained: `files/backup/db_bookmark.txt` mtime 18:26 with `last_torrent_id=4503 / last_prefix_id=10110`.
+
+**G7 — the ingest-resumption leg was SKIPPED, not passed.** It was skipped at operator instruction (the
+phone was at 2 % battery, charging, crawler stopped), so "ingest resumes with no reclassification" has no
+measurement. Everything else in criterion 14 passed three times, including across an unplanned cold boot.
+
+**G3 — log-corruption caveat.** The crawler log is truncated on relaunch, so the `0 SQLITE_CORRUPT` grep
+covers only the post-restart period. Whole-window corruption evidence rests on `PRAGMA quick_check`
+(ok) plus the zero error counters in all 37 samples, not on the log.
+
+### Corrections to this document
+
+1. **Container nnz is 920,915, not 920,922** (§4 and the plan's Stage 0 item): the export measures
+   920,915 nonzeros; the earlier figure is 7 high.
+2. **The plan's full-corpus expectation of 119,980/120,000 does not hold** (plan assumption 13): those 20
+   corpus adult-token ids appear in **none** of the local record files
+   (`corpus_adult_ids_in_join` = 0), so after the serving-side strip nothing mismatches — measured
+   **120,000/120,000** with mismatch id set `[]`. The assertion is set equality
+   (`mismatch_id_set == sorted(corpus_adult_ids & join_ids)`), so it is strictly stronger than the count
+   it replaced, and one unexpected mismatch still fails the gate.
+3. **The `tests:` aggregate is 14 targets / 15 binaries**, not "all 14 existing targets" (§9's S1 row
+   predates `tests-cram`): the 14 include the new `tests-cram`, with `tests-asan-cram` as its asan wrapper.
+
+**Not claimed anywhere in this section:** no heldout re-read, no retrain/refit, no backfill run (the
+existing paths stay compiled, pinned `off`, unused), no production-DB gate, and no measurement on a warm
+restart.

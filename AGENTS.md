@@ -131,20 +131,23 @@ crawler source root. Native build inputs/outputs land under `app/build/native/`.
 **Movie-kind classifier (v13).** The crawler links a CPU-only llama.cpp (`buildLlama`) and the vendored
 `dht_crawler-android/utf8proc/` (**2.12.0**); the NDK wrapper defines `MK_ENABLED` and
 `MK_NFC_ENABLED` only when `LLAMA_INSTALL` is set, so a plain host configure stays plain C99. Two
-model generations ship side by side: `models/v11` (fastText — see *fastText adult classifier (v11)*
-below) and `models/v13` (same family as v10 — decoder backbone, Q4_0 501,452,416 B / 478.2 MiB, sha256
+model generations ship side by side: `models/v15` (CRAM — see *CRAM classifier (v15)* below) and
+`models/v13` (same family as v10 — decoder backbone, Q4_0 501,452,416 B / 478.2 MiB, sha256
 `28270fa01100687969b541282814371062ab9e1a560bb7ea755243c822cf0d4c`, plus the JEVH head 65,712 B,
 1024×16, sha256 `2f994cbe792441be182717cc6faa46f3ff245db6d17af30d72cfc47bbefb7ae3`, hidden 1024, 16
 labels, prompt `Torrent: {name}\nFilm genres:`, max 64 tokens, staged beside `manifest.json` 17,772 B
 sha256 `e0474643…fb57` — pinned by `movie_kind_model_dir`). `CrawlerConfig.MOVIE_MODEL_SUBDIR =
 "models/v13"` drives the staging source/dest, the stamp and that pin. `ensureAssets` stages both, the
-sweep keeps the active *set* `{v11, v13}` and removes retired dirs, and `.assets_version` is
-`<versionCode>|models/v11|models/v13` — a stamp change is what triggers restaging, no versionCode bump
-required; the stamp is a crawler-level file (`files/crawler/.assets_version`, **not** under `models/`)
-and currently reads `3|models/v11|models/v13`. The staged models total 528,148,052 B (~503.7 MiB —
-`models/v11` 26,612,152 B + `models/v13` 501,535,900 B) and the debug APK measures 542,045,550 B at
-`versionCode` 3 / `versionName` "0.3.0" — ~6.8 MB *smaller* than the 548,821,733 B v10 build because the
-v13 weights deflate differently, despite identical uncompressed asset sizes.
+sweep keeps the active *set* `{v15, v13}` and removes retired dirs (the v15 install swept `v11`), and
+`.assets_version` is `<versionCode>|models/v15|models/v13` — a stamp change is what triggers restaging, no
+versionCode bump required; the stamp is a crawler-level file (`files/crawler/.assets_version`, **not** under
+`models/`) and currently reads `4|models/v15|models/v13`. The staged models total 512,972,090 B (~489.2 MiB
+— `models/v15` 11,436,190 B + `models/v13` 501,535,900 B) and the installed debug APK measures 540,330,690 B
+at `versionCode` 4 / `versionName` "0.4.0" — 1,714,860 B smaller than the 0.3.0 build's 542,045,550 B, the
+net of dropping the three fastText `.ftz` students (26,612,152 B) for the CRAM pair (11,436,190 B):
+−15,175,962 B of staged assets, −1.7 MB of APK. (For the record the 0.3.0 build was itself ~6.8 MB smaller
+than the 548,821,733 B v10 build because the v13 weights deflate differently, despite identical uncompressed
+asset sizes.)
 Generation is manifest-derived: the manifest's top-level `"version": "v13"` (`mk_parse_generation`)
 yields `movie_kind_clf_ver` 13 and `/stats movie_kind.generation` 13 with **no code change**; `genres[]`
 order is byte-identical to v10 and `taxonomy.sha256` is unchanged at
@@ -168,8 +171,8 @@ while `request_shutdown`/`destroy` stay and are no-op-safe when never started; t
 movie_kind_backfill` block stay compiled, so that block reads `idle`/disabled permanently and the
 dashboard panel is left as-is on purpose.
 `/stats` carries `movie_kind` (enabled/status/rows/model shas) and `movie_kind_backfill`
-(state/rows_processed/rows_total/failures/thermal_pauses) beside the unchanged fastText
-`classifier`/`classifier_backfill`. The `movie-kind-bench` maintenance action runs
+(state/rows_processed/rows_total/failures/thermal_pauses) beside the `classifier` (CRAM since v15) and
+`classifier_backfill` blocks. The `movie-kind-bench` maintenance action runs
 `--movie-kind-bench data/torrents.db` (every maintenance action stops the supervised crawler first);
 the reset one-shot is `--movie-kind-backfill <db> --reset` with the app force-stopped. G6 bars are
 median ≤ 300 ms, p95 ≤ 600 ms, peak RSS ≤ 1.2 GiB and the 478.2 MiB backbone file.
@@ -205,92 +208,255 @@ upstream, not waived), `classify_backfill_mode` pinned `off`, the backfill daemo
 production, and the movie-kind backfill reachable only as a force-stopped one-shot.
 **Rollback history:** `models/v10` survives only in git as reinstall-rollback history — reinstalling the
 0.2.0 APK restages v10, and masks are bit-compatible so 13-labelled rows stay readable. The device's
-`files/crawler/models/` now holds only `v11` and `v13`.
+`files/crawler/models/` now holds only `v15` and `v13` (`v11` was swept at the v15 install).
 
-**fastText adult classifier (v11).** `classifier_model_dir` pins `models/v11` (`CrawlerConfig.MODELS_SUBDIR`);
-`models/v6` is retired and survives only as rollback history (reinstalling the 0.1.0 APK restages it — G8
-in `plan/adult-v11-integration.md`). Staged files and shas:
+**CRAM classifier (v15).** `classifier_model_dir` pins `models/v15` (`CrawlerConfig.MODELS_SUBDIR`);
+`models/v11` — the three fastText `.ftz` students — is retired and survives only as rollback history
+(reinstalling the 0.3.0 APK restages it and `ClassifierModelVersionMigration` resets the persisted
+threshold to 0.545726; rows already stamped `clf_ver`/`adult_clf_ver` 15 stay readable, because they are
+plain integers in unchanged columns and the v11 code does not interpret the generation). **One engine
+scores all three fields**: a single CRAM forward pass over the wide design decides `category` (masked
+48-state argmin), `tv_kind` (the standalone `kind_W` head) and `adult` (the joint's adult marginal) at
+ingest. **No `.ftz` file ships, no ftc model is loaded, and there is no fastText fallback**; the
+`dht_crawler-android` wrapper still links ftc/fastText, and removing that build wiring is optional
+cleanup. Staged files and shas (`app/src/main/cpp/dht_crawler-android/models/v15/`):
 
 | file | bytes | sha256 |
 |---|---:|---|
-| `adult.ftz` | 8,863,323 | `7b8a3272642133dbf56b0a44d78dedfdc28a1a63b2800c96ab3cc8923d0f9412` |
-| `category.ftz` | 8,857,514 | `2d4dcd7c6c4cc50dd078667872985fe1ce58d2a56dd9103828b700e4b6dd9271` |
-| `tv_kind.ftz` | 8,883,074 | `35c0ac36f50ef4e2950bc8189990faf9759f3c1ed1e28278bc07cce1cfa13440` |
-| `manifest.json` | 8,241 | `481e737905f2cf7eafe353229329d67ced60c4ffa946eb1ea34440f06d3092aa` |
+| `cram.bin` | 9,388,835 | `834159b642d67da728bbdc3411badf83b639742743c95d414fc62ddd81e45bec` |
+| `cram_vocab.bin` | 2,046,524 | `6e24c4b27e3bd546a7dad0cb9a929dc7f354e664139604f0bb75f3ca1cf21cee` |
+| `manifest.json` | 831 | `59e39d3f85db21e015d94ffd7f5b055d0b593f69c238ac18f39c30bf50d53e55` |
 
-`adult_hide_threshold` **0.545726** and `adult_drop_threshold` **0.949021** ride the manifest:
-`src/classifier.c` prefers `thresholds.*` from `models/v11/manifest.json` over `config.ini`, which is why
-the manifest is staged with the `.ftz` files. `AppConfig.adultHideThreshold` carries the same 0.545726
-default, and the Stage-12 `ClassifierModelVersionMigration` resets the persisted value on a generation
-change, so a model bump cannot leave a stale operating point behind.
+All three come from `~/apps/cram/tvkind/data/clean_v3/heads_per_field_v2.npz` (4,909,615 B, sha256
+`1cad6d9f9ddfd4afd72338288d12dda6855dceda4cb531d5417b9ee22406fff2`) via `scripts/cram_export.py`
+(cram workspace commit `e6ce723`); the export converts and proves bit-identity, it never refits.
 
-The parser copy (`dht_crawler-android/tparse/`, resynced from classifier-model) emits the `__adult_jav`,
-`__adult_site` and `__adult_set` feature tokens from `tparse/adult_terms.h`. That header is **generated**
-(`uv run cm gen-header` in the model repo, guarded there by a committed-parity test) — never hand-edit it.
+**Container geometry.** `cram.bin` is a little-endian CSR with no padding: header (magic `CRAM`, format
+version, `ncols` **1,195,982**, 28 output columns, rowptr), feature-row-major entries of
+`(uint8 col, float32 weight)` — 5 B each — for the **920,915** nonzeros, 28 biases, the 48-state
+`(cat_idx, kind_idx, adult_idx)` table and T = **0.7629844484210975**. The columns are **147,406** named
+(structs 1,315 / words 48,757 / bigrams 97,334) plus a **1,048,576**-bucket char tail, which is the
+1,195,982 total; the design doc's "920,922" nnz is 7 high and is corrected here. `cram_vocab.bin` is the
+same three sorted string lists as an offset table + UTF-8 blob (UTF-8 byte order == Python codepoint
+order, so C `strcmp` bsearch reproduces dict membership). G0 proved both: dense reconstruction
+bit-identical to **all 11** npz arrays (0 mismatches), val reload category **1,846**/19,913 (delta 0),
+`val_all` kind **177**/3,999 and **57**/817 (delta 0), val ECE at T **0.022218**; vocab witnesses train
+nnz **26,628,710** / val nnz **3,289,873** against the container's 920,915. Heldout was never read.
 
-`torrent_class.adult_clf_ver` records which adult student produced `adult`/`adult_p`: **NULL = never
-adult-backfilled** (a v6-era verdict), **11 = scored by v11**. `clf_ver` keeps its old meaning
-(category/tv_kind generation) and stays 6 on backfilled rows, so the mixed generations are explicit rather
-than mislabelled. The full `clf_ver` 11 reclassify is deliberately **not** run this release.
+**The 48-state masked argmin is the category model.** `cram_predict()` accumulates energies in `double`
+and takes `category` from the masked argmin over the 48 `(cat, kind, adult)` states, **first minimum
+wins**; `confidence` is that state's category marginal of `softmax(−E_state/T)`. The bare category unary
+(argmin over `cat_Wc` alone) is **~9 pp worse** (0.8150 vs 0.9085 upstream) and must never ship —
+`tests-cram` pins the gap on the fixture rows where the two disagree. `E` is a **cost**: `P =
+softmax(−E)`, answer = argmin, `adult_p` high = adult.
 
-The token-gated pass is crawler patch 16: `--adult-backfill <db> [--write] [--adult-backfill-limit <n>]`.
-It re-scores only rows whose name fires an `__adult_*` token, re-checks the file list for the rows that
-pass, and (with `--write`) sets `adult`/`adult_p`/`adult_clf_ver` = 11; without `--write` it walks the same
-gate and writes nothing. On the phone the only way to run it is the dashboard maintenance action
-`POST /crawler/maintenance/adult-backfill` (`MaintenanceAction.ADULT_BACKFILL`, space-gated), which stops
-the supervised crawler, runs the one-shot and restarts it; the terminal `[MPROG]` counters
-(`total/gated_out/scored/updated/failed`) are folded into the maintenance status `message`.
+**Adult is the raw marginal at 0.375.** `adult_p` is the adult marginal of `softmax(−E_state)` with **no
+temperature** — T was fitted for the category confidence only, and applying it to adult would silently
+move the threshold's meaning. `adult = adult_p >= adult_hide_threshold`, and **tag boundary == drop
+boundary**: the v15 manifest omits `adult_drop_threshold`, `classifier.c` stops reading it, and `/stats`
+keeps the key mirroring the effective `adult_hide_threshold` for shape stability (no Kotlin consumer;
+`CrawlerConfig.VESTIGIAL_KEYS` keeps purging it). 0.375 is the measured **recall-0.90** point of the CRAM
+adult marginal on 19,941 heldout rows (base rate 17.65 %, 3,519 positive: precision 0.848, 566 false
+positives, 352 missed) and no fastText-calibrated value (0.545726, 0.898355, 0.917039) means anything on
+this scale. It rides four places that must agree — `config.ini` (config beats manifest),
+`models/v15/manifest.json`, `config.ini.default` and `AppConfig.adultHideThreshold` — with the C
+compiled-in default 0.917039 left as the unreachable last resort.
 
-`classify_backfill_mode` is pinned **`off`** (`CrawlerConfig` write + `CrawlerKeys` allow-list; operator
-decision), so the crawler's own backfill daemon never starts a pass at launch. The C default stays `all`
-and the daemon's `adult` branch (auto-run the gated pass) is implemented and host-tested but unpinned —
-flipping the pin is a one-line config change. With `off` the daemon publishes state **`disabled`**, not
-`idle`, and never polls.
+**The 50-file cap is a serving contract, not an optimisation.** Training features are first-50-file
+features (the `__nfiles_50` spike is the witness), so `classifier_classify()` caps `n_files` at 50
+**before** the `tp_file_t` malloc and before `tp_parse`; the full list still goes to the DB and to
+movie_kind — the cap is local to the classify call. Serving the full list silently shifts the
+file-evidence tokens. `/stats cram.file_cap` publishes 50, and `classifier.file_cap_hits` /
+`classifier.cram_feature_cap_hits` count the capped calls.
 
-`/stats` gains `classifier.clf_ver`, `classifier.adult_drop_threshold` and
-`classifier.model_sha256_{adult,category,tv_kind}` beside the existing threshold/counter fields, plus an
-`adult_backfill` object: `state`, `target_adult_clf_ver`, `rows_total`, `rows_gated_out`, `rows_scored`,
-`rows_updated`, `rows_failed`, `last_id`, `started_at`, `finished_at`, `last_error`.
+**The serving path strips `__adult_*` — a permanent shipped property.** The vendored parser
+(`dht_crawler-android/tparse/`, resynced from classifier-model) emits `__adult_jav`, `__adult_site` and
+`__adult_set` from `tparse/adult_terms.h` **unconditionally**, while the frozen model was trained on
+`features.jsonl` (sha `e9eec4486e5cf7edaa8c94907340e0f4776035417086ac510c5568ac3084a04d`, rewritten
+2026-11-21) that carries those tokens on only **20 of 270,390** rows. `cram_strip_adult_tokens(char *ft)`
+(`src/cram.c`, pure C99, in-place, no allocation, idempotent) removes every whitespace-delimited token
+beginning `__adult_` together with exactly one adjacent separator; `src/classifier.c`'s shared CRAM
+helper calls it **after `tp_feature_text` and before `cram_features`**, on the path shared by
+`classifier_classify()` and `classifier_classify_adult()`. It is deliberately **not** in
+`tparse/adult_terms.h` (a generated header — `uv run cm gen-header`, never hand-edited — and a resync
+drift surface) and **not** in `src/adult_backfill.c`: that file's own `ab_gate_text()` renders and scans
+the *raw* feature text, so a parser-level strip would gate out every row and silently no-op the
+`--adult-backfill` one-shot. Cost: one extra O(n) pass over the ≤8,192-byte feature buffer per classify.
 
-**Measured on the reference device (v11 rollout, 965,230-row corpus, threshold 0.545726).** G1 parser
-parity 10,000/10,000 identical feature texts (quotas jav 259 / site 243 / set 200 / none 9,306 against a
-200 bar; the negative control — the pre-Stage-1 parser — differs on 694 of 10,000 rows, `__adult_*` tokens
-only, host side only, so the harness does detect the drift). G2 500/500 label agreement, max |Δadult_p|
-0.000000. G3 **the pre-registered 2,886–24,049 (0.3–2.5 %) band was MISSED**: the pre-write dry run gated
-in 24,435 of 961,969 = 2.5401 %, 386 rows (1.6 %) over the ceiling, and the band was re-derived to
-1.0–8.0 % under operator authorisation once the cause was established as corpus composition, not token
-over-fire (identical parser and lists fire 0.7352 % on `~/torrents.db`'s 6,015,586 rows vs 2.5328 % on the
-950,993-row device corpus, driven by `__adult_site` at 9.3×; 25/25 sampled `__adult_site` matches are
-genuine curated adult studios; R3 re-curation was rejected). The actual write measured 24,528 = 2.5411 %,
-inside the re-derived band. G4 0 of 200 untouched rows differing, 0 of 24,435 backfilled rows changing
-`category`/`tv_kind`/`clf_ver`, `clf_ver` = 6 AND `adult_clf_ver` = 11 = 24,528 = the run's `updated`,
-`adult_clf_ver IS NULL` = 940,702 = its `gated_out`. G5 duration ~2.5 min for 965,230 scanned / 24,528
-scored (bar ≤ 30 min) but peak RSS **VmHWM 1,832,772 kB ≈ 1.75 GiB against a 300 MiB bar — MISS** (likely
-the on-device movie_kind backbone plus the 8.2 GB DB page cache, i.e. the bar was set for a model-free
-host measurement — not proven); no crawler restart, `/stats` stayed 200. G6/D1 PASS: catch 99.00 %
-(396/400) against ≥ 60 %, 0 flips against ≤ 2, paired v6 recall 98.50 % with 6 rows caught that v6 missed
-and 0 lost. G7 movie_kind untouched: generation 10, hidden 1024, backbone `02555750…`, head `077aaf11…`,
-`model_ready` true, `movie_kind_backfill` idle with `rows_processed` 0. Restart persistence clean: model-dir
-mtimes and `.assets_version` (`2|models/v11|models/v10`) identical after force-stop + relaunch (no
-restage), `clf_ver` 11, `classifier_backfill` `disabled`, `adult_backfill` idle with no re-run.
+**G1 recorded a bar revision, not a silent pass.** The original bar was 10,000/10,000 identical `ft`
+between the app's tparse CLI (50-file cap applied) and `features.jsonl`, on a deterministic seed-15
+stratified sample (1,111 tv/anime ≥ 500; 708 rows `files_total > 50` ≥ 200). It was **MISSED at
+9,710/10,000**: every one of the 290 mismatches was adult-token-only (`__adult_jav` 160, `__adult_site`
+129, `__adult_set` 3; **0 missing tokens, 0 numeric-field differences**), full corpus 116,700/120,000 =
+2.75 %. Measured verdict impact on those 290 rows: category **0/290**, tv_kind **0/290**, adult
+**1/290**, max |Δadult_p| **0.0098** — the engine was right (G2 passed 100 % on the same rows) and the
+drift was corpus vintage. The operator authorised the serving-side strip (a recorded decision, not a
+waived bar). Post-strip: **10,000/10,000 exact**, sample ∩ the 20-id corpus set = ∅, and full corpus
+**120,000/120,000 with mismatch id set `[]`** — the design doc's "119,980/120,000" was a planner
+inference that does not hold, because those 20 ids appear in none of the local record files
+(`corpus_adult_ids_in_join` = 0), so the assertion is set equality and is strictly stronger. The
+opposite direction is witnessed separately: on the 20 rows the corpus *does* carry tokens for, 0/20
+category, 0/20 tv_kind, 0/20 adult, max |Δadult_p| **0.00982432**.
 
-**D1's coverage bound.** The 500-row D1 sample was ~80 % backfilled rows, so 99 % catch measures the
-*fidelity of the write*, not the reach of the backfill. An unbiased 20,000-row random sample scores 19.14 %
-reference-adult (3,828/20,000 — ~184,745 adult rows in the 965,230-row DB) and the token gate selected
-24,528 of them, i.e. **≈ 13.3 % coverage**; the remaining ~87 % of adult rows keep their v6-era labels.
-That is the bound on what this pass achieves, and the full `clf_ver` 11 reclassify that would cover them is
-deliberately not run in this release.
+**The degraded contract is all-or-nothing.** A missing manifest, or a `cram.bin`/`cram_vocab.bin` that is
+missing, sha-mismatched or malformed, fails `cram_load()` non-fatally: one event increments both
+`classifier.model_load_failures` and `cram.load_failures`, and there is **no partial state** — no
+one-field fallback. `classifier_classify()` then returns 0 with `category` = the parser hint, `tv_kind`
+= the parser kind, `adult` 0 / `adult_p` 0.0, `clf_ver` 0, `parser_only_fallback++`.
+`classifier_models_loaded()` means "CRAM loaded and usable"; `classifier_current_version()` returns 15.
+`tests-cram` covers the engine and the loader failure modes; the `CLF_ENABLED` half of `classifier.c` is
+**not** host-covered (no such test flavour exists, and adding a seam was out of scope) — it is verified
+by the arm64 cross-build, the G2 device leg and G3's zero `parser_only_fallback`.
 
-**Classifier traps (each cost time on the v11 rollout).**
-- The host CLF binary's `config.ini` default `adult_hide_threshold` (**0.917039**, `src/config.c`) beats
-  the manifest (0.545726) — config > manifest. Any host scoring run must set it explicitly; the device is
-  protected by `ClassifierModelVersionMigration`, the host is not.
+**Single generation: `clf_ver` == `adult_clf_ver` == 15.** Both columns carry the same CRAM generation;
+`clf_ver` is no longer "category/tv_kind generation only", because adult really is the same engine now.
+`classifier_write_meta()` writes `clf_ver` 15, **`adult_clf_ver` 15** (a new `clf_meta_put` call it did
+not make in the fastText era) and both container shas, gated on `manifest_ok`, so a degraded device
+records no meta row rather than claiming a generation it did not run. `classifier_current_version()`
+returning 15 makes both backfills auto-retarget, and on a v15 DB the `tc.adult_clf_ver < ?` predicate
+makes a manual `--adult-backfill --write` a no-op on already-15 rows.
+
+`/stats classifier` keeps `enabled`, `adult_mode`, `adult_hide_threshold`, `clf_ver`,
+`adult_drop_threshold`, `total_classified`, `mean_us_per_item`, `adult_tagged`, `adult_dropped`,
+`hard_block_dropped`, `parser_only_fallback`, `model_load_failures`, `tv_kind_model_used` (same key, new
+meaning: "the kind head was consulted"), `file_cap_hits`, `by_category` and the `adult_backfill` object
+(`state`, `target_adult_clf_ver`, `rows_total`, `rows_gated_out`, `rows_scored`, `rows_updated`,
+`rows_failed`, `last_id`, `started_at`, `finished_at`, `last_error`); it **replaces**
+`model_sha256_{adult,category,tv_kind}` with `cram_sha256` + `cram_vocab_sha256` and adds
+`cram_adult_tagged_predictions`, `cram_feature_cap_hits` and a `cram` sub-object `{enabled, generation,
+temperature, rows_predicted, load_failures, kind_head_used, file_cap}`. `generation` is the model version
+the rows carry, deliberately **not** the manifest's container generation (2).
+
+**Dashboard.** The crawler card gained a CRAM line under the "N torrents, N active trees, X metadata/s"
+line — `CRAM v15 (sha 834159b642d6): N predicted, 0 load failures` — rendered from
+`classifier.cram_sha256` + the `cram` object by `ControlServer.cramStatsLine()`, which returns null when
+the body does not parse, carries no `classifier.cram` object, or reports `enabled` false (the card then
+keeps its previous line, the `crawlerBackfillLine` contract). It is cached in `refreshCrawlerStats` and
+pushed over the WS frame key `cramStatsLine`; the pinned-string test lives in `ControlServerHelpersTest`
+(39 tests green). Measured on the phone: server-rendered row
+`<span class="k">Classifier</span>… data-field="cramStatsLine"`, updating live.
+
+`classify_backfill_mode` stays pinned **`off`** (`CrawlerConfig` write + `CrawlerKeys` allow-list;
+operator decision), so the crawler's own backfill daemon never starts a pass at launch and publishes
+state **`disabled`**, not `idle`. The C default stays `all` and the daemon's `adult` branch (auto-run the
+gated pass) is implemented and host-tested but unpinned — flipping the pin is a one-line config change.
+The token-gated adult one-shot (crawler patch 16, `--adult-backfill <db> [--write]
+[--adult-backfill-limit <n>]`, dashboard action `POST /crawler/maintenance/adult-backfill`,
+`MaintenanceAction.ADULT_BACKFILL`, space-gated, stops the supervised crawler and restarts it) is
+**CRAM-backed now**: `classifier_classify_adult()` was rewired onto the same capped-50 → tparse → strip →
+`cram_features` → `cram_predict` path, so a manual `--write` labels gated rows with the CRAM adult
+marginal and stamps `adult_clf_ver` 15 instead of relabelling them `adult=0` (the defect a
+fastText-shaped one-shot would have on a model-free device). `adult_backfill.c` and `classify_backfill*.c`
+are otherwise byte-identical, and the `__adult_*` gate still scans the raw feature text.
+
+**Measured on the clean install (device b93dac74, empty DB, live DHT ingest only, versionCode 4).** G2
+device leg — 600 rows pulled from the live DB: **100 % / 100 % / 100 %** category/tv_kind/adult against
+the host reference, max |Δadult_p| **1.221e-15**; the three-way check (host x86 C harness vs arm64 DB
+verdicts) is **600/600 with |Δadult_p| = 0.000e+00** — bit-identical float64; the ungated raw kind head
+would match only **225/600 = 37.5 %**, so the caller's "concrete kind ⇒ tv/anime" gate is demonstrably
+live; 10 rows sit in [0.375, 0.5) so the operating point is exercised; diversity 11/12 categories, 5
+concrete kinds, adult 126/474 = 21.0 % (DB-wide 21.8 %). G2 host: 10,000/10,000 on each field (bar
+≥ 99.9 %), max |Δadult_p| 1.443e-15, max |Δconfidence| 1.554e-15, **max |ΔE| over all 48 states = 0.0**,
+0 mismatches, diversity 12 categories / 6 kinds / both adult values. G3 — **6 h 08 m**, 37 samples,
+**192,599** stored rows (38× the 5,000 bar): `clf_ver` **15 on all 192,599**, `adult_clf_ver` **15 on all
+192,599**, top category movie **39.66 %** (bar < 60 %), 12 categories present, **0 rows** with a concrete
+`tv_kind` outside tv/anime, and `classifier.enabled` true, `cram.enabled` true, `cram.load_failures` 0,
+`parser_only_fallback` 0, `model_load_failures` 0 in **every** sample; `PRAGMA quick_check` ok on the
+1,642,405,888 B checkpointed DB. *Caveat:* the crawler log is truncated on relaunch, so the
+`0 SQLITE_CORRUPT` grep covers only the post-restart period — whole-window corruption evidence rests on
+`quick_check` plus the zero error counters.
+
+G4 — threshold **0.375 in all four places** (`/stats`, device `config.ini`, `models/v15/manifest.json`,
+`config.ini.default`); `adult_p` min 6.23e-08, max 0.99999999999999867; boundary consistency
+`adult=1 ⟺ adult_p ≥ 0.375` with **0 violations**; live tag rate **21.89 %** (42,161/192,599) reported
+beside the heldout anchor (base 17.65 %, recall 0.90 / precision 0.848 at 0.375). **Two recorded
+deviations:** (a) **21 rows carry `adult_p` marginally above 1** — 1.0000000000000002 to
+1.0000000000000007, 1–3 ULP, all `adult=1`, verdict unaffected and reference-consistent (the marginal is
+summed unclamped); (b) the **spot check MISSED** — of the 120-name corpus fixture only **3** were present
+in the live DB at 76,695 rows (1 known-adult tagged p=0.8383, 2 known-clean untagged p=0.0008 / 0.0001,
+**all 3 correct**), because ≥20-per-class is unreachable by live DHT ingest of a fixture built from an
+older corpus (extrapolation ≈1.5 M rows). Recorded as a miss with numbers; no rows were injected and the
+operator declined a criterion revision.
+
+G5 — window mean **2.853 ms/item** (Δ540,079,636 µs / 189,281 items; every 10-min interval 2.05–3.52 ms)
+against the 10 ms bar, lifetime mean 2.848 ms at window end; peak crawler `VmHWM` **1,822,308 kB = 1.7379
+GiB** against the 2.3 GiB bar, **flat from uptime 0:58 for the remaining 4 h 50 m** while the DB grew to
+192 k torrents — **−0.21 to −0.30 GiB lower** than the v13-era 1.95–2.04 GiB whole-process figure;
+0/0/0 error counters across all 37 samples; `movie_kind.thermal_pauses` 0 and
+`movie_kind_backfill.thermal_pauses` 0. **Open item, recorded honestly:** after the deliberate restart the
+fresh process read **2,006 → 2,181 MB (≈2.13 GiB) in 12 minutes** before the phone's battery died; its
+plateau was **never observed**, and the operator instructed that the re-measurement be skipped. So the G5
+PASS covers the cold-start / grow-with-the-DB path — a warm restart over an already-1.6 GB DB sits closer
+to the bar and is **unmeasured**.
+
+G6 — `tools/rebuild-db-v2.sh --check-schema` exit 0 ("16 statements match"); `CrawlerDbSchemaTest` 13
+tests green; `PRAGMA table_info(torrent_class)` **identical** to the `backup/CrawlerDbSchema.kt` replica
+(15 columns, same names/order/types); the backup/restore round-trip was **not exercised**. **Premise
+corrected:** a destination *is* configured on this device (`backup_db_enabled=true`, bucket `dht-backup`,
+prefix `db`, `backup_last_success_date` 2026-11-22) — the plan's "clean device, no backup destination"
+does not hold; the operator confirmed it is a separate bucket and instructed no change. Unexplained
+observation recorded verbatim: `files/backup/db_bookmark.txt` mtime 18:26 with `last_torrent_id=4503 /
+last_prefix_id=10110`.
+
+G7 — **PARTIAL.** Every persistence leg PASSes: `.assets_version` `4|models/v15|models/v13` identical
+before the deliberate restart, after it, **and after an unplanned cold boot**; `models/` exactly
+`{v13, v15}` in all three; v15 model mtimes identical across all three (**no restage**, including across
+power loss); `/stats` cram/vocab shas and `clf_ver` identical before vs after; `classifier_meta` =
+`clf_ver` 15, `adult_clf_ver` 15, both cram shas, `adult_hide_threshold` 0.375000; `clf_ver` /
+`adult_clf_ver` 100 % at 15 over 192,599 rows. **The ingest-resumption leg was SKIPPED** at operator
+instruction (the phone was at 2 % battery, charging, crawler stopped) — skipped/unmeasured, not passed.
+
+G8 — `movie_kind` generation **13**, `model_ready` true; backbone
+`28270fa01100687969b541282814371062ab9e1a560bb7ea755243c822cf0d4c` and head
+`2f994cbe792441be182717cc6faa46f3ff245db6d17af30d72cfc47bbefb7ae3` char-identical across `/stats`, the
+v13 manifest and on-device `sha256sum`; **1,947/1,947** adult0-movie rows at `movie_kind_clf_ver` 13
+(**0 NULL, 0 other**); masks non-NULL on all 1,947 with real genre bitmasks; v13 files byte-unchanged.
+
+**Device state after the v15 rollout:** 192,599 torrents / 14,704,427 files, DB 1,642,405,888 B,
+`versionCode` 4 / `versionName` "0.4.0", installed APK 540,330,690 B, `files/crawler/models/` = {v15,
+v13}, `.assets_version` = `4|models/v15|models/v13`.
+
+**Accepted costs (design §1 — carried, not waived).** tv_kind v1 heldout drift **+2.73 pp**, and v2 is
+**val-validated only** (its heldout analogue is an extrapolation, never a measurement); val ECE
+**0.0222 > the 0.02 bar** (heldout 0.0178 passes; the criterion never named a split);
+`decided_conflict` rows (parser hint contradicts teacher) are **~90 % error by construction** and were
+never a ship target; the no-gate tv_kind architecture **pays 15 errors on the 2,688 `decided_agree` val
+rows** and buys back 94 conflict-row + 28 undecided-row errors; the shipped adult point **misses ~10 % of
+adult rows** (352/3,519 heldout) and **flags 566 clean rows (2.8 %)** — in `adult_mode=drop` those are
+deleted, in `tag` (the default) they are hidden; and the research stage-0 dump's `v14_adult_prob` column
+is **inverted** (P(adult=0) or swapped columns) — the shipped model is unaffected (it trained on hard
+`teacher_adult` labels) and nothing in the app consumes that dump.
+
+**Do not retry (measured negatives upstream):** context/sibling features (no transfer on the wide space),
+the 84-weight pairwise block, distillation at inference (teacher absent), energy-margin abstain,
+proximal-L1 sparsity, Adam on this space.
+
+**CRAM traps (each cost time on the v15 rollout).**
+- **Energy sign.** `P = softmax(−E)`, answer = argmin; two independent sign bugs upstream. `adult_p` high
+  = adult — an inverted adult read is exactly the `v14_adult_prob` defect, and G2's both-adult-values
+  diversity check is its witness.
+- **config > manifest for the threshold.** The template and the Kotlin default must move to 0.375 together
+  with the manifest, or the device keeps a stale operating point (`ClassifierModelVersionMigration`
+  protects the device on a generation change; the host is not protected).
+- **The npz is not the container.** 4.69 MB compressed ≠ 133.9 MB dense ≠ 3.51 MB nonzeros; the shipped
+  CSR is ~9.4 MB. All four are distinct quantities.
+- **`kind_W`/`kind_b` is the shipped tv_kind head; `cat_Wk` is the kind unary inside the joint energy.**
+  Swapping them silently degrades both fields.
+- **crc32 (polynomial 0xEDB88320), `<token>` markers included, UTF-8 bytes** — Python's salted `hash()`
+  would differ per process.
+- **Train-only vocab, frozen lists.** Rebuilding the sorted df≥2 lists from any other population is a
+  vocab leak and a different model.
+- **Empty feature rows are legal in C** (bias-only energies); the Python `Csr` empty-row hard-fail is a
+  reference-side asymmetry, not a serving rule.
+- **Never refit.** `heads`/`kindfit` are unseeded and heldout is spent; the export only converts and
+  proves bit-identity.
 - `classifier_enabled` / `movie_kind_enabled` are parsed with `atoi`, so `= true` means 0 (off). Use `= 1`.
-- `make clf-backfill` takes `-I` from the app's tparse copy but `TPARSE_LIB` from the model repo's prebuilt
-  archive — override `TPARSE_LIB` or you measure the wrong parser.
+- `log_level = DEBUG` writes ~1.9 GB/h — INFO for every device gate.
+- `make clf-backfill` takes `-I` from the app's tparse copy but `TPARSE_LIB` from the model repo's
+  prebuilt archive — override `TPARSE_LIB` or you measure the wrong parser.
 - Adding a `torrent_class` column means five places in the C tree plus the Kotlin mirror — see invariant 14.
 
-**dht_crawler patches (order is fixed, applied by `prepareDhtCrawlerSrc`):** the 24-entry list in
+**dht_crawler patches (order is fixed, applied by `prepareDhtCrawlerSrc`):** the 25-entry list in
 `app/build.gradle.kts` opens with the three upstream fixes — `bencode-cap-fix.patch` →
 `bencode-init-fix.patch` → `civetweb-stop-flag-atomic.patch` — and closes with
 `movie-kind-v10-streaming.patch` (last-token pooling + inline ingest classification),
@@ -309,13 +475,21 @@ connect-failure memory — `src/meta_peer_fail.c` + `include/meta_peer_fail.h`, 
 `make tests-meta-peer-fail`), `meta-peer-fail-capacity.patch` (22nd: the capacity corrective, 8192 →
 131,072 slots — constant + comments only, no behaviour change), `bep51-funnel-stats.patch` (23rd: the BEP51 query + dedup-funnel counters — per-tree `trees[].bep51` and
 summed `supervisor.bep51`, counters only, no behaviour change and no config key) and
-`shutdown-abort-metadata-fetch.patch` (24th and last: `tree_fetch_metadata_parallel()` breaks when
+`shutdown-abort-metadata-fetch.patch` (24th: `tree_fetch_metadata_parallel()` breaks when
 `shutdown_reason` is `SHUTDOWN_REASON_SUPERVISOR` — the metadata workers only re-check the stop *between*
 fetches and `thread_tree_destroy()` joins them unbounded, so one in-flight 60 s attempt held every crawler
 stop (settings apply, app exit, maintenance one-shot) for the whole metadata deadline; the same hunk makes
 that deadline monotonic-ms instead of `time(NULL)` seconds, whose `difftime > timeout/1000` test could
 overrun to 61 s and cross the app's SIGTERM grace. `SHUTDOWN_REASON_RATE_BASED` respawns are excluded by
-the reason gate, and no counter, key or `/stats` field changes); new patches go LAST, as the 25th slot.
+the reason gate, and no counter, key or `/stats` field changes) and
+`cram-category-tvkind.patch` (25th and last: the whole CRAM v15 single-engine integration — new
+`src/cram.c` + `include/cram.h` (container loader with sha verification, the feature/CSR build,
+`cram_predict`'s masked 48-state argmin + raw adult marginal, `cram_strip_adult_tokens`), new
+`tests/test_cram.c` + the `tests-cram` / `tests-asan-cram` Makefile targets, the `src/classifier.c`
+rewire (fastText/ftc removed, 50-file cap, adult rewire onto CRAM, all-or-nothing degraded path,
+`adult_clf_ver` 15 in `classifier_write_meta()`), the `classifier_stats_t` + `src/http_api.c` `/stats`
+shape (`cram_sha256`/`cram_vocab_sha256` + the `cram` sub-object), and the compiled-in
+`classifier_model_dir` default in `src/config.c`); new patches go LAST, as the 26th slot.
 Upstream fixes belong in `patches/`.
 See the vendored repo's `CLAUDE.md` for its architecture (thread trees, bloom filters, schema) and its
 `CONFIG_INI.md` for the patch-19/21 config keys and the patch-20/22 `/stats` blocks.
@@ -420,8 +594,10 @@ counters. The four gates are mutually exclusive, so per window
 effects); `tools/crawler/gp_probe.py` reads both blocks (`BEP51_KEYS`, `_bep51_norm()`, three table rows) and
 prints the identity gap, so a blank funnel column is impossible. No host test: `thread_tree.c` /
 `http_api.c` have no harness and the change is additive atomic increments plus cJSON emission — it is
-validated on device by key presence and the accounting identity, and the 13 `tests:` targets (14 binaries)
-all pass with no existing target changed.
+validated on device by key presence and the accounting identity, and the 14 `tests:` targets (15 binaries)
+all pass with no existing target changed — `tests-cram` and `tests-asan-cram` (patch 25's CRAM engine and
+loader failure modes) are the additions; the `tests:` aggregate now lists 14 targets and the `.PHONY` line
+carries the two new names.
 
 **Measured on this run — seven 30-minute windows (2026-11-17, 64 trees / get_peers 18 / BEP51 3 /
 metadata 10 workers, pp 2, pps cap 3000, `log_level=INFO`; full record `plan/getpeers-metadata-results.md`).**
