@@ -1,0 +1,270 @@
+{
+  "g1": {
+    "bar": "10000/10000 identical ft strings",
+    "cli": {
+      "binary": "/home/adam/apps/torrent_kotlin_app/tools/cram-parity/build/tparse",
+      "sha256": "bbb0cbe574009b9a64b233724ea861301ca918aaa7b012aead5dc77eac133b63",
+      "sources": "app/src/main/cpp/dht_crawler-android/tparse/ + classifier-model native/tparse/cli.c"
+    },
+    "comparison": {
+      "dump": "tools/cram-parity/results/g1_mismatches.dump",
+      "extra_tokens": {
+        "__adult_jav": 160,
+        "__adult_set": 3,
+        "__adult_site": 129
+      },
+      "ft_identical": 9710,
+      "ft_mismatched": 290,
+      "mismatch_ids": [
+        24700,
+        60742,
+        108699,
+        192517,
+        336742,
+        596675,
+        605245,
+        843944,
+        907491,
+        1191201,
+        1284961,
+        1309453,
+        1416623,
+        1584220,
+        1587061,
+        1631207,
+        1668201,
+        1783392,
+        2010854,
+        2168673,
+        2714288,
+        3488531,
+        3886016,
+        4072502,
+        4516663
+      ],
+      "mismatch_ids_note": "first 25 only; the complete list is in the dump",
+      "mismatch_kinds": {
+        "adult_tokens_only": 290
+      },
+      "missing_tokens": {},
+      "numeric_field_mismatches": 0,
+      "rows_compared": 10000
+    },
+    "corpus": {
+      "features": "/home/adam/apps/classifier-model/data/feedback_category/corpus/features.jsonl",
+      "features_mtime": "2026-11-21T10:07:23+00:00",
+      "features_sha256": "e9eec4486e5cf7edaa8c94907340e0f4776035417086ac510c5568ac3084a04d",
+      "pre_stage3b_sibling": "/home/adam/apps/classifier-model/data/feedback_category/corpus/features.jsonl.pre_stage3b"
+    },
+    "criterion": 4,
+    "full_corpus_diagnostic": {
+      "dump": "tools/cram-parity/results/g1_full_mismatches.dump",
+      "extra_tokens": {
+        "__adult_jav": 1921,
+        "__adult_set": 21,
+        "__adult_site": 1410
+      },
+      "ft_identical": 116700,
+      "ft_mismatched": 3300,
+      "mismatch_ids": [
+        8345,
+        23731,
+        24700,
+        50249,
+        60742,
+        73220,
+        88194,
+        93215,
+        95219,
+        98021,
+        108699,
+        126271,
+        186502,
+        192517,
+        203610,
+        205179,
+        213311,
+        214581,
+        236890,
+        242885,
+        245044,
+        251696,
+        259416,
+        266229,
+        267229
+      ],
+      "mismatch_ids_note": "first 25 only; the complete list is in the dump",
+      "mismatch_kinds": {
+        "adult_tokens_only": 3300
+      },
+      "missing_tokens": {},
+      "numeric_field_mismatches": 0,
+      "rows_compared": 120000
+    },
+    "gate": "G1 feature-text parity",
+    "generated_at": "2026-11-22T09:32:23+00:00",
+    "result": "FAIL",
+    "sample": {
+      "features": "/home/adam/apps/classifier-model/data/feedback_category/corpus/features.jsonl",
+      "files_total_gt_50_rows": 708,
+      "intersection_records_and_features": 120000,
+      "min_files_total_gt_50_required": 200,
+      "min_tv_anime_required": 500,
+      "parser_hint_counts": {
+        "0": 7059,
+        "10": 426,
+        "3": 251,
+        "4": 1329,
+        "6": 556,
+        "7": 48,
+        "8": 331
+      },
+      "records": "/home/adam/apps/classifier-model/data/samples/s120000_42.jsonl",
+      "records_with_teacher_labels": 54642,
+      "requested": 10000,
+      "scored_all": "/home/adam/apps/cram/tvkind/data/clean_v3/scored_all.jsonl",
+      "seed": 15,
+      "selected": 10000,
+      "strata": "teacher_category (fallback: parser hint)",
+      "stratum_counts": {
+        "anime": 314,
+        "audiobook": 67,
+        "comic": 109,
+        "ebook": 165,
+        "game": 170,
+        "hint_0": 3912,
+        "hint_10": 248,
+        "hint_3": 133,
+        "hint_4": 672,
+        "hint_6": 290,
+        "hint_7": 22,
+        "hint_8": 170,
+        "image": 222,
+        "movie": 1724,
+        "music": 689,
+        "other": 6,
+        "software": 194,
+        "tv": 797,
+        "unknown": 96
+      },
+      "tv_anime_rows": 1111
+    },
+    "stop": true
+  },
+  "g2": {
+    "adult_threshold": 0.375,
+    "agreement": {
+      "adult": 10000,
+      "adult_rate": 1.0,
+      "category": 10000,
+      "category_rate": 1.0,
+      "kind": 10000,
+      "kind_rate": 1.0
+    },
+    "bars": {
+      "agreement_per_field": 0.999,
+      "both_adult_values": true,
+      "max_adult_p_delta": 1e-06,
+      "min_categories": 10,
+      "min_kinds": 5,
+      "mismatch_near_tie_rel": 1e-06
+    },
+    "c_leg": {
+      "binary": "/home/adam/apps/torrent_kotlin_app/tools/cram-parity/build/c_verdict_harness",
+      "links": [
+        "src/cram.c",
+        "lib/cJSON/cJSON.c",
+        "tests/stub_log.c"
+      ],
+      "prepared_tree": "/home/adam/apps/torrent_kotlin_app/app/build/native/src/dht_crawler",
+      "sha256": "acffde2d2effc5de0b4c6878a7e4dd9ed7818419b53c3bc315dd8f663e014c2a"
+    },
+    "checks": {
+      "adult_agreement": true,
+      "adult_p_delta": true,
+      "category_agreement": true,
+      "diversity_adult_values": true,
+      "diversity_categories": true,
+      "diversity_kinds": true,
+      "kind_agreement": true,
+      "mismatches_are_near_ties": true
+    },
+    "criterion": 5,
+    "diversity": {
+      "adult_counts": {
+        "0": 7501,
+        "1": 2499
+      },
+      "adult_values": [
+        0,
+        1
+      ],
+      "category_counts": {
+        "0": 194,
+        "1": 4190,
+        "10": 615,
+        "11": 9,
+        "2": 1596,
+        "3": 580,
+        "4": 1378,
+        "5": 110,
+        "6": 328,
+        "7": 214,
+        "8": 379,
+        "9": 407
+      },
+      "distinct_categories": 12,
+      "distinct_kinds": 6,
+      "kind_counts": {
+        "0": 379,
+        "1": 5191,
+        "3": 3391,
+        "4": 27,
+        "5": 34,
+        "6": 978
+      }
+    },
+    "dump": "tools/cram-parity/results/g2_mismatches.dump",
+    "gate": "G2 C-vs-reference verdict parity (host x86)",
+    "generated_at": "2026-11-22T09:31:09+00:00",
+    "max_adult_p_delta": 1.4432899320127035e-15,
+    "max_confidence_delta": 1.5543122344752192e-15,
+    "max_state_energy_delta": 0.0,
+    "mismatches": {
+      "count": 0,
+      "ids": [],
+      "near_ties": 0,
+      "not_near_ties": 0
+    },
+    "models": {
+      "cram.bin": {
+        "bytes": 9388835,
+        "manifest_sha256": "834159b642d67da728bbdc3411badf83b639742743c95d414fc62ddd81e45bec",
+        "match": true,
+        "sha256": "834159b642d67da728bbdc3411badf83b639742743c95d414fc62ddd81e45bec"
+      },
+      "cram_vocab.bin": {
+        "bytes": 2046524,
+        "manifest_sha256": "6e24c4b27e3bd546a7dad0cb9a929dc7f354e664139604f0bb75f3ca1cf21cee",
+        "match": true,
+        "sha256": "6e24c4b27e3bd546a7dad0cb9a929dc7f354e664139604f0bb75f3ca1cf21cee"
+      },
+      "manifest_sha256": "59e39d3f85db21e015d94ffd7f5b055d0b593f69c238ac18f39c30bf50d53e55",
+      "manifest_threshold": 0.375
+    },
+    "reference_leg": {
+      "module": "/home/adam/apps/cram/tvkind/scripts/cram_export.py",
+      "reused": [
+        "Design.row",
+        "Engine.unary",
+        "Engine.verdict",
+        "parse_container",
+        "parse_vocab"
+      ],
+      "sha256": "a3b380eaeaf734ab5ef47d4806d1dc04638026a38358a3b7805d46dd1f603133"
+    },
+    "result": "PASS",
+    "rows": 10000,
+    "stop": false
+  }
+}

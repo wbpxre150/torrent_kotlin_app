@@ -1,0 +1,7 @@
+# Built host tools (tparse CLI, C verdict harness) -- rebuilt by the scripts.
+build/
+
+# Per-row gate dumps: megabytes of JSONL and full mismatch dumps. The committed
+# record is results/summary.json; everything else here is reproducible.
+results/*.jsonl
+results/*.dump
