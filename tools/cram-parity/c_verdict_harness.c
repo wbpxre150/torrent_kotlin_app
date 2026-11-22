@@ -19,7 +19,15 @@
  * supplied here instead: a self-contained SHA-256 that `cram_load()` calls to
  * verify both model files against `models/v15/manifest.json`.
  *
- * Usage: c_verdict_harness <model_dir> <rows.jsonl> [adult_threshold]
+ * Serving canonicalisation: the frozen v15 model was trained on a corpus that
+ * carries `__adult_jav`/`__adult_site`/`__adult_set` on 20 of 270,390 rows while
+ * the vendored tparse emits them unconditionally, so every row's `ft` goes
+ * through `cram_strip_adult_tokens()` before `cram_features()` -- exactly what
+ * `src/classifier.c` does. `--raw` skips that step, which is how the
+ * with-tokens side of the 20-row impact measurement is produced
+ * (`g1_ft_parity.py --adult-impact`).
+ *
+ * Usage: c_verdict_harness [--raw] <model_dir> <rows.jsonl> [adult_threshold]
  * Exit:  0 all rows scored, 1 usage/load/IO failure (nothing partial is printed).
  *
  * The 48-state table is read straight out of `cram.bin`'s header + states block
@@ -301,18 +309,31 @@ int main(int argc, char **argv) {
     size_t line_cap = 0;
     ssize_t line_len;
     long long n_rows = 0, n_failed = 0, n_truncated = 0;
+    int raw = 0;
+    int positional[3];
+    int n_positional = 0;
+    int argi;
 
-    if (argc < 3) {
-        fprintf(stderr, "usage: %s <model_dir> <rows.jsonl> [adult_threshold]\n", argv[0]);
+    for (argi = 1; argi < argc; argi++) {
+        if (strcmp(argv[argi], "--raw") == 0) {
+            raw = 1;
+            continue;
+        }
+        if (n_positional < 3) positional[n_positional] = argi;
+        n_positional++;
+    }
+    if (n_positional < 2 || n_positional > 3) {
+        fprintf(stderr, "usage: %s [--raw] <model_dir> <rows.jsonl> [adult_threshold]\n",
+                argv[0]);
         return 1;
     }
-    dir = argv[1];
-    rows_path = argv[2];
-    if (argc > 3) {
+    dir = argv[positional[0]];
+    rows_path = argv[positional[1]];
+    if (n_positional == 3) {
         char *end = NULL;
-        double parsed = strtod(argv[3], &end);
-        if (end == argv[3] || !(parsed > 0.0)) {
-            fprintf(stderr, "harness: bad threshold %s\n", argv[3]);
+        double parsed = strtod(argv[positional[2]], &end);
+        if (end == argv[positional[2]] || !(parsed > 0.0)) {
+            fprintf(stderr, "harness: bad threshold %s\n", argv[positional[2]]);
             return 1;
         }
         threshold = parsed;
@@ -381,6 +402,12 @@ int main(int argc, char **argv) {
         ft_node = cJSON_GetObjectItemCaseSensitive(obj, "ft");
         if (cJSON_IsNumber(id_node)) id = (long long)id_node->valuedouble;
         if (cJSON_IsString(ft_node)) ft = ft_node->valuestring;
+
+        /* The shipping path (src/classifier.c) canonicalises the feature text
+         * before it reaches the engine; `--raw` is the with-tokens side. The row
+         * object owns the string and is freed below, so editing it in place is
+         * safe and allocation-free. */
+        if (!raw) cram_strip_adult_tokens((char *)ft);
 
         memset(&row, 0, sizeof row);
         memset(&verdict, 0, sizeof verdict);

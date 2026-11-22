@@ -12,6 +12,12 @@ Two scorers, the same rows, the same container:
     marginal, T-tempered category confidence). It is imported, never
     re-derived: a second implementation would test the test.
 
+Both legs score the same canonicalised text: the C harness strips `__adult_*`
+itself (the shipping path, `cram_strip_adult_tokens`), and this script applies
+the identical mirror (`sample_select.strip_adult_tokens`) to the rows it hands
+the reference. Serving-side canonicalisation must not be able to hide behind a
+one-sided comparison.
+
 Bars (design §10 G2): **>= 99.9 %** agreement each for category, tv_kind and
 adult; max |adult_p| difference **<= 1e-6**; every label mismatch a near-tie
 (|dE| between the top two states < 1e-6 relative, dumped and reviewed); verdict
@@ -39,6 +45,10 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
+sys.path.insert(0, str(HERE))
+
+import sample_select as ss  # noqa: E402
+
 RESULTS = HERE / "results"
 SUMMARY = RESULTS / "summary.json"
 BUILD = HERE / "build"
@@ -85,10 +95,24 @@ def write_summary(summary: dict) -> None:
 
 
 def ensure_harness(cc: str) -> None:
-    """Compile the C leg against the prepared tree (never classifier.c)."""
-    if HARNESS.is_file() and os.environ.get("CRAM_PARITY_REBUILD") != "1":
-        return
+    """Compile the C leg against the prepared tree (never classifier.c).
+
+    Rebuilt whenever the harness source or a linked prepared-tree source is newer
+    than the binary, so an edited `src/cram.c` (Stage 7 added
+    `cram_strip_adult_tokens`) can never be measured through a stale binary.
+    `CRAM_PARITY_REBUILD=1` forces it.
+    """
     sources = [PREPARED / name for name in HARNESS_SOURCES]
+    inputs = [HERE / "c_verdict_harness.c", *sources]
+    if (
+        HARNESS.is_file()
+        and os.environ.get("CRAM_PARITY_REBUILD") != "1"
+        and all(
+            path.is_file() and path.stat().st_mtime <= HARNESS.stat().st_mtime
+            for path in inputs
+        )
+    ):
+        return
     for path in sources:
         if not path.is_file():
             raise SystemExit(
@@ -211,8 +235,11 @@ def main() -> int:
 
     ensure_harness(args.cc)
     models = verify_models(model_dir)
-    rows = load_rows(rows_path)
-    print(f"g2: {len(rows)} rows from {rows_path}", file=sys.stderr)
+    # Both sides canonicalise: the C harness strips inside itself (the shipping
+    # path) and the reference gets the same text here, so a one-sided strip can
+    # never pass as agreement.
+    rows = [(rid, ss.strip_adult_tokens(ft)) for rid, ft in load_rows(rows_path)]
+    print(f"g2: {len(rows)} rows from {rows_path} (adult tokens stripped)", file=sys.stderr)
 
     c_out_path = RESULTS / "g2_c_verdicts.jsonl"
     with rows_path.open("rb") as fin, c_out_path.open("wb") as fout:

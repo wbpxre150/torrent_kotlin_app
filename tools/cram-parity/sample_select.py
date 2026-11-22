@@ -30,6 +30,8 @@ import random
 import sys
 from pathlib import Path
 
+ADULT_TOKEN_PREFIX = "__adult_"
+
 SEED = 15
 SAMPLE_TOTAL = 10_000
 MIN_TV_ANIME = 500
@@ -41,6 +43,23 @@ HOME = Path.home()
 DEFAULT_RECORDS = HOME / "apps/classifier-model/data/samples/s120000_42.jsonl"
 DEFAULT_FEATURES = HOME / "apps/classifier-model/data/feedback_category/corpus/features.jsonl"
 DEFAULT_SCORED = HOME / "apps/cram/tvkind/data/clean_v3/scored_all.jsonl"
+
+
+def strip_adult_tokens(ft: str) -> str:
+    """Mirror of `cram_strip_adult_tokens()` in `src/cram.c` (plan assumption 13).
+
+    The frozen v15 model was trained on a corpus that carries `__adult_*` on 20 of
+    270,390 rows while the vendored parser emits them unconditionally, so the
+    serving path drops them. The C rule removes each such token plus exactly one
+    adjacent separator; `ft` is parser-normalised single-space text, so "split on
+    a single space, drop every token beginning `__adult_`, rejoin with a single
+    space" is byte-identical to it. The G1 re-run is the mutual witness: the
+    10,000-row exact comparison and the full-corpus set-equality assertion both
+    fail the moment the two diverge.
+    """
+    return " ".join(
+        token for token in ft.split(" ") if not token.startswith(ADULT_TOKEN_PREFIX)
+    )
 
 
 def _iter_jsonl(path: Path):

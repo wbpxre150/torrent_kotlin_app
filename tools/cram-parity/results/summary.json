@@ -1,6 +1,122 @@
 {
   "g1": {
-    "bar": "10000/10000 identical ft strings",
+    "adult_token_canonicalisation": {
+      "corpus_adult_ids_in_join": 0,
+      "corpus_adult_ids_in_join_list": [],
+      "corpus_ids": [
+        8313742,
+        8424570,
+        9253616,
+        14971591,
+        17683069,
+        20098070,
+        20500767,
+        20664149,
+        20664761,
+        20812969,
+        20889574,
+        22507716,
+        23991398,
+        24884147,
+        25162943,
+        29513434,
+        30583421,
+        31938973,
+        32245872,
+        32296706
+      ],
+      "corpus_rows_with_markers": 20,
+      "corpus_tokens": {
+        "14971591": [
+          "__adult_site"
+        ],
+        "17683069": [
+          "__adult_jav"
+        ],
+        "20098070": [
+          "__adult_jav"
+        ],
+        "20500767": [
+          "__adult_site"
+        ],
+        "20664149": [
+          "__adult_site"
+        ],
+        "20664761": [
+          "__adult_set"
+        ],
+        "20812969": [
+          "__adult_site"
+        ],
+        "20889574": [
+          "__adult_site"
+        ],
+        "22507716": [
+          "__adult_site"
+        ],
+        "23991398": [
+          "__adult_set"
+        ],
+        "24884147": [
+          "__adult_site"
+        ],
+        "25162943": [
+          "__adult_site"
+        ],
+        "29513434": [
+          "__adult_jav"
+        ],
+        "30583421": [
+          "__adult_site"
+        ],
+        "31938973": [
+          "__adult_jav"
+        ],
+        "32245872": [
+          "__adult_set"
+        ],
+        "32296706": [
+          "__adult_site"
+        ],
+        "8313742": [
+          "__adult_site"
+        ],
+        "8424570": [
+          "__adult_jav"
+        ],
+        "9253616": [
+          "__adult_site"
+        ]
+      },
+      "full_corpus_mismatch_ids_equal_intersected_set": true,
+      "rule": "remove every token beginning `__adult_` plus one adjacent separator (cram_strip_adult_tokens, src/cram.c); sample_select.strip_adult_tokens is the byte-exact mirror and is applied to the CLI text here",
+      "sample_intersection": [],
+      "sample_intersection_empty": true
+    },
+    "adult_token_impact": {
+      "changed_ids": [],
+      "max_adult_p_delta": 0.009824319283326999,
+      "max_adult_p_delta_id": 14971591,
+      "role": "opposite-direction witness -- the corpus CARRIES `__adult_*` on these rows and serving strips them. G1's full-corpus leg cannot exercise that direction: the ids appear in none of the local record files, so they are outside the 120,000-record join. This measurement stands in for it.",
+      "rows": 20,
+      "rows_carrying_markers": 20,
+      "rows_file": "tools/cram-parity/results/g1_adult_rows.jsonl",
+      "text": "features.jsonl `ft` verbatim (these ids have no s120000_42.jsonl record)",
+      "threshold": 0.375,
+      "verdict_changes": {
+        "adult": 0,
+        "category": 0,
+        "kind": 0
+      }
+    },
+    "bar": "10000/10000 identical ft strings after the serving-side `__adult_*` canonicalisation (Revision 1, operator-authorised)",
+    "bar_revision": {
+      "original_bar": "10,000/10,000 identical ft (no canonicalisation)",
+      "original_result": "FAIL 9,710/10,000, every mismatch adult-token-only",
+      "plan_full_corpus_expectation": "119,980/120,000 with the mismatch id set equal to the 20-id corpus adult-token set (plan assumption 13)",
+      "plan_full_corpus_expectation_does_not_hold": "planner inference resting on a false premise: the 20 corpus adult-token ids appear in none of the local record files, so the intersected set is empty and after the serving-side strip nothing mismatches. Measured: 120,000/120,000 identical with mismatch_id_set = [] -- strictly stronger. The assertion is evaluated as mismatch_id_set == sorted(corpus_adult_ids & join_ids) (set equality, never a count), so one unexpected mismatch still fails the gate.",
+      "resolution": "strip `__adult_*` on the serving path (Stage 7); corpus regeneration and refit remain forbidden"
+    },
     "cli": {
       "binary": "/home/adam/apps/torrent_kotlin_app/tools/cram-parity/build/tparse",
       "sha256": "bbb0cbe574009b9a64b233724ea861301ca918aaa7b012aead5dc77eac133b63",
@@ -8,44 +124,13 @@
     },
     "comparison": {
       "dump": "tools/cram-parity/results/g1_mismatches.dump",
-      "extra_tokens": {
-        "__adult_jav": 160,
-        "__adult_set": 3,
-        "__adult_site": 129
-      },
-      "ft_identical": 9710,
-      "ft_mismatched": 290,
-      "mismatch_ids": [
-        24700,
-        60742,
-        108699,
-        192517,
-        336742,
-        596675,
-        605245,
-        843944,
-        907491,
-        1191201,
-        1284961,
-        1309453,
-        1416623,
-        1584220,
-        1587061,
-        1631207,
-        1668201,
-        1783392,
-        2010854,
-        2168673,
-        2714288,
-        3488531,
-        3886016,
-        4072502,
-        4516663
-      ],
-      "mismatch_ids_note": "first 25 only; the complete list is in the dump",
-      "mismatch_kinds": {
-        "adult_tokens_only": 290
-      },
+      "extra_tokens": {},
+      "ft_identical": 10000,
+      "ft_mismatched": 0,
+      "mismatch_id_set": [],
+      "mismatch_ids": [],
+      "mismatch_ids_note": "first 25 only; the complete list is mismatch_id_set",
+      "mismatch_kinds": {},
       "missing_tokens": {},
       "numeric_field_mismatches": 0,
       "rows_compared": 10000
@@ -59,51 +144,20 @@
     "criterion": 4,
     "full_corpus_diagnostic": {
       "dump": "tools/cram-parity/results/g1_full_mismatches.dump",
-      "extra_tokens": {
-        "__adult_jav": 1921,
-        "__adult_set": 21,
-        "__adult_site": 1410
-      },
-      "ft_identical": 116700,
-      "ft_mismatched": 3300,
-      "mismatch_ids": [
-        8345,
-        23731,
-        24700,
-        50249,
-        60742,
-        73220,
-        88194,
-        93215,
-        95219,
-        98021,
-        108699,
-        126271,
-        186502,
-        192517,
-        203610,
-        205179,
-        213311,
-        214581,
-        236890,
-        242885,
-        245044,
-        251696,
-        259416,
-        266229,
-        267229
-      ],
-      "mismatch_ids_note": "first 25 only; the complete list is in the dump",
-      "mismatch_kinds": {
-        "adult_tokens_only": 3300
-      },
+      "extra_tokens": {},
+      "ft_identical": 120000,
+      "ft_mismatched": 0,
+      "mismatch_id_set": [],
+      "mismatch_ids": [],
+      "mismatch_ids_note": "first 25 only; the complete list is mismatch_id_set",
+      "mismatch_kinds": {},
       "missing_tokens": {},
       "numeric_field_mismatches": 0,
       "rows_compared": 120000
     },
     "gate": "G1 feature-text parity",
-    "generated_at": "2026-11-22T09:32:23+00:00",
-    "result": "FAIL",
+    "generated_at": "2026-11-22T10:06:53+00:00",
+    "result": "PASS",
     "sample": {
       "features": "/home/adam/apps/classifier-model/data/feedback_category/corpus/features.jsonl",
       "files_total_gt_50_rows": 708,
@@ -149,7 +203,7 @@
       },
       "tv_anime_rows": 1111
     },
-    "stop": true
+    "stop": false
   },
   "g2": {
     "adult_threshold": 0.375,
@@ -177,7 +231,7 @@
         "tests/stub_log.c"
       ],
       "prepared_tree": "/home/adam/apps/torrent_kotlin_app/app/build/native/src/dht_crawler",
-      "sha256": "acffde2d2effc5de0b4c6878a7e4dd9ed7818419b53c3bc315dd8f663e014c2a"
+      "sha256": "66db18b0ccadd32a0ec0c654746c0c4dc61dad1d908da6fc347843c60b3c8902"
     },
     "checks": {
       "adult_agreement": true,
@@ -192,8 +246,8 @@
     "criterion": 5,
     "diversity": {
       "adult_counts": {
-        "0": 7501,
-        "1": 2499
+        "0": 7502,
+        "1": 2498
       },
       "adult_values": [
         0,
@@ -226,7 +280,7 @@
     },
     "dump": "tools/cram-parity/results/g2_mismatches.dump",
     "gate": "G2 C-vs-reference verdict parity (host x86)",
-    "generated_at": "2026-11-22T09:31:09+00:00",
+    "generated_at": "2026-11-22T10:07:08+00:00",
     "max_adult_p_delta": 1.4432899320127035e-15,
     "max_confidence_delta": 1.5543122344752192e-15,
     "max_state_energy_delta": 0.0,
