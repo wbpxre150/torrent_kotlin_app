@@ -16,8 +16,8 @@ import java.nio.file.StandardOpenOption
 
 /**
  * Owns the dht_crawler's working dir under internal storage: `filesDir/crawler/`
- * (contains `config.ini`, `data/`, the keyword files, `models/v11/` with the
- * fastText classifier model files, and `models/v13/` with the movie-kind JEVH
+ * (contains `config.ini`, `data/`, the keyword files, `models/v15/` with the
+ * CRAM classifier model files, and `models/v13/` with the movie-kind JEVH
  * backbone (Q4_0, hidden 1024) + head). Stage 09 (internal storage only); the
  * crawler process itself is started by a later supervisor step.
  */
@@ -33,7 +33,7 @@ class CrawlerConfig(
     /** Last-known-good copy of `config.ini` for apply/rollback. */
     val lkgConfigFile: File = File(workDir, "config.ini.lkg")
 
-    /** Classifier model dir (the crawler's `classifier_model_dir` default); holds the `.ftz` files. */
+    /** Classifier model dir (the crawler's `classifier_model_dir` default); holds the CRAM container + vocab. */
     val modelsDir: File = File(workDir, MODELS_SUBDIR)
 
     /** Movie-kind (JEVH) model dir (the crawler's `movie_kind_model_dir` default). */
@@ -49,7 +49,7 @@ class CrawlerConfig(
 
     /**
      * Copies the keyword files from `assets/dht_crawler/` into [workDir], the
-     * fastText classifier files from `assets/dht_crawler/models/v11/` into
+     * CRAM classifier files from `assets/dht_crawler/models/v15/` into
      * [modelsDir], and the movie-kind JEVH files from
      * `assets/dht_crawler/models/v13/` into [movieModelsDir], when missing or when
      * the `"<versionCode>|<MODELS_SUBDIR>|<MOVIE_MODEL_SUBDIR>"` `.assets_version`
@@ -59,7 +59,7 @@ class CrawlerConfig(
      * `v<digits>` generation outside the active set are deleted, so a stale
      * generation can never survive a stamp state while both shipped generations
      * stay put, and non-generation dirs/files under `models/` are never touched.
-     * The models are binary (`fastText` `.ftz`, GGUF, JEVH); they are streamed
+     * The models are binary (CRAM `.bin`/vocab, GGUF, JEVH); they are streamed
      * byte-for-byte — see [copyBinaryAtomically].
      */
     fun ensureAssets() {
@@ -239,7 +239,7 @@ class CrawlerConfig(
         const val HARD_BLOCK_FILE = "hard_block.txt"
 
         /** Classifier model dir, work-dir relative (mirrors crawler `classifier_model_dir`). */
-        const val MODELS_SUBDIR = "models/v11"
+        const val MODELS_SUBDIR = "models/v15"
 
         /** Movie-kind model dir, work-dir relative (mirrors `movie_kind_model_dir`). */
         const val MOVIE_MODEL_SUBDIR = "models/v13"
@@ -293,11 +293,12 @@ class CrawlerConfig(
         }
 
         /**
-         * Binary model assets shipped under `assets/dht_crawler/models/v11/` and staged
-         * into `workDir/models/v11/`, where the crawler resolves them via the pinned
-         * `classifier_model_dir`.
+         * Binary model assets shipped under `assets/dht_crawler/models/v15/` and staged
+         * into `workDir/models/v15/`, where the crawler resolves them via the pinned
+         * `classifier_model_dir`. CRAM is a single engine: one container + its vocab
+         * blob, sha-pinned by the manifest — no `.ftz` file ships.
          */
-        val MODEL_FILES = listOf("adult.ftz", "category.ftz", "tv_kind.ftz", "manifest.json")
+        val MODEL_FILES = listOf("cram.bin", "cram_vocab.bin", "manifest.json")
 
         /**
          * Movie-kind assets shipped under `assets/dht_crawler/models/v13/` and staged

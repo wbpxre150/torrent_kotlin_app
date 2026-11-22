@@ -66,16 +66,19 @@ rclone_bookmark_path=data/rclone_backup_ids.txt
 #   save_tv_kinds = none,episode,multi_episode,season_pack,multi_season,complete_series,daily
 
 # ==== Ingest-Time Classifier & Adult Handling ====
-# Ingest-time fastText classifier (models/v11). The app stages the model files and
+# Ingest-time CRAM classifier (models/v15). The app stages the model files and
 # the hard-block list next to this file; both path keys below are app-managed.
 classifier_enabled=1
-classifier_model_dir=models/v11
+classifier_model_dir=models/v15
 # adult_mode: tag (store adult rows; hidden at or above adult_hide_threshold) or
 # drop (discard every adult-tagged row, i.e. anything at or above
 # adult_hide_threshold). The hard-block list always drops.
 adult_mode=tag
-# 0 = take the threshold from models/v11/manifest.json (the app always writes a value).
-adult_hide_threshold=0.545726
+# adult_hide_threshold: CRAM emits the adult score as a raw marginal in [0,1];
+# 0.375 is the measured recall-0.90 operating point (heldout base rate 17.65%,
+# precision 0.848). 0 = take the threshold from models/v15/manifest.json (the app
+# always writes a value).
+adult_hide_threshold=0.375
 # Always-on name-substring block list (app-managed path key).
 hard_block_file=hard_block.txt
 

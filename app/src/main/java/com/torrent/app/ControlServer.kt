@@ -144,6 +144,8 @@ class ControlServer(
     @Volatile private var cachedCrawlerStatsLine: String? = null
     @Volatile private var cachedCrawlerBackfillLine: String? = null
     @Volatile private var cachedCrawlerAdultBackfillLine: String? = null
+    /** CRAM classifier line (generation + container sha + counters), from the same /stats tick. */
+    @Volatile private var cachedCramStatsLine: String? = null
     // One frame flow per feed: replay keeps the newest frame for a client that
     // connects between ticks, DROP_OLDEST keeps a slow socket from stalling
     // the ticker.
@@ -771,6 +773,7 @@ class ControlServer(
         }
         cachedCrawlerStatsJson = raw
         cachedCrawlerStatsLine = raw?.let { crawlerStatsLine(it) }
+        cachedCramStatsLine = raw?.let { cramStatsLine(it) }
         cachedCrawlerBackfillLine = raw?.let { crawlerBackfillLine(it) }
         cachedCrawlerAdultBackfillLine = raw?.let { crawlerAdultBackfillLine(it) }
         statsFrames.emit(crawlerStatsJson(cachedCrawlerStatsJson, crawler?.state))
@@ -983,6 +986,7 @@ class ControlServer(
             """<div class="row"><span class="k">Internal free</span><span class="v"><span data-field="internalFree">${formatBytes(free)}</span>$spaceWarn</span></div>""",
             """<div class="row"><span class="k">Search</span><span class="v"><a href="/search">/search</a></span></div>""",
             """<div class="row"><span class="k">Stats</span><span class="v" data-field="statsLine">${esc(cachedCrawlerStatsLine ?: "—")}</span></div>""",
+            """<div class="row"><span class="k">Classifier</span><span class="v" data-field="cramStatsLine">${esc(cachedCramStatsLine ?: "—")}</span></div>""",
             """<div class="row"><span class="k">Backfill</span><span class="v" data-field="backfillLine">${esc(cachedCrawlerBackfillLine ?: "—")}</span></div>""",
             """<div class="row"><span class="k">Adult backfill</span><span class="v" data-field="adultBackfillLine">${esc(cachedCrawlerAdultBackfillLine ?: "—")}</span></div>""",
         )
@@ -1124,6 +1128,7 @@ class ControlServer(
                         append(",\"internalFreeBytes\":").append(free)
                         append(",\"pausedNoWifi\":").append(crawlerPausedNoWifi())
                         append(",\"statsLine\":").append(jsonStr(cachedCrawlerStatsLine))
+                        append(",\"cramStatsLine\":").append(jsonStr(cachedCramStatsLine))
                         append(",\"backfillLine\":").append(jsonStr(cachedCrawlerBackfillLine))
                         append(",\"adultBackfillLine\":").append(jsonStr(cachedCrawlerAdultBackfillLine))
                     }
@@ -1890,7 +1895,7 @@ class ControlServer(
         MaintenanceAction.MOVIE_KIND_BENCH ->
             "Bench the movie-kind encoder over the database rows (read-only)"
         MaintenanceAction.ADULT_BACKFILL ->
-            "Re-score the token-gated rows with the v11 adult classifier and write " +
+            "Re-score the token-gated rows with the CRAM adult classifier (v15) and write " +
                 "adult, adult_p and adult_clf_ver"
     }
 
@@ -2402,6 +2407,33 @@ class ControlServer(
                 val err = b.optString("last_error", "")
                 val line = "Adult backfill: %s %d / %d → v%d".format(state, updated, total, target)
                 if (state == "failed" && err.isNotBlank()) "$line — $err" else line
+            } catch (e: Exception) {
+                null
+            }
+        }
+
+        /**
+         * The one-line CRAM classifier summary beside the crawler stats line, derived
+         * from the same raw loopback /stats body: the engine generation, the `cram.bin`
+         * container sha (first 12 hex chars — enough to identify the build without
+         * flooding the card) and the engine's prediction / load-failure counters.
+         * `generation` is the model version the classifier stamps (15), not the
+         * manifest container's internal `cram.generation`. Null when the body does not
+         * parse, carries no `classifier.cram` object, or the engine reports `enabled`
+         * false — the card keeps its previous line, the same contract as
+         * [crawlerBackfillLine].
+         */
+        internal fun cramStatsLine(raw: String): String? {
+            return try {
+                val clf = JSONObject(raw).optJSONObject("classifier") ?: return null
+                val cram = clf.optJSONObject("cram") ?: return null
+                if (!cram.optBoolean("enabled", false)) return null
+                "CRAM v%d (sha %s): %d predicted, %d load failures".format(
+                    cram.optInt("generation", 0),
+                    clf.optString("cram_sha256", "").take(12),
+                    cram.optLong("rows_predicted", 0L),
+                    cram.optLong("load_failures", 0L),
+                )
             } catch (e: Exception) {
                 null
             }
@@ -3092,6 +3124,7 @@ ${adultSelectionRow(adultSelection)}
                   patchText(fieldIn(section, 'dbSize'), d.dbSize);
                   patchText(fieldIn(section, 'internalFree'), d.internalFree);
                   patchText(fieldIn(section, 'statsLine'), d.statsLine);
+                  patchText(fieldIn(section, 'cramStatsLine'), d.cramStatsLine);
                   patchText(fieldIn(section, 'backfillLine'), d.backfillLine);
                   patchText(fieldIn(section, 'adultBackfillLine'), d.adultBackfillLine);
                   // The paused badge is rendered on every crawler render and

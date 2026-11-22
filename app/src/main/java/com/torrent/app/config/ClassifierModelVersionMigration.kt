@@ -3,7 +3,7 @@ package com.torrent.app.config
 /**
  * The crawler's adult thresholds are probabilities calibrated against one specific classifier
  * model generation, so they are meaningless after a bump to a newer generation (this build ships
- * `models/v11`). This migration resets them to the new generation's defaults exactly once, using
+ * `models/v15`). This migration resets them to the new generation's defaults exactly once, using
  * the last-seen model dir as its sentinel.
  *
  * The reset is deliberately unconditional — a user-tuned value was tuned against the old model's

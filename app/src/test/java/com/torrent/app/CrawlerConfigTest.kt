@@ -269,9 +269,9 @@ class CrawlerConfigTest {
         assertEquals("300", ini["bloom_persist_interval_sec"])
         // Stage 6 adult handling: classifier + calibrated thresholds + hard-block list
         assertEquals("1", ini["classifier_enabled"])
-        assertEquals("models/v11", ini["classifier_model_dir"])
+        assertEquals("models/v15", ini["classifier_model_dir"])
         assertEquals("tag", ini["adult_mode"])
-        assertEquals("0.545726", ini["adult_hide_threshold"])
+        assertEquals("0.375", ini["adult_hide_threshold"])
         // The drop threshold is gone with drop-all-adult-tagged semantics: the key
         // must not be rendered at all (the crawler ignores it as unknown).
         assertNull(ini["adult_drop_threshold"])
@@ -388,10 +388,11 @@ class CrawlerConfigTest {
 
             // The legacy text staging path (readBytes().toString(UTF_8)) would inflate and
             // corrupt these files; assert that so the byte-for-byte copy is what is proven.
-            val adult = File(MODEL_SRC_DIR, "adult.ftz").readBytes()
+            val container = File(MODEL_SRC_DIR, "cram.bin").readBytes()
             assertFalse(
-                "adult.ftz must not survive a UTF-8 round trip, else this test proves nothing",
-                adult.contentEquals(adult.toString(Charsets.UTF_8).toByteArray(Charsets.UTF_8))
+                "cram.bin must not survive a UTF-8 round trip, else this test proves nothing",
+                container.contentEquals(
+                    container.toString(Charsets.UTF_8).toByteArray(Charsets.UTF_8))
             )
             assertEquals(
                 "no partial copies may remain",
@@ -437,7 +438,7 @@ class CrawlerConfigTest {
         @Test fun ensureAssets_doesNotRewriteModelsWhenVersionStampMatches() {
             val cfg = configWithRealDefaultAsset()
             cfg.ensureLayout()
-            val staged = File(cfg.modelsDir, "adult.ftz")
+            val staged = File(cfg.modelsDir, "cram.bin")
             val firstBytes = staged.readBytes()
             assertTrue(staged.setLastModified(0L))
 
@@ -495,7 +496,7 @@ class CrawlerConfigTest {
         @Test fun ensureAssets_stampChangeNeverDeletesTheCurrentModelDir() {
             val cfg = configWithRealDefaultAsset()
             cfg.ensureLayout()
-            val current = File(cfg.modelsDir, "adult.ftz")
+            val current = File(cfg.modelsDir, "cram.bin")
             assertTrue(current.isFile)
             val stale = File(cfg.workDir, "models/v2").apply { mkdirs() }
             File(stale, "adult.ftz").writeBytes(byteArrayOf(1, 2, 3))
@@ -518,7 +519,7 @@ class CrawlerConfigTest {
         @Test fun ensureAssets_restagesModelsWhenVersionStampChanges() {
             val cfg = configWithRealDefaultAsset()
             cfg.ensureLayout()
-            val staged = File(cfg.modelsDir, "adult.ftz")
+            val staged = File(cfg.modelsDir, "cram.bin")
             staged.writeBytes(byteArrayOf(1, 2, 3)) // simulate an interrupted copy
             val stamp = File(cfg.workDir, CrawlerConfig.STAMP_FILE)
             assertTrue(stamp.delete())
@@ -527,7 +528,7 @@ class CrawlerConfigTest {
 
             assertArrayEquals(
                 "a version change must repair the staged model",
-                File(MODEL_SRC_DIR, "adult.ftz").readBytes(), staged.readBytes()
+                File(MODEL_SRC_DIR, "cram.bin").readBytes(), staged.readBytes()
             )
             assertTrue("the stamp is rewritten", stamp.exists())
         }
@@ -543,6 +544,9 @@ class CrawlerConfigTest {
             // be swept even though its file names are identical to the active pair's.
             val previous = File(cfg.workDir, "models/v10").apply { mkdirs() }
             File(previous, "movie_kind_head.bin").writeBytes(byteArrayOf(10, 10, 10))
+            // The classifier generation this bump retires: the real v11 -> v15 case.
+            val oldClassifier = File(cfg.workDir, "models/v11").apply { mkdirs() }
+            File(oldClassifier, "adult.ftz").writeBytes(byteArrayOf(11, 11, 11))
             val stamp = File(cfg.workDir, CrawlerConfig.STAMP_FILE)
             stamp.writeText("${crawlerVersionCode()}|models/v6")
 
@@ -550,7 +554,8 @@ class CrawlerConfigTest {
 
             assertFalse("the retired v4 generation is reclaimed", retired.exists())
             assertFalse("the previous v10 generation is reclaimed", previous.exists())
-            assertTrue("the fastText generation survives the sweep", cfg.modelsDir.isDirectory)
+            assertFalse("the retired v11 classifier generation is reclaimed", oldClassifier.exists())
+            assertTrue("the CRAM generation survives the sweep", cfg.modelsDir.isDirectory)
             assertTrue("the movie-kind generation survives the sweep", cfg.movieModelsDir.isDirectory)
             for (name in CrawlerConfig.MOVIE_MODEL_FILES) {
                 assertTrue("$name must stay staged in ${cfg.movieModelsDir}", File(cfg.movieModelsDir, name).isFile)
@@ -576,7 +581,7 @@ class CrawlerConfigTest {
         }
 
         /** Checked-in model assets (read-only source of truth for the staging tests). */
-        private val MODEL_SRC_DIR = File("src/main/cpp/dht_crawler-android/models/v11")
+        private val MODEL_SRC_DIR = File("src/main/cpp/dht_crawler-android/models/v15")
 
         /** Checked-in movie-kind (JEVH) assets — the v13 generation's source of truth. */
         private val MOVIE_MODEL_SRC_DIR = File("src/main/cpp/dht_crawler-android/models/v13")
@@ -594,7 +599,7 @@ class CrawlerConfigTest {
         }
 
         /**
-         * Mirrors `assets/dht_crawler/models/v11/` and `.../v13/` into the asset fixture with
+         * Mirrors `assets/dht_crawler/models/v15/` and `.../v13/` into the asset fixture with
          * the real checked-in model files, so byte fidelity is asserted against real
          * binaries.
          */
@@ -856,7 +861,7 @@ class CrawlerConfigTest {
             assertEquals("1", ini["classifier_enabled"])
             assertEquals(CrawlerConfig.MODELS_SUBDIR, ini["classifier_model_dir"])
             assertEquals("tag", ini["adult_mode"])
-            assertEquals("0.545726", ini["adult_hide_threshold"])
+            assertEquals("0.375", ini["adult_hide_threshold"])
             // Pinned for this release: nothing may auto-run a reclassify at launch.
             assertEquals("off", ini["classify_backfill_mode"])
             assertNull(ini["adult_drop_threshold"])

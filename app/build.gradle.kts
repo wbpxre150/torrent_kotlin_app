@@ -15,8 +15,8 @@ android {
         applicationId = "com.torrent.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.3.0"
+        versionCode = 4
+        versionName = "0.4.0"
     }
 
     buildTypes {
@@ -635,16 +635,16 @@ tasks.register<Copy>("copyDhtCrawlerAssets") {
     from(crawlerSrc) {
         include("torrent_search_keywords.txt", "hard_block.txt")
     }
-    // Stage 5: fastText classifier model files; Stage D adds the movie-kind (JEVH)
-    // generation. Binary — the Copy task is byte-exact (no text filtering / charset
-    // conversion), so a plain copy is correct here. The include list is explicit on
-    // purpose: `v*/**` would ship the retired v4 generation too.
+    // Stage 5: classifier model files (CRAM since v15); Stage D adds the movie-kind
+    // (JEVH) generation. Binary — the Copy task is byte-exact (no text filtering /
+    // charset conversion), so a plain copy is correct here. The include list is
+    // explicit on purpose: `v*/**` would ship the retired v4/v11 generations too.
     // `into("models")` is relative to the task destination above, giving the asset
-    // paths dht_crawler/models/v11/<file> and dht_crawler/models/v13/<file> (overriding)
+    // paths dht_crawler/models/v15/<file> and dht_crawler/models/v13/<file> (overriding)
     // the crawler's compiled-in default dirs).
     val modelSrc = file("src/main/cpp/dht_crawler-android/models")
     from(modelSrc) {
-        include("v11/**", "v13/**")
+        include("v15/**", "v13/**")
         into("models")
     }
     into(file("build/generated/assets/dht_crawler/dht_crawler"))

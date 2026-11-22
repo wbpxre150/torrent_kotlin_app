@@ -50,10 +50,13 @@ data class CrawlerSettings(
     /**
      * `adult_hide_threshold`: adult probability at or above which an adult-tagged row
      * is hidden (`adult_mode=tag`) or discarded (`adult_mode=drop`).
-     * Calibrated default from `models/v11/manifest.json`; the crawler reads 0 as
-     * "take the manifest threshold", which the form never writes.
+     * Shipped operating point of the CRAM adult marginal (measured recall-0.90
+     * point, base rate 17.65%, precision 0.848); `models/v15/manifest.json` carries
+     * the same value. The crawler reads 0 as "take the manifest threshold", which
+     * the form never writes — but config.ini beats the manifest, so this default and
+     * `config.ini.default` must move together.
      */
-    val adultHideThreshold: Double = 0.545726,
+    val adultHideThreshold: Double = 0.375,
     /**
      * `classify_backfill_mode`: `"all"` | `"adult"` | `"off"` — what the crawler's
      * backfill daemon does on its own. Pinned to `"off"` by

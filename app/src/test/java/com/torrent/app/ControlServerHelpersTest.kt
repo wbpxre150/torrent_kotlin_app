@@ -372,6 +372,44 @@ class ControlServerHelpersTest {
     }
 
     /**
+     * Stage 3 of the CRAM v15 rollout: the dashboard's new CRAM line, formatted from
+     * the daemon's real /stats object — `classifier.cram_sha256` for the container sha
+     * (first 12 hex chars) and `classifier.cram` for the engine generation (the model
+     * version 15, deliberately not the manifest container's `generation: 2`) plus its
+     * prediction / load-failure counters. No line at all when the object is absent,
+     * the engine is disabled, or the body does not parse, so the card keeps whatever
+     * it last showed — the same contract as [crawlerAdultBackfillLine].
+     */
+    @Test fun cramStatsLine_formatsTheDaemonsCramEngine() {
+        val stats = """{"torrents_indexed":286705,"classifier":{
+            "enabled":true,"clf_ver":15,"adult_hide_threshold":0.375,
+            "cram_sha256":"1cad6d9f9ddfd4afd72338288d12dda6855dceda4cb531d5417b9ee22406fff2",
+            "cram_vocab_sha256":"6e24c4b27e3bd546a7dad0cb9a929dc7f354e664139604f0bb75f3ca1cf21cee",
+            "total_classified":12345,"model_load_failures":0,
+            "cram":{"enabled":true,"generation":15,"temperature":0.762984,
+                "rows_predicted":12345,"load_failures":0,"kind_head_used":900,
+                "file_cap":50}}}"""
+        assertEquals(
+            "CRAM v15 (sha 1cad6d9f9ddf): 12345 predicted, 0 load failures",
+            ControlServer.cramStatsLine(stats),
+        )
+
+        // A degraded engine still renders: the load-failure counter is the point of the line.
+        val degraded = """{"classifier":{"cram_sha256":"834159b642d6",
+            "cram":{"enabled":true,"generation":15,"rows_predicted":7,"load_failures":3}}}"""
+        assertEquals(
+            "CRAM v15 (sha 834159b642d6): 7 predicted, 3 load failures",
+            ControlServer.cramStatsLine(degraded),
+        )
+
+        // No cram object (an older daemon), a disabled engine, an unparseable body.
+        assertNull(ControlServer.cramStatsLine("""{"torrents_indexed":1}"""))
+        assertNull(ControlServer.cramStatsLine("""{"classifier":{"cram_sha256":"ab"}}"""))
+        assertNull(ControlServer.cramStatsLine("""{"classifier":{"cram":{"enabled":false}}}"""))
+        assertNull(ControlServer.cramStatsLine("not json"))
+    }
+
+    /**
      * Webui corrective stage 8: RFC 8259 forbids raw U+0000–U+001F inside a
      * JSON string, so `jsonStr` must escape every control character. One ANSI
      * ESC in a daemon log line used to make the dashboard client's

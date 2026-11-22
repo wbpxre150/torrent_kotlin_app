@@ -283,7 +283,7 @@ class ConfigStoreTest {
         assertEquals(33, c.languageFilterNonLatinThreshold)
         assertTrue(c.classifierEnabled)
         assertEquals("tag", c.adultMode)
-        assertEquals(0.545726, c.adultHideThreshold, 1e-6)
+        assertEquals(0.375, c.adultHideThreshold, 1e-6)
         assertEquals(30_000_000, c.bloomCapacity)
         assertEquals(30_000_000, c.failureBloomCapacity)
         assertEquals(0.001, c.bloomErrorRate, 1e-6)
