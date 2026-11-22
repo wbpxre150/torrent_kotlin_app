@@ -610,7 +610,15 @@ tasks.register("prepareDhtCrawlerSrc") {
             // apply, app exit, maintenance one-shot) waited out the 60 s
             // metadata deadline. RATE_BASED respawns are excluded by the
             // reason gate, and no counter, key or /stats field changes.
-            "shutdown-abort-metadata-fetch.patch"
+            "shutdown-abort-metadata-fetch.patch",
+            // 25th: the CRAM (generation v15) engine - one forward pass per row
+            // for category, tv_kind and adult, replacing fastText/.ftz. This
+            // patch adds the pure-C99 module (src/cram.c + include/cram.h, the
+            // meta_peer_fail shape), its fixture-driven host test (tests-cram,
+            // fixtures committed under tests/fixtures/cram/) and the Makefile
+            // targets. src/classifier.c, http_api.c and config.c are rewired by
+            // the second half of this patch. See include/cram.h.
+            "cram-category-tvkind.patch"
         )) {
             project.exec {
                 commandLine("patch", "-p1", "-d", destDir.absolutePath, "-i", file("$destDir/patches/$patchName").absolutePath)
