@@ -124,99 +124,6 @@ class CrawlerConfigTest {
         assertEquals("new = 2\n", target.readText())
     }
 
-    // --- deleteStaleModelDirs (pure `v<digits>` guard) ---
-
-    @Test fun deleteStaleModelDirs_deletesTheStaleGenerationAndKeepsTheActiveOne() {
-        val models = tmp.newFolder("models")
-        val active = File(models, "v4").apply { mkdirs() }
-        File(active, "adult.ftz").writeBytes(byteArrayOf(1, 2, 3))
-        val stale = File(models, "v3").apply { mkdirs() }
-        File(stale, "adult.ftz").writeBytes(byteArrayOf(4, 5, 6))
-
-        CrawlerConfig.deleteStaleModelDirs(models, setOf("v4"))
-
-        assertFalse("a previous generation's dir must be reclaimed", stale.exists())
-        assertTrue("the active generation dir is never a candidate", active.isDirectory)
-        assertTrue("staged files of the active dir survive", File(active, "adult.ftz").isFile)
-    }
-
-    @Test fun deleteStaleModelDirs_v6ActiveDeletesTheStaleV5Dir() {
-        // Genericity: the sweep knows nothing about the shipped generation, so a future
-        // models/v6 bump reclaims models/v5 with no change here.
-        val models = tmp.newFolder("models")
-        val active = File(models, "v6").apply { mkdirs() }
-        val stale = File(models, "v5").apply { mkdirs() }
-        File(stale, "adult.ftz").writeBytes(byteArrayOf(7, 8, 9))
-
-        CrawlerConfig.deleteStaleModelDirs(models, setOf("v6"))
-
-        assertFalse("a stale v5 dir is swept when v6 is active", stale.exists())
-        assertTrue("the active v6 dir survives", active.isDirectory)
-    }
-
-    @Test fun deleteStaleModelDirs_keepsEveryActiveGenerationAndSweepsTheRetiredOne() {
-        // Two generations ship at once (v6 fastText + v9 movie-kind), so the sweep
-        // takes the active *set*: neither shipped dir may be mistaken for a stale
-        // sibling, and the retired v4 generation must still go.
-        val models = tmp.newFolder("models-multi-active")
-        val v6 = File(models, "v6").apply { mkdirs() }
-        File(v6, "adult.ftz").writeBytes(byteArrayOf(1))
-        val v9 = File(models, "v9").apply { mkdirs() }
-        File(v9, "movie_kind_head.bin").writeBytes(byteArrayOf(2))
-        val v4 = File(models, "v4").apply { mkdirs() }
-        File(v4, "adult.ftz").writeBytes(byteArrayOf(3))
-
-        CrawlerConfig.deleteStaleModelDirs(models, setOf("v6", "v9"))
-
-        assertFalse("the retired v4 generation is swept", v4.exists())
-        assertTrue("the fastText generation survives", v6.isDirectory)
-        assertTrue("staged files of v6 survive", File(v6, "adult.ftz").isFile)
-        assertTrue("the movie-kind generation survives", v9.isDirectory)
-        assertTrue("staged files of v9 survive", File(v9, "movie_kind_head.bin").isFile)
-    }
-
-    @Test fun deleteStaleModelDirs_keepsNonGenerationDirs() {
-        val models = tmp.newFolder("models")
-        val active = File(models, "v4").apply { mkdirs() }
-        val backup = File(models, "backup").apply { mkdirs() }
-        File(backup, "adult.ftz").writeBytes(byteArrayOf(1))
-        val prefixed = File(models, "v4-old").apply { mkdirs() }
-        val versioned = File(models, "v").apply { mkdirs() }
-
-        CrawlerConfig.deleteStaleModelDirs(models, setOf("v4"))
-
-        assertTrue("only `v<digits>` dirs are generations", backup.isDirectory)
-        assertTrue("a `v4-old` dir is not a generation name", prefixed.isDirectory)
-        assertTrue("a bare `v` dir is not a generation name", versioned.isDirectory)
-        assertTrue(active.isDirectory)
-    }
-
-    @Test fun deleteStaleModelDirs_keepsPlainFilesIncludingOneNamedLikeAGeneration() {
-        val models = tmp.newFolder("models")
-        val active = File(models, "v4").apply { mkdirs() }
-        val notes = File(models, "notes.txt").apply { writeText("keep me") }
-        // A FILE named like a generation is not a dir and must never be swept.
-        val fileNamedV3 = File(models, "v3").apply { writeText("not a dir") }
-
-        CrawlerConfig.deleteStaleModelDirs(models, setOf("v4"))
-
-        assertTrue("plain files under models/ survive", notes.isFile)
-        assertTrue("a file named v3 is not a generation dir", fileNamedV3.isFile)
-        assertEquals("not a dir", fileNamedV3.readText())
-        assertTrue(active.isDirectory)
-    }
-
-    @Test fun deleteStaleModelDirs_missingOrEmptyRootIsANoOp() {
-        // A missing root (first run) or an unreadable one makes listFiles() return null.
-        val missing = File(tmp.root, "absent/models")
-        CrawlerConfig.deleteStaleModelDirs(missing, setOf("v4"))
-        assertFalse("the sweep must not create the root", missing.exists())
-
-        val empty = tmp.newFolder("empty-models")
-        CrawlerConfig.deleteStaleModelDirs(empty, setOf("v4"))
-        assertEquals("an empty root stays empty", 0, empty.listFiles()?.size ?: 0)
-    }
-
     // --- parseIni ---
 
     @Test fun parseIni_ignoresCommentsAndTrims() {
@@ -325,7 +232,6 @@ class CrawlerConfigTest {
             val defaultAsset = File("src/main/assets/dht_crawler/config.ini.default")
             assertTrue("checked-in default asset must exist", defaultAsset.exists())
             File(fixture, "config.ini.default").writeText(defaultAsset.readText())
-            copyClassifierModelAssets(fixture)
             val cfg = CrawlerConfig(context) { path -> File(tmp.root, "assets/$path").inputStream() }
             cfg.ensureLayout()
 
@@ -358,214 +264,66 @@ class CrawlerConfigTest {
             assertTrue(cfg.configFile.exists())
         }
 
-        // --- Stage 5: classifier model staging into workDir/models/v6 ---
+        // --- the .assets_version stamp covers the keyword assets only ---
 
-        @Test fun ensureLayout_stagesClassifierModelsByteIdenticalToAssets() {
-            val cfg = configWithRealDefaultAsset()
-            cfg.ensureLayout()
-
-            val declared = JSONObject(File(MODEL_SRC_DIR, "manifest.json").readText())
-                .getJSONObject("models")
-            for (name in CrawlerConfig.MODEL_FILES) {
-                val source = File(MODEL_SRC_DIR, name)
-                val staged = File(cfg.modelsDir, name)
-                assertTrue("$name must be staged into ${cfg.modelsDir}", staged.isFile)
-                assertEquals("$name size must match the asset", source.length(), staged.length())
-                assertArrayEquals(
-                    "$name must be copied byte-for-byte", source.readBytes(), staged.readBytes()
-                )
-
-                val stagedHash = sha256Hex(staged)
-                assertEquals("$name staged hash", sha256Hex(source), stagedHash)
-                for (key in declared.keys()) {
-                    val entry = declared.getJSONObject(key)
-                    if (entry.getString("file") == name) {
-                        assertEquals("manifest bytes for $name", entry.getLong("bytes"), staged.length())
-                        assertEquals("manifest sha256 for $name", entry.getString("sha256"), stagedHash)
-                    }
-                }
-            }
-
-            // The legacy text staging path (readBytes().toString(UTF_8)) would inflate and
-            // corrupt these files; assert that so the byte-for-byte copy is what is proven.
-            val container = File(MODEL_SRC_DIR, "cram.bin").readBytes()
-            assertFalse(
-                "cram.bin must not survive a UTF-8 round trip, else this test proves nothing",
-                container.contentEquals(
-                    container.toString(Charsets.UTF_8).toByteArray(Charsets.UTF_8))
-            )
-            assertEquals(
-                "no partial copies may remain",
-                emptyList<String>(),
-                cfg.modelsDir.listFiles()!!.map { it.name }.filter { it.endsWith(".tmp") }
-            )
-        }
-
-        @Test fun ensureLayout_stagesMovieKindModelsByteIdenticalToAssets() {
-            val cfg = configWithRealDefaultAsset()
-            cfg.ensureLayout()
-
-            val manifest = JSONObject(File(MOVIE_MODEL_SRC_DIR, "manifest.json").readText())
-            for (name in CrawlerConfig.MOVIE_MODEL_FILES) {
-                val source = File(MOVIE_MODEL_SRC_DIR, name)
-                val staged = File(cfg.movieModelsDir, name)
-                assertTrue("$name must be staged into ${cfg.movieModelsDir}", staged.isFile)
-                assertEquals("$name size must match the asset", source.length(), staged.length())
-                assertEquals("$name staged hash", sha256Hex(source), sha256Hex(staged))
-                assertTrue(
-                    "$name must be copied byte-for-byte",
-                    sameBytes(source, staged)
-                )
-            }
-            // The manifest pins both binaries (size + sha256); assert the STAGED bytes
-            // against it, so a swapped or corrupted model fails here, not on device.
-            val backbone = manifest.getJSONObject("backbone")
-            assertEquals("Q4_0", backbone.getString("quant"))
-            val stagedBackbone = File(cfg.movieModelsDir, backbone.getString("file"))
-            assertEquals(backbone.getLong("bytes"), stagedBackbone.length())
-            assertEquals(backbone.getString("sha256"), sha256Hex(stagedBackbone))
-            val head = manifest.getJSONObject("head")
-            val stagedHead = File(cfg.movieModelsDir, head.getString("file"))
-            assertEquals(head.getLong("bytes"), stagedHead.length())
-            assertEquals(head.getString("sha256"), sha256Hex(stagedHead))
-            assertEquals(
-                "no partial copies may remain",
-                emptyList<String>(),
-                cfg.movieModelsDir.listFiles()!!.map { it.name }.filter { it.endsWith(".tmp") }
-            )
-        }
-
-        @Test fun ensureAssets_doesNotRewriteModelsWhenVersionStampMatches() {
-            val cfg = configWithRealDefaultAsset()
-            cfg.ensureLayout()
-            val staged = File(cfg.modelsDir, "cram.bin")
-            val firstBytes = staged.readBytes()
-            assertTrue(staged.setLastModified(0L))
-
-            cfg.ensureAssets()
-
-            assertEquals("staging must be a no-op when the stamp matches", 0L, staged.lastModified())
-            assertArrayEquals("staged bytes must be unchanged", firstBytes, staged.readBytes())
-        }
-
-        @Test fun ensureAssets_stampCarriesTheModelDir() {
+        @Test fun ensureAssets_stampsKeywordsOnlyAndNeverNamesAModelDir() {
             val cfg = configWithRealDefaultAsset()
             cfg.ensureLayout()
 
             val stamp = File(cfg.workDir, CrawlerConfig.STAMP_FILE)
             assertEquals(
-                "the stamp must pin the model dir, not just the version code",
-                "${crawlerVersionCode()}|${CrawlerConfig.MODELS_SUBDIR}|" +
-                    CrawlerConfig.MOVIE_MODEL_SUBDIR,
+                "the stamp must name the keyword payload, not a model generation",
+                "${crawlerVersionCode()}|keywords",
                 stamp.readText().trim()
             )
+            assertEquals(CrawlerConfig.stampValue(crawlerVersionCode()), stamp.readText().trim())
+            assertFalse("no model dir may appear in the stamp", stamp.readText().contains("models/"))
         }
 
-        @Test fun ensureAssets_v5ToV6UpgradeDeletesTheStaleModelDirAndRestages() {
+        @Test fun ensureAssets_upgradeFromTheModelDirStampKeepsDownloadedModels() {
             val cfg = configWithRealDefaultAsset()
             cfg.ensureLayout()
-            // Simulate an install staged by the v5 build: stale sibling model dir plus a
-            // stamp from before the model dir was part of it.
-            val staleV5 = File(cfg.workDir, "models/v5").apply { mkdirs() }
-            File(staleV5, "adult.ftz").writeBytes(byteArrayOf(9, 9, 9))
+            // An install upgraded from the build that shipped the weights: the stamp named
+            // both model dirs, and files/crawler/models holds the downloaded generations
+            // (plus a retired one the old build's sweep would have reclaimed).
+            cfg.modelsDir.mkdirs()
+            val cram = File(cfg.modelsDir, "cram.bin").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+            cfg.movieModelsDir.mkdirs()
+            val movieHead = File(cfg.movieModelsDir, "movie_kind_head.bin")
+                .apply { writeBytes(byteArrayOf(4, 5, 6)) }
+            val retired = File(cfg.workDir, "models/v11").apply { mkdirs() }
+            File(retired, "adult.ftz").writeBytes(byteArrayOf(7, 7, 7))
             val stamp = File(cfg.workDir, CrawlerConfig.STAMP_FILE)
-            stamp.writeText(crawlerVersionCode().toString())
-            cfg.modelsDir.deleteRecursively() // force a real re-stage
+            stamp.writeText("${crawlerVersionCode()}|models/v15|models/v13")
 
             cfg.ensureAssets()
 
-            assertFalse("the v5 model dir must be reclaimed", staleV5.exists())
-            assertFalse("no v5 models may ship", File(cfg.workDir, "models/v5").exists())
-            assertTrue("the current model dir must survive", cfg.modelsDir.isDirectory)
-            for (name in CrawlerConfig.MODEL_FILES) {
-                val staged = File(cfg.modelsDir, name)
-                assertTrue("$name must be re-staged into ${cfg.modelsDir}", staged.isFile)
-                assertArrayEquals(
-                    "$name must be copied byte-for-byte",
-                    File(MODEL_SRC_DIR, name).readBytes(), staged.readBytes()
-                )
-            }
+            assertTrue("a downloaded generation must survive the stamp change", cram.isFile)
+            assertTrue("the movie-kind generation must survive too", movieHead.isFile)
+            assertTrue("the app never sweeps models/ any more", retired.isDirectory)
             assertEquals(
-                "the stamp must be upgraded to the model-dir scheme",
-                "${crawlerVersionCode()}|${CrawlerConfig.MODELS_SUBDIR}|" +
-                    CrawlerConfig.MOVIE_MODEL_SUBDIR,
+                "the stamp is upgraded to the keyword scheme",
+                "${crawlerVersionCode()}|keywords",
                 stamp.readText().trim()
             )
         }
 
-        @Test fun ensureAssets_stampChangeNeverDeletesTheCurrentModelDir() {
+        @Test fun ensureAssets_restagesKeywordsWhenTheStampChanges() {
             val cfg = configWithRealDefaultAsset()
             cfg.ensureLayout()
-            val current = File(cfg.modelsDir, "cram.bin")
-            assertTrue(current.isFile)
-            val stale = File(cfg.workDir, "models/v2").apply { mkdirs() }
-            File(stale, "adult.ftz").writeBytes(byteArrayOf(1, 2, 3))
-            val unrelated = File(cfg.workDir, "models/notes.txt").apply { writeText("keep me") }
-            File(cfg.workDir, CrawlerConfig.STAMP_FILE).writeText("0|models/v2")
-
-            cfg.ensureAssets()
-
-            assertFalse("the stale sibling dir is reclaimed", stale.exists())
-            assertTrue("the current model dir is never deleted", cfg.modelsDir.isDirectory)
-            assertTrue("staged model files survive the sweep", current.isFile)
-            assertTrue("only dirs are swept: plain files stay", unrelated.isFile)
-            assertEquals(
-                "${crawlerVersionCode()}|${CrawlerConfig.MODELS_SUBDIR}|" +
-                    CrawlerConfig.MOVIE_MODEL_SUBDIR,
-                File(cfg.workDir, CrawlerConfig.STAMP_FILE).readText().trim()
-            )
-        }
-
-        @Test fun ensureAssets_restagesModelsWhenVersionStampChanges() {
-            val cfg = configWithRealDefaultAsset()
-            cfg.ensureLayout()
-            val staged = File(cfg.modelsDir, "cram.bin")
-            staged.writeBytes(byteArrayOf(1, 2, 3)) // simulate an interrupted copy
+            val keywords = File(cfg.workDir, "torrent_search_keywords.txt")
+            keywords.writeText("stale\n")
             val stamp = File(cfg.workDir, CrawlerConfig.STAMP_FILE)
             assertTrue(stamp.delete())
 
             cfg.ensureAssets()
 
-            assertArrayEquals(
-                "a version change must repair the staged model",
-                File(MODEL_SRC_DIR, "cram.bin").readBytes(), staged.readBytes()
+            assertEquals(
+                "a stamp change must re-stage the keyword assets",
+                "strip-a\n",
+                keywords.readText()
             )
             assertTrue("the stamp is rewritten", stamp.exists())
-        }
-
-        @Test fun ensureAssets_keepsBothShippedGenerationsAndSweepsTheRetiredOne() {
-            val cfg = configWithRealDefaultAsset()
-            cfg.ensureLayout()
-            // A pre-Stage-D install: one model dir in the stamp, a retired v4 dir
-            // left over from an older build.
-            val retired = File(cfg.workDir, "models/v4").apply { mkdirs() }
-            File(retired, "adult.ftz").writeBytes(byteArrayOf(4, 4, 4))
-            // The generation the app shipped before this bump: no longer active, so it must
-            // be swept even though its file names are identical to the active pair's.
-            val previous = File(cfg.workDir, "models/v10").apply { mkdirs() }
-            File(previous, "movie_kind_head.bin").writeBytes(byteArrayOf(10, 10, 10))
-            // The classifier generation this bump retires: the real v11 -> v15 case.
-            val oldClassifier = File(cfg.workDir, "models/v11").apply { mkdirs() }
-            File(oldClassifier, "adult.ftz").writeBytes(byteArrayOf(11, 11, 11))
-            val stamp = File(cfg.workDir, CrawlerConfig.STAMP_FILE)
-            stamp.writeText("${crawlerVersionCode()}|models/v6")
-
-            cfg.ensureAssets()
-
-            assertFalse("the retired v4 generation is reclaimed", retired.exists())
-            assertFalse("the previous v10 generation is reclaimed", previous.exists())
-            assertFalse("the retired v11 classifier generation is reclaimed", oldClassifier.exists())
-            assertTrue("the CRAM generation survives the sweep", cfg.modelsDir.isDirectory)
-            assertTrue("the movie-kind generation survives the sweep", cfg.movieModelsDir.isDirectory)
-            for (name in CrawlerConfig.MOVIE_MODEL_FILES) {
-                assertTrue("$name must stay staged in ${cfg.movieModelsDir}", File(cfg.movieModelsDir, name).isFile)
-            }
-            assertEquals(
-                "the stamp must carry both model dirs",
-                "${crawlerVersionCode()}|${CrawlerConfig.MODELS_SUBDIR}|" +
-                    CrawlerConfig.MOVIE_MODEL_SUBDIR,
-                stamp.readText().trim()
-            )
         }
 
         private fun configWithRealDefaultAsset(): CrawlerConfig {
@@ -576,15 +334,8 @@ class CrawlerConfigTest {
             val defaultAsset = File("src/main/assets/dht_crawler/config.ini.default")
             assertTrue("checked-in default asset must exist", defaultAsset.exists())
             File(fixture, "config.ini.default").writeText(defaultAsset.readText())
-            copyClassifierModelAssets(fixture)
             return CrawlerConfig(context) { path -> File(tmp.root, "assets/$path").inputStream() }
         }
-
-        /** Checked-in model assets (read-only source of truth for the staging tests). */
-        private val MODEL_SRC_DIR = File("src/main/cpp/dht_crawler-android/models/v15")
-
-        /** Checked-in movie-kind (JEVH) assets — the v13 generation's source of truth. */
-        private val MOVIE_MODEL_SRC_DIR = File("src/main/cpp/dht_crawler-android/models/v13")
 
         /** Mirrors `CrawlerConfig.currentVersionCode()`, which is private to the class. */
         private fun crawlerVersionCode(): Long {
@@ -595,64 +346,6 @@ class CrawlerConfigTest {
             } else {
                 @Suppress("DEPRECATION")
                 info.versionCode.toLong()
-            }
-        }
-
-        /**
-         * Mirrors `assets/dht_crawler/models/v15/` and `.../v13/` into the asset fixture with
-         * the real checked-in model files, so byte fidelity is asserted against real
-         * binaries.
-         */
-        private fun copyClassifierModelAssets(assetDir: File) {
-            assertTrue("checked-in model dir must exist: $MODEL_SRC_DIR", MODEL_SRC_DIR.isDirectory)
-            val dst = File(assetDir, CrawlerConfig.MODELS_SUBDIR).apply { mkdirs() }
-            MODEL_SRC_DIR.listFiles()!!.forEach { it.copyTo(File(dst, it.name), overwrite = true) }
-            assertTrue(
-                "checked-in movie-kind dir must exist: $MOVIE_MODEL_SRC_DIR",
-                MOVIE_MODEL_SRC_DIR.isDirectory
-            )
-            val movieDst = File(assetDir, CrawlerConfig.MOVIE_MODEL_SUBDIR).apply { mkdirs() }
-            for (name in CrawlerConfig.MOVIE_MODEL_FILES) {
-                File(MOVIE_MODEL_SRC_DIR, name).copyTo(File(movieDst, name), overwrite = true)
-            }
-        }
-
-        /**
-         * SHA-256 of [file], streamed in 64 KiB chunks: the movie-kind backbone is
-         * ~478 MiB, so a whole-file `readBytes()` would blow the unit-test heap.
-         */
-        private fun sha256Hex(file: File): String {
-            val digest = MessageDigest.getInstance("SHA-256")
-            val buffer = ByteArray(64 * 1024)
-            file.inputStream().use { input ->
-                while (true) {
-                    val n = input.read(buffer)
-                    if (n < 0) break
-                    digest.update(buffer, 0, n)
-                }
-            }
-            return digest.digest().joinToString("") { "%02x".format(it) }
-        }
-
-        /**
-         * True when [a] and [b] hold identical bytes, compared in 64 KiB chunks: the
-         * movie-kind backbone is ~478 MiB, so `readBytes()` on both sides would blow
-         * the unit-test heap.
-         */
-        private fun sameBytes(a: File, b: File): Boolean {
-            if (a.length() != b.length()) return false
-            val bufA = ByteArray(64 * 1024)
-            val bufB = ByteArray(64 * 1024)
-            a.inputStream().use { ia ->
-                b.inputStream().use { ib ->
-                    while (true) {
-                        val na = ia.read(bufA)
-                        val nb = ib.read(bufB)
-                        if (na != nb) return false
-                        if (na <= 0) return true
-                        if (!java.util.Arrays.equals(bufA, 0, na, bufB, 0, nb)) return false
-                    }
-                }
             }
         }
 

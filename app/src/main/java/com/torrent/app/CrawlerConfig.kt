@@ -6,7 +6,6 @@ import com.torrent.app.config.CrawlerSettings
 import android.content.pm.PackageManager
 import android.os.Build
 import java.io.File
-import java.io.FileOutputStream
 import java.io.InputStream
 import java.nio.channels.FileChannel
 import java.nio.file.AtomicMoveNotSupportedException
@@ -16,10 +15,11 @@ import java.nio.file.StandardOpenOption
 
 /**
  * Owns the dht_crawler's working dir under internal storage: `filesDir/crawler/`
- * (contains `config.ini`, `data/`, the keyword files, `models/v15/` with the
- * CRAM classifier model files, and `models/v13/` with the movie-kind JEVH
- * backbone (Q4_0, hidden 1024) + head). Stage 09 (internal storage only); the
- * crawler process itself is started by a later supervisor step.
+ * (contains `config.ini`, `data/`, the keyword files, and `models/v15` +
+ * `models/v13` — the classifier weights, which the CRAWLER downloads at first
+ * run via `dht_crawler --fetch-models` and the app never stages; see
+ * [CrawlerModels]). Stage 09 (internal storage only); the crawler process itself
+ * is started by a later supervisor step.
  */
 class CrawlerConfig(
     private val context: Context,
@@ -48,26 +48,23 @@ class CrawlerConfig(
     }
 
     /**
-     * Copies the keyword files from `assets/dht_crawler/` into [workDir], the
-     * CRAM classifier files from `assets/dht_crawler/models/v15/` into
-     * [modelsDir], and the movie-kind JEVH files from
-     * `assets/dht_crawler/models/v13/` into [movieModelsDir], when missing or when
-     * the `"<versionCode>|<MODELS_SUBDIR>|<MOVIE_MODEL_SUBDIR>"` `.assets_version`
-     * stamp differs — so a model-dir bump re-stages even at an unchanged version
-     * code. Every call also sweeps `models/` for other generations
-     * ([deleteStaleModelDirs]): only immediate child dirs whose name is a
-     * `v<digits>` generation outside the active set are deleted, so a stale
-     * generation can never survive a stamp state while both shipped generations
-     * stay put, and non-generation dirs/files under `models/` are never touched.
-     * The models are binary (CRAM `.bin`/vocab, GGUF, JEVH); they are streamed
-     * byte-for-byte — see [copyBinaryAtomically].
+     * Copies the keyword files from `assets/dht_crawler/` into [workDir] when they
+     * are missing or when the `"<versionCode>|keywords"` `.assets_version` stamp
+     * differs.
+     *
+     * The classifier weights are no longer shipped in the APK: the crawler
+     * downloads `models/v15` + `models/v13` itself on first run
+     * (`dht_crawler --fetch-models`, sha256-verified against each generation's
+     * manifest). This function never reads or writes [modelsDir] /
+     * [movieModelsDir], and nothing under `models/` is ever deleted by the app — a
+     * downloaded generation must survive every upgrade and every stamp change.
      */
     fun ensureAssets() {
         val version = currentVersionCode()
-        // The stamp carries both model dirs as well as the version code: a v5 -> v6
-        // classifier bump, or the v9 movie-kind addition, must re-stage even when
-        // `versionCode` itself is unchanged.
-        val stampValue = "$version|$MODELS_SUBDIR|$MOVIE_MODEL_SUBDIR"
+        // The stamp covers the keyword assets only. It deliberately does not name a
+        // model dir any more: the classifier weights are downloaded by the crawler,
+        // not staged, so a generation bump must never restage — or wipe — them.
+        val stampValue = stampValue(version)
         val stamp = File(workDir, STAMP_FILE)
         val stampMatches = stamp.exists() && stamp.readText().trim() == stampValue
         for (name in KEYWORD_FILES) {
@@ -76,39 +73,13 @@ class CrawlerConfig(
             val text = openAsset("$ASSET_DIR/$name").use { it.readBytes().toString(Charsets.UTF_8) }
             writeAtomically(target, text)
         }
-        stageModels(MODELS_SUBDIR, modelsDir, MODEL_FILES, stampMatches)
-        stageModels(MOVIE_MODEL_SUBDIR, movieModelsDir, MOVIE_MODEL_FILES, stampMatches)
-        // Sweep on every call, not just on a stamp mismatch: "no stale generation
-        // dir survives" must not depend on stamp state. Any `vN` model dir under
-        // models/ that is not one of the active generations is a previous
-        // generation's dead weight. The active dirs are never candidates, so a
-        // running crawler keeps its files.
-        deleteStaleModelDirs()
+        // No model staging and no sweep: `models/` belongs to the crawler's
+        // `--fetch-models` one-shot. The app never writes, deletes or restages
+        // anything under it, so an install that already downloaded the weights
+        // keeps them across upgrades and stamp changes.
         if (!stampMatches) {
             stamp.writeText(stampValue)
         }
-    }
-
-    /** Stages [files] of [subdir] into [dir]; a matching stamp keeps existing copies. */
-    private fun stageModels(subdir: String, dir: File, files: List<String>, stampMatches: Boolean) {
-        for (name in files) {
-            val target = File(dir, name)
-            if (stampMatches && target.exists()) continue
-            openAsset("$ASSET_DIR/$subdir/$name").use { copyBinaryAtomically(it, target) }
-        }
-    }
-
-    /**
-     * Deletes every immediate child dir of `workDir/models` that is a generation
-     * dir outside the active set — [MODELS_SUBDIR] and [MOVIE_MODEL_SUBDIR], e.g.
-     * `v4`/`v5` once the app ships v6 and v9. Sibling dirs only: the active ones
-     * are never candidates, so an in-flight crawler that resolves [modelsDir] (or
-     * [movieModelsDir]) keeps its files. Delegates to the pure
-     * [deleteStaleModelDirs], which owns the `v<digits>` guard.
-     */
-    private fun deleteStaleModelDirs() {
-        val active = setOf(File(MODELS_SUBDIR).name, File(MOVIE_MODEL_SUBDIR).name)
-        modelsDir.parentFile?.let { deleteStaleModelDirs(it, active) }
     }
 
     /**
@@ -229,6 +200,17 @@ class CrawlerConfig(
         const val STAMP_FILE = ".assets_version"
 
         /**
+         * The `.assets_version` stamp's suffix: the stamp reads
+         * `"<versionCode>|keywords"`. It names the keyword-asset payload only —
+         * never a model generation — so a classifier bump can no longer force a
+         * restage of weights the app does not ship.
+         */
+        const val STAMP_SUFFIX = "keywords"
+
+        /** The `.assets_version` value for [versionCode]: `"<versionCode>|keywords"`. */
+        fun stampValue(versionCode: Long): String = "$versionCode|$STAMP_SUFFIX"
+
+        /**
          * Text list files shipped under `assets/dht_crawler/` and kept in the work
          * dir: the torrent-search keyword list plus the always-on hard-block list
          * (Stage 6).
@@ -238,34 +220,17 @@ class CrawlerConfig(
         /** Hard-block list file name (`hard_block_file`), staged in the work dir. */
         const val HARD_BLOCK_FILE = "hard_block.txt"
 
-        /** Classifier model dir, work-dir relative (mirrors crawler `classifier_model_dir`). */
+        /**
+         * Classifier model dir, work-dir relative (mirrors crawler `classifier_model_dir`).
+         * Downloaded by the crawler's `--fetch-models` one-shot; the app only reads it.
+         */
         const val MODELS_SUBDIR = "models/v15"
 
-        /** Movie-kind model dir, work-dir relative (mirrors `movie_kind_model_dir`). */
+        /**
+         * Movie-kind model dir, work-dir relative (mirrors `movie_kind_model_dir`).
+         * Downloaded by the crawler, like [MODELS_SUBDIR].
+         */
         const val MOVIE_MODEL_SUBDIR = "models/v13"
-
-        /**
-         * A classifier model generation dir name: `v` followed by digits (`v3`, `v4`, …).
-         * Only names matching this are sweep candidates under `models/` — see
-         * [deleteStaleModelDirs].
-         */
-        private val STALE_MODEL_DIR_NAME = Regex("^v\\d+$")
-
-        /**
-         * Deletes every immediate child of [modelsRoot] that is a generation dir (name
-         * matching [STALE_MODEL_DIR_NAME]) not in [activeNames]. Pure (plain [File]s,
-         * no Android deps) so it is unit-testable. Never touches: plain files (even one
-         * named `v3`), non-generation dirs (e.g. `backup/`), an active dir, and a
-         * missing/unreadable [modelsRoot] ([File.listFiles] returning null).
-         */
-        internal fun deleteStaleModelDirs(modelsRoot: File, activeNames: Set<String>) {
-            for (child in modelsRoot.listFiles().orEmpty()) {
-                if (!child.isDirectory) continue
-                if (child.name in activeNames) continue
-                if (!STALE_MODEL_DIR_NAME.matches(child.name)) continue
-                child.deleteRecursively()
-            }
-        }
 
         /** `save_categories` — categories to keep; the key is omitted when none is selected. */
         const val SAVE_CATEGORIES_KEY = "save_categories"
@@ -291,28 +256,6 @@ class CrawlerConfig(
             val cleaned = names.map { it.trim().lowercase() }.filter { it.isNotEmpty() }
             return if (cleaned.isEmpty()) null else cleaned.joinToString(",")
         }
-
-        /**
-         * Binary model assets shipped under `assets/dht_crawler/models/v15/` and staged
-         * into `workDir/models/v15/`, where the crawler resolves them via the pinned
-         * `classifier_model_dir`. CRAM is a single engine: one container + its vocab
-         * blob, sha-pinned by the manifest — no `.ftz` file ships.
-         */
-        val MODEL_FILES = listOf("cram.bin", "cram_vocab.bin", "manifest.json")
-
-        /**
-         * Movie-kind assets shipped under `assets/dht_crawler/models/v13/` and staged
-         * into `workDir/models/v13/`, where the crawler resolves them via the pinned
-         * `movie_kind_model_dir`. The manifest pins both binaries' size + sha256; the
-         * `.gguf` is the Q4_0 backbone (hidden 1024, last-token pooling), the `.bin`
-         * the JEVH head.
-         */
-        val MOVIE_MODEL_FILES = listOf(
-            "manifest.json", "movie_kind_backbone_Q4_0.gguf", "movie_kind_head.bin"
-        )
-
-        /** Buffer size for the binary-safe asset copy (streamed, never decoded). */
-        const val BINARY_COPY_BUFFER = 64 * 1024
 
         /**
          * Keys the config writer always forces to a fixed value: the backup flags
@@ -427,35 +370,5 @@ class CrawlerConfig(
             }
         }
 
-        /**
-         * Streams [input] to [file] without any text decoding: 64 KiB chunks into a
-         * temp file in the same directory, fsync, then rename (atomic move, falling
-         * back to a plain replace). Model files are binary — a UTF-8 round-trip would
-         * corrupt them, so they must never go through [writeAtomically].
-         */
-        fun copyBinaryAtomically(input: InputStream, file: File) {
-            file.parentFile?.mkdirs()
-            val tmp = File(file.parentFile, ".${file.name}.tmp")
-            FileOutputStream(tmp).use { out ->
-                val buf = ByteArray(BINARY_COPY_BUFFER)
-                while (true) {
-                    val n = input.read(buf)
-                    if (n < 0) break
-                    out.write(buf, 0, n)
-                }
-                out.flush()
-                out.fd.sync()
-            }
-            if (!tmp.renameTo(file)) {
-                try {
-                    Files.move(
-                        tmp.toPath(), file.toPath(),
-                        StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING
-                    )
-                } catch (e: AtomicMoveNotSupportedException) {
-                    Files.move(tmp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING)
-                }
-            }
-        }
     }
 }

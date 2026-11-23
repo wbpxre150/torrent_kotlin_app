@@ -122,9 +122,9 @@ prefix is required by the packaging step — they are **exec'd as PIE binaries, 
 `buildDhtCrawler`; `fetchLlamaCpp` (llama.cpp pin `18ab62a8ec5144ae5d2f65e78374ba69652d75dd`, tarball
 sha256 `34bd70e229bf0439575b7865e986209d23584bd35274d95c256f9ccf398ab46a`) → `buildLlama` →
 `buildDhtCrawler`;
-`buildFtpServer` (leaf). `copyDhtCrawlerAssets` copies the crawler's keyword files and both model
-generations (~504 MiB, ~6 s) into
-`build/generated/assets/dht_crawler/` (wired into merge assets). `afterEvaluate` makes
+`buildFtpServer` (leaf). `copyDhtCrawlerAssets` copies the crawler's keyword files (~1 MB) into
+`build/generated/assets/dht_crawler/` (wired into merge assets) — the classifier weights are **not**
+assets any more (see *Movie-kind classifier (v13)*). `afterEvaluate` makes
 `mergeDebugJniLibFolders` depend on all three build tasks. `-PdhtCrawlerSrc=<path>` overrides the
 crawler source root. Native build inputs/outputs land under `app/build/native/`.
 
@@ -137,17 +137,30 @@ model generations ship side by side: `models/v15` (CRAM — see *CRAM classifier
 1024×16, sha256 `2f994cbe792441be182717cc6faa46f3ff245db6d17af30d72cfc47bbefb7ae3`, hidden 1024, 16
 labels, prompt `Torrent: {name}\nFilm genres:`, max 64 tokens, staged beside `manifest.json` 17,772 B
 sha256 `e0474643…fb57` — pinned by `movie_kind_model_dir`). `CrawlerConfig.MOVIE_MODEL_SUBDIR =
-"models/v13"` drives the staging source/dest, the stamp and that pin. `ensureAssets` stages both, the
-sweep keeps the active *set* `{v15, v13}` and removes retired dirs (the v15 install swept `v11`), and
-`.assets_version` is `<versionCode>|models/v15|models/v13` — a stamp change is what triggers restaging, no
-versionCode bump required; the stamp is a crawler-level file (`files/crawler/.assets_version`, **not** under
-`models/`) and currently reads `4|models/v15|models/v13`. The staged models total 512,972,090 B (~489.2 MiB
-— `models/v15` 11,436,190 B + `models/v13` 501,535,900 B) and the installed debug APK measures 540,330,690 B
-at `versionCode` 4 / `versionName` "0.4.0" — 1,714,860 B smaller than the 0.3.0 build's 542,045,550 B, the
-net of dropping the three fastText `.ftz` students (26,612,152 B) for the CRAM pair (11,436,190 B):
-−15,175,962 B of staged assets, −1.7 MB of APK. (For the record the 0.3.0 build was itself ~6.8 MB smaller
-than the 548,821,733 B v10 build because the v13 weights deflate differently, despite identical uncompressed
-asset sizes.)
+"models/v13"` drives the pin. **The weights are no longer shipped in the APK.** Both generations used to
+be staged out of `app/src/main/cpp/dht_crawler-android/models/` (that directory is gone) and are now
+downloaded by the crawler itself at first run: `dht_crawler --fetch-models` pulls
+`https://unjumble.au/bep51/models/{v15,v13}/` into `./models/{v15,v13}` (cwd = `files/crawler`), verifies
+every file against that generation's own sha256-pinned `manifest.json`, skips files that are already
+present and correct, exits 0/1 and is safe to call on every start. `DaemonService.maybeFetchCrawlerModels`
+runs it through a **dedicated** `OneShotRunner` + single-thread executor (never the maintenance runner,
+which holds one child/pid) **before** the crawler starts, and blocks the crawler start — not the service,
+which keeps FTP/transmission/the dashboard live — until it exits, bounded by
+`CrawlerModels.FETCH_TIMEOUT_MS` (12 min) as a hang guard; a non-zero exit, a launch failure or the bound
+all start the crawler anyway (both engines inert) and retry after
+`CrawlerModels.FAILURE_RETRY_INTERVAL_MS` (1 h). The wait is deliberate: the crawler loads its models only
+at process start, so starting it first would leave it inert for the whole session and stamp `clf_ver` 0 on
+every ingested row, which nothing repairs automatically (`classify_backfill_mode` is pinned `off`). The
+downloaded generations total 512,972,090 B (~489.2 MiB — `models/v15` 11,436,190 B + `models/v13`
+501,535,900 B), which is the payload the APK no longer carries: the 0.4.0 debug APK measured 540,330,690 B
+with them staged, and the post-diet APK size is **pending the parent's build measurement** (expect ~489 MB
+smaller, less the few MB of keyword assets that remain). `.assets_version` is now
+`<versionCode>|keywords` (`CrawlerConfig.stampValue`) — it names the keyword payload only, so a classifier
+bump can no longer force a restage; it is a crawler-level file (`files/crawler/.assets_version`, **not**
+under `models/`). `ensureAssets` stages the keyword files only and the `v<digits>` sweep is **gone**:
+nothing under `models/` is ever deleted by the app, so an upgrade from the old `4|models/v15|models/v13`
+stamp keeps a user's downloaded generations (`CrawlerConfigTest.ensureAssets_upgradeFromTheModelDirStampKeepsDownloadedModels`
+pins exactly that).
 Generation is manifest-derived: the manifest's top-level `"version": "v13"` (`mk_parse_generation`)
 yields `movie_kind_clf_ver` 13 and `/stats movie_kind.generation` 13 with **no code change**; `genres[]`
 order is byte-identical to v10 and `taxonomy.sha256` is unchanged at
@@ -219,7 +232,7 @@ scores all three fields**: a single CRAM forward pass over the wide design decid
 48-state argmin), `tv_kind` (the standalone `kind_W` head) and `adult` (the joint's adult marginal) at
 ingest. **No `.ftz` file ships, no ftc model is loaded, and there is no fastText fallback**; the
 `dht_crawler-android` wrapper still links ftc/fastText, and removing that build wiring is optional
-cleanup. Staged files and shas (`app/src/main/cpp/dht_crawler-android/models/v15/`):
+cleanup. Fetched files and shas (`files/crawler/models/v15/`, downloaded by `--fetch-models`):
 
 | file | bytes | sha256 |
 |---|---:|---|
@@ -414,7 +427,9 @@ v13 manifest and on-device `sha256sum`; **1,947/1,947** adult0-movie rows at `mo
 
 **Device state after the v15 rollout:** 192,599 torrents / 14,704,427 files, DB 1,642,405,888 B,
 `versionCode` 4 / `versionName` "0.4.0", installed APK 540,330,690 B, `files/crawler/models/` = {v15,
-v13}, `.assets_version` = `4|models/v15|models/v13`.
+v13}, `.assets_version` = `4|models/v15|models/v13` — that stamp format predates the APK diet; it is now
+`<versionCode>|keywords`, and `files/crawler/models/` is populated by the crawler's `--fetch-models`
+instead of by asset staging.
 
 **Accepted costs (design §1 — carried, not waived).** tv_kind v1 heldout drift **+2.73 pp**, and v2 is
 **val-validated only** (its heldout analogue is an extrapolation, never a measurement); val ECE
@@ -479,8 +494,9 @@ flavours build standalone.
 (v15 `cram.bin`/`cram_vocab.bin`/`manifest.json`, v13 `movie_kind_backbone_Q4_0.gguf`/`movie_kind_head.bin`/
 `manifest.json`, ~490 MB) and verifies each file against the sha256 pinned in the script before installing
 it into `./models/<gen>` — the compiled-in default dirs, so no config change is needed. The bucket is the
-R2 `unjumble` bucket (`bep51/` prefix) behind the `unjumble.au` custom domain; the app still stages its own
-copy into APK assets, unchanged.
+R2 `unjumble` bucket (`bep51/` prefix) behind the `unjumble.au` custom domain; the app no longer stages its own
+copy into APK assets — it runs the same `--fetch-models` one-shot at crawler start (see *Movie-kind
+classifier (v13)*).
 
 **The BEP51 cache is fetched by the crawler too** (it used to be the Kotlin app's job only).
 `bep51_cache_url` (default `https://unjumble.au/bep51/bep51_cache.dat`, ~1.9 MB / 50,000 nodes; empty

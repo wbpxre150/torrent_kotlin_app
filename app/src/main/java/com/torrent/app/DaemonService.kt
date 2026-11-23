@@ -185,6 +185,13 @@ class DaemonService : Service() {
     // One-shot maintenance runner + its coordinator (plan 10 step 5); both are
     // created in onCreate() once applicationInfo is available.
     private lateinit var oneShotRunner: OneShotRunner
+
+    /**
+     * The weights download's own runner. [OneShotRunner] tracks one child/pid, so
+     * this must never be the maintenance [oneShotRunner] — a concurrent
+     * maintenance cancel() would otherwise SIGTERM the download (or the reverse).
+     */
+    private lateinit var modelFetchRunner: OneShotRunner
     private lateinit var crawlerMaintenance: CrawlerMaintenance
     // BEP51 cache backup (Stage 4): uploads the crawler's bootstrap cache to
     // R2 daily (and on manual dashboard trigger) on its own single-thread
@@ -210,6 +217,12 @@ class DaemonService : Service() {
     // feeds the settings frame's `bootstrap` family — wired here because this
     // is the composition point (invariant 12).
     private val bootstrapStatusHolder = BootstrapStatusHolder()
+
+    /**
+     * Classifier-weights download state: the crawler's `--fetch-models` one-shot
+     * runs at every crawler start (the weights are no longer shipped in the APK).
+     */
+    private val modelFetchStatusHolder = ModelFetchStatusHolder()
     // Search-dashboard stage 2: one add handler shared by the :8090
     // /api/transmission/add route and the crawler-proxy route; built once in
     // onCreate (needs configStore + gateway).
@@ -238,6 +251,14 @@ class DaemonService : Service() {
         // runner execs the same libdhtcrawler.so the supervisor supervises;
         // the coordinator serializes actions on the crawler-control executor.
         oneShotRunner = OneShotRunner(
+            binaryName = "libdhtcrawler.so",
+            nativeLibraryDir = applicationInfo.nativeLibraryDir,
+            extraEnv = mapOf("TMPDIR" to File(filesDir, "tmp").apply { mkdirs() }.absolutePath),
+        )
+        // The weights download gets its OWN runner: [OneShotRunner] holds a single
+        // child/pid, so sharing the maintenance runner would let a maintenance
+        // cancel() SIGTERM the download (or the reverse) and clobber `pid`.
+        modelFetchRunner = OneShotRunner(
             binaryName = "libdhtcrawler.so",
             nativeLibraryDir = applicationInfo.nativeLibraryDir,
             extraEnv = mapOf("TMPDIR" to File(filesDir, "tmp").apply { mkdirs() }.absolutePath),
@@ -454,6 +475,9 @@ class DaemonService : Service() {
             // null, so the frame's `bootstrap` family is IDLE before the first
             // download attempt.
             bootstrapStatus = { bootstrapStatusHolder.status },
+            // The classifier-weights download's live status: a holder, never null,
+            // so the crawler card's models line is populated before the first fetch.
+            modelsStatus = { modelFetchStatusHolder.status },
             cloudflaredStatus = ::getCloudflaredStatus,
             addHandler = crawlerAddHandler,
             crawlerRestoreDbStatus = { dbRestore.status },
@@ -1847,6 +1871,11 @@ class DaemonService : Service() {
                     prepare = { crawlerConfig.ensureLayout() },
                     migrate = { migrateClassifierVersion(crawlerConfig) },
                     start = {
+                        // The classifier weights are downloaded, not shipped: fetch
+                        // them BEFORE the crawler starts (it loads models only at
+                        // process start). Bounded and non-fatal — see
+                        // [maybeFetchCrawlerModels].
+                        maybeFetchCrawlerModels(crawlerConfig)
                         // Stage 5: before the crawler's (re)launch, warm-start it from
                         // a downloaded BEP51 bootstrap cache when configured. Bounded
                         // (15 s connect / 30 s read), and every failure falls through
@@ -1958,6 +1987,93 @@ class DaemonService : Service() {
                     "BEP51 bootstrap from ${hostOf(settings.bootstrapUrl)} failed; " +
                         "crawler will cold-start: ${result.reason}")
             }
+        }
+    }
+
+    /**
+     * Downloads the classifier weights the crawler needs, before it starts.
+     *
+     * The ~489 MB of CRAM (v15) and movie-kind (v13) weights used to be staged
+     * out of APK assets; they are now fetched by the crawler itself
+     * (`dht_crawler --fetch-models`, sha256-verified against each generation's
+     * own `manifest.json`, skipping files that are already correct), so the APK
+     * no longer carries them.
+     *
+     * The wait is deliberate and blocks the CRAWLER START, never the service:
+     * this runs on [crawlerControlExecutor] (a background single thread), so no
+     * ANR, and FTP/transmission/the dashboard are unaffected. Starting the
+     * crawler first would be worse than waiting — it loads its models only at
+     * process start, so it would run the whole session with both engines inert
+     * and stamp `clf_ver` 0 on every ingested row, and with
+     * `classify_backfill_mode` pinned `off` nothing repairs those rows
+     * automatically.
+     *
+     * Non-fatal by contract: a non-zero exit, a launch failure or the
+     * [CrawlerModels.FETCH_TIMEOUT_MS] hang guard all leave the crawler starting
+     * in the documented inert-engine degraded mode, and the next start retries
+     * after [CrawlerModels.FAILURE_RETRY_INTERVAL_MS]. The one-shot runs on its
+     * own [modelFetchExecutor] so the download can outlive the bounded wait and
+     * the dashboard keeps showing progress.
+     */
+    private fun maybeFetchCrawlerModels(crawlerConfig: CrawlerConfig) {
+        val modelsRoot = crawlerConfig.workDir
+        val present = CrawlerModels.presentGenerations(modelsRoot)
+        val missing = CrawlerModels.missingGenerations(modelsRoot)
+        modelFetchStatusHolder.notePresence(present, missing)
+        if (!CrawlerModels.shouldFetch(
+                modelFetchStatusHolder.status.lastFailureAt, System.currentTimeMillis())) {
+            android.util.Log.i(
+                "DaemonService",
+                "classifier weights: skipping the fetch after a recent failure (retry in " +
+                    "${CrawlerModels.FAILURE_RETRY_INTERVAL_MS / 60_000} min); missing $missing")
+            return
+        }
+        modelFetchStatusHolder.markRunning(present, missing)
+        val done = java.util.concurrent.CountDownLatch(1)
+        try {
+            modelFetchExecutor.execute {
+                val code = try {
+                    modelFetchRunner.run(listOf(CrawlerModels.FETCH_FLAG), modelsRoot) { line ->
+                        modelFetchStatusHolder.markProgress(line)
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.w("DaemonService", "classifier-weights fetch failed to run", e)
+                    -1
+                } finally {
+                    done.countDown()
+                }
+                val after = CrawlerModels.presentGenerations(modelsRoot)
+                val stillMissing = CrawlerModels.missingGenerations(modelsRoot)
+                if (code == 0) {
+                    modelFetchStatusHolder.markOk(after, stillMissing)
+                    android.util.Log.i(
+                        "DaemonService",
+                        "classifier weights: present ${after.joinToString(",")} after --fetch-models")
+                } else {
+                    modelFetchStatusHolder.markFailed("exit $code", after, stillMissing, code)
+                    android.util.Log.w(
+                        "DaemonService",
+                        "classifier weights: --fetch-models exited $code; the crawler starts with " +
+                            "both engines inert (missing ${stillMissing.joinToString(",")})")
+                }
+            }
+        } catch (e: Exception) {
+            modelFetchStatusHolder.markFailed("could not queue the fetch: ${e.message}", present, missing)
+            android.util.Log.w("DaemonService", "classifier weights: fetch not queued", e)
+            return
+        }
+        val finished = try {
+            done.await(CrawlerModels.FETCH_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        }
+        if (!finished) {
+            android.util.Log.w(
+                "DaemonService",
+                "classifier weights: still downloading after " +
+                    "${CrawlerModels.FETCH_TIMEOUT_MS / 60_000} min; starting the crawler with " +
+                    "both engines inert (the download continues in the background)")
         }
     }
 
@@ -2280,6 +2396,11 @@ class DaemonService : Service() {
             GracefulShutdownPlanner.Step("stop-crawler") {
                 stopCrawlerForShutdown()
             },
+            GracefulShutdownPlanner.Step("cancel-model-fetch") {
+                // A 490 MB download must not outlive the service. Idempotent, and a
+                // no-op when no fetch is running.
+                if (::modelFetchRunner.isInitialized) modelFetchRunner.cancel()
+            },
             GracefulShutdownPlanner.Step("stop-ftp") {
                 stopSupervisorForShutdown(FTP_LABEL)
                 // Also drop the cached registration: [stopSupervisorForShutdown]
@@ -2462,6 +2583,16 @@ class DaemonService : Service() {
         // launched. The thread is a daemon and dies with the process.
         private val crawlerControlExecutor = Executors.newSingleThreadExecutor(ThreadFactory {
             Thread(it, "crawler-control").apply { isDaemon = true }
+        })
+
+        /**
+         * The classifier-weights download runs on its OWN single-thread executor:
+         * it is not a crawler-control job (the crawler start blocks on it, so
+         * queueing it on [crawlerControlExecutor] would self-deadlock) and it must
+         * not share the maintenance runner's process handle.
+         */
+        private val modelFetchExecutor = Executors.newSingleThreadExecutor(ThreadFactory {
+            Thread(it, "model-fetch").apply { isDaemon = true }
         })
 
         // Plan 07 §2.6: FTP supervisor stop/start/rebuild run on a dedicated

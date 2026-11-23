@@ -120,6 +120,10 @@ class ControlServer(
     // null means "nothing recorded yet" and renders as IDLE. DaemonService
     // wires its BootstrapStatusHolder here (Stage 6).
     private val bootstrapStatus: () -> com.torrent.app.backup.BootstrapStatus? = { null },
+    // Classifier-weights download state (the crawler's `--fetch-models` one-shot);
+    // null means "nothing recorded yet". DaemonService wires its
+    // ModelFetchStatusHolder here.
+    private val modelsStatus: () -> com.torrent.app.ModelFetchStatus? = { null },
     private val port: Int = 8090,
     // Search-dashboard stage 2: same-origin POST /api/transmission/add (mirrors
     // CrawlerProxyServer's route); null = the route answers 503.
@@ -1019,6 +1023,7 @@ class ControlServer(
             """<div class="row"><span class="k">Search</span><span class="v"><a href="/search">/search</a></span></div>""",
             """<div class="row"><span class="k">Stats</span><span class="v" data-field="statsLine">${esc(cachedCrawlerStatsLine ?: "—")}</span></div>""",
             """<div class="row"><span class="k">Classifier</span><span class="v" data-field="cramStatsLine">${esc(cachedCramStatsLine ?: "—")}</span></div>""",
+            """<div class="row"><span class="k">Models</span><span class="v" data-field="modelsLine">${esc(modelsLineText())}</span></div>""",
             """<div class="row"><span class="k">Backfill</span><span class="v" data-field="backfillLine">${esc(cachedCrawlerBackfillLine ?: "—")}</span></div>""",
             """<div class="row"><span class="k">Adult backfill</span><span class="v" data-field="adultBackfillLine">${esc(cachedCrawlerAdultBackfillLine ?: "—")}</span></div>""",
         )
@@ -1161,6 +1166,7 @@ class ControlServer(
                         append(",\"pausedNoWifi\":").append(crawlerPausedNoWifi())
                         append(",\"statsLine\":").append(jsonStr(cachedCrawlerStatsLine))
                         append(",\"cramStatsLine\":").append(jsonStr(cachedCramStatsLine))
+                        append(",\"modelsLine\":").append(jsonStr(modelsLineText()))
                         append(",\"backfillLine\":").append(jsonStr(cachedCrawlerBackfillLine))
                         append(",\"adultBackfillLine\":").append(jsonStr(cachedCrawlerAdultBackfillLine))
                     }
@@ -2101,6 +2107,9 @@ class ControlServer(
         }
         st.lastSuccess?.let { append(" (last success ").append(fmtEpoch(it)).append(')') }
     }
+
+    /** Dashboard line for the classifier-weights download (see [CrawlerModels.statusLine]). */
+    private fun modelsLineText(): String = com.torrent.app.CrawlerModels.statusLine(modelsStatus())
 
     private fun bootstrapStatusText(st: com.torrent.app.backup.BootstrapStatus?): String {
         val state = st?.state ?: com.torrent.app.backup.BootstrapState.IDLE
@@ -3213,6 +3222,7 @@ ${adultSelectionRow(adultSelection)}
                   patchText(fieldIn(section, 'internalFree'), d.internalFree);
                   patchText(fieldIn(section, 'statsLine'), d.statsLine);
                   patchText(fieldIn(section, 'cramStatsLine'), d.cramStatsLine);
+                  patchText(fieldIn(section, 'modelsLine'), d.modelsLine);
                   patchText(fieldIn(section, 'backfillLine'), d.backfillLine);
                   patchText(fieldIn(section, 'adultBackfillLine'), d.adultBackfillLine);
                   // The paused badge is rendered on every crawler render and

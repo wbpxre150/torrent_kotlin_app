@@ -7,14 +7,15 @@ package com.torrent.app.config
  * production callbacks in.
  *
  * The invariant:
- * 1. [prepare] stages the classifier model assets — including the `v\d+`-guarded sweep of stale
- *    generation dirs — and seeds/pins `config.ini`.
+ * 1. [prepare] stages the keyword assets and seeds/pins `config.ini` (the classifier weights
+ *    are downloaded by the crawler's own `--fetch-models` one-shot, never staged — see
+ *    [com.torrent.app.CrawlerModels]).
  * 2. [migrate] resets the adult threshold to the current generation's default and, when it did
  *    reset, re-renders `config.ini` BEFORE returning (`DaemonService.migrateClassifierVersion`).
  * 3. Only then may the daemon [start].
  *
  * Consequences: a new classifier generation never runs with the previous generation's thresholds,
- * and stale model dirs are already gone before the daemon resolves its model path.
+ * and the app never touches a downloaded model generation before the daemon resolves it.
  *
  * [com.torrent.app.DaemonService.runCrawlerApply] keeps its own explicit sequence instead of using
  * this class, because its gate can close after the render and return before any start.

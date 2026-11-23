@@ -581,39 +581,33 @@ tasks.register("prepareDhtCrawlerSrc") {
 }
 
 tasks.register<Copy>("copyDhtCrawlerAssets") {
-    description = "Copy dht_crawler keyword files + classifier models into generated assets (Stage 09/5)"
+    description = "Copy dht_crawler keyword files into generated assets (Stage 09/5)"
     // Same source-resolution logic as prepareDhtCrawlerSrc
     val crawlerSrc = providers.gradleProperty("dhtCrawlerSrc").orNull?.let { file(it).absoluteFile }
         ?: file("src/main/cpp/dht_crawler")
     from(crawlerSrc) {
         include("torrent_search_keywords.txt", "hard_block.txt")
     }
-    // Stage 5: classifier model files (CRAM since v15); Stage D adds the movie-kind
-    // (JEVH) generation. Binary — the Copy task is byte-exact (no text filtering /
-    // charset conversion), so a plain copy is correct here. The include list is
-    // explicit on purpose: `v*/**` would ship the retired v4/v11 generations too.
-    // `into("models")` is relative to the task destination above, giving the asset
-    // paths dht_crawler/models/v15/<file> and dht_crawler/models/v13/<file> (overriding)
-    // the crawler's compiled-in default dirs).
-    val modelSrc = file("src/main/cpp/dht_crawler-android/models")
-    from(modelSrc) {
-        include("v15/**", "v13/**")
-        into("models")
-    }
+    // The classifier weights are NOT assets any more: ~489 MB of CRAM (v15) + movie-kind
+    // (v13) weights used to be copied here and staged into files/crawler/models at
+    // startup. The crawler now downloads them itself on first run
+    // (`dht_crawler --fetch-models`, sha256-verified against each generation's
+    // manifest), so only the keyword files are packaged. Keep this task's include list
+    // keyword-only — an accidental `v*/**` would put the weights back in the APK.
     into(file("build/generated/assets/dht_crawler/dht_crawler"))
     // A Copy task leaves files behind that its sources no longer produce: after a
-    // v3 -> v4 models bump a warm build tree still held the previous generation's dir, and after a
-    // keyword file was dropped from the crawler repo its stale copy stayed here — both
-    // got packaged into the APK. This destination dir is exclusively this task's output
-    // (keyword files at the top level, models/ below), so dropping it wholesale before
+    // keyword file was dropped from the crawler repo its stale copy stayed here and got
+    // packaged into the APK — and every build before the APK diet left the ~489 MB of
+    // classifier weights under models/ here. This destination dir is exclusively this
+    // task's output (keyword files at the top level), so dropping it wholesale before
     // the copy re-populates it is safe and stays correct for future removals too.
     doFirst {
         delete(file("build/generated/assets/dht_crawler/dht_crawler"))
     }
     // Gradle does not treat a file *added* to a Copy task's destination as "out of date",
-    // so without this the whole task (and the cleanup above) is skipped on a warm tree and
-    // a stale models generation is packaged. Always re-run: the copy is ~26 MB locally, and the
-    // native builds dominate anyway. Still a `Copy` task — keyword-file semantics unchanged.
+    // so without this the whole task (and the cleanup above) is skipped on a warm tree.
+    // Always re-run: the copy is ~1 MB locally, and the native builds dominate anyway.
+    // Still a `Copy` task — keyword-file semantics unchanged.
     outputs.upToDateWhen { false }
 }
 
