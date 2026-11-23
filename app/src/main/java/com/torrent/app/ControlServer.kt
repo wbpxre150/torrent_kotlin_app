@@ -434,6 +434,38 @@ class ControlServer(
                             ContentType.Application.Json,
                         )
                     }
+                    // Crawler JSON API for the player app (mp3player), which reaches
+                    // this dashboard through the public tunnel: it needs the crawler's
+                    // own JSON bodies verbatim, not the HTML /search page and not the
+                    // {"ok":…,"payload":…} wrapper above. Auth is the route
+                    // interceptor, and the phone sends the same control token as
+                    // `Authorization: Bearer` (resolveAuthToken accepts it).
+                    get("api/crawler/search") {
+                        call.respondCrawlerJson(
+                            buildCrawlerQuery(
+                                type = "search",
+                                q = call.request.queryParameters["q"],
+                                category = call.request.queryParameters["category"],
+                                allowedCategories = enabledCategories(loadConfig().crawler.saveCategories),
+                                tvKind = null,
+                                adult = null,
+                                page = call.request.queryParameters["page"],
+                            ),
+                            // A RUNNING crawler gets the long search timeout: a big-DB
+                            // query is slow, not broken (same rule as /search/ws).
+                            if (crawlerDaemonRunning()) searchReadTimeoutMs else CRAWLER_READ_TIMEOUT_MS,
+                        )
+                    }
+                    get("api/crawler/files") {
+                        call.respondCrawlerJson(
+                            buildTorrentFilesPath(
+                                hash = call.request.queryParameters["hash"],
+                                offset = call.request.queryParameters["offset"]?.toIntOrNull(),
+                                limit = call.request.queryParameters["limit"]?.toIntOrNull(),
+                                q = call.request.queryParameters["q"],
+                            ),
+                        )
+                    }
                     get("api/crawler/refresh") {
                         call.respondText(
                             torrentForwardJson(buildTorrentRefreshPath(call.request.queryParameters["hash"])),
@@ -2175,6 +2207,62 @@ class ControlServer(
                 is CrawlerFetch.NotFound -> """{"ok":false,"error":"not_found"}"""
                 is CrawlerFetch.Unavailable -> """{"ok":false,"error":"unavailable"}"""
             }
+    }
+
+    /**
+     * Answers one raw crawler JSON request: the crawler's 200 body verbatim, and a
+     * small JSON error object with a matching status code otherwise.
+     *
+     * Unlike [torrentForwardJson] nothing is wrapped in `payload`: the player app
+     * parses the crawler's own shape (`count`/`total_count`/`results`,
+     * `files`/`total`/`has_more`), so the body must stay byte-identical.
+     * [readTimeoutMs] overrides the path's own timeout for the slow `/search`.
+     */
+    private suspend fun ApplicationCall.respondCrawlerJson(
+        result: TorrentPathResult,
+        readTimeoutMs: Int? = null,
+    ) {
+        when (result) {
+            is TorrentPathResult.Bad -> respondText(
+                """{"error":"bad_request:${result.field}"}""",
+                ContentType.Application.Json,
+                HttpStatusCode.BadRequest,
+            )
+            is TorrentPathResult.Ok ->
+                respondCrawlerBody(result.path, readTimeoutMs ?: result.readTimeoutMs)
+        }
+    }
+
+    /** [respondCrawlerJson] for a `/search`-style query, whose path carries its own validation. */
+    private suspend fun ApplicationCall.respondCrawlerJson(
+        result: CrawlerQueryResult,
+        readTimeoutMs: Int,
+    ) {
+        when (result) {
+            is CrawlerQueryResult.Bad -> respondText(
+                """{"error":"bad_request:${result.field}"}""",
+                ContentType.Application.Json,
+                HttpStatusCode.BadRequest,
+            )
+            is CrawlerQueryResult.Ok -> respondCrawlerBody(result.path, readTimeoutMs)
+        }
+    }
+
+    /** The shared tail: one loopback fetch of an already-validated path, body verbatim on 200. */
+    private suspend fun ApplicationCall.respondCrawlerBody(path: String, readTimeoutMs: Int) {
+        when (val fetch = fetchCrawlerJsonStatus(path, readTimeoutMs)) {
+            is CrawlerFetch.Ok -> respondText(fetch.body, ContentType.Application.Json)
+            is CrawlerFetch.NotFound -> respondText(
+                """{"error":"not_found"}""",
+                ContentType.Application.Json,
+                HttpStatusCode.NotFound,
+            )
+            is CrawlerFetch.Unavailable -> respondText(
+                """{"error":"unavailable"}""",
+                ContentType.Application.Json,
+                HttpStatusCode.ServiceUnavailable,
+            )
+        }
     }
 
     /**
