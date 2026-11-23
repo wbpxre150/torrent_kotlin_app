@@ -533,6 +533,11 @@ tasks.register("prepareDhtCrawlerSrc") {
     inputs.dir(file("$crawlerSrc/src"))
     inputs.dir(file("$crawlerSrc/include"))
     inputs.files(fileTree(file("$crawlerSrc/lib")) { exclude(".git") })
+    // tests/ carries the host suite AND its fixtures (including the 11 MB CRAM
+    // v15 container under tests/fixtures/cram/models/v15 and the vendored
+    // utf8proc). Without this the task stays UP-TO-DATE across a fixture change
+    // and the prepared copy silently keeps the old model.
+    inputs.dir(file("$crawlerSrc/tests"))
     inputs.dir(file("$crawlerSrc/patches"))
     outputs.dir(destDir)
 
