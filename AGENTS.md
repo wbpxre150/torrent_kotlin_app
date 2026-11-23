@@ -466,6 +466,9 @@ fixes that patch third-party submodules** — `bencode-cap-fix.patch` → `benco
 (their own `make` applies the same three, guarded and idempotent; the Gradle list exists only because the
 Android build compiles the copied tree with CMake/NDK and never runs that Makefile). New submodule fixes
 go LAST, as the 4th slot; every other crawler change is a normal commit in the crawler repo.
+The crawler's own `make tests` (15 binaries) is hermetic — no Android checkout needed: the CRAM v15
+container is vendored at `tests/fixtures/cram/models/v15` (override `CRAM_MODEL_DIR`) and utf8proc
+2.12.0 at `tests/vendor/utf8proc`. `CLF_ANDROID_DIR` now feeds only the optional `clf-backfill` target.
 
 The merged series, in its original order (the numbers are the old series slots, kept because older plans
 and measurement reports cite them): `movie-kind-v10-streaming` (last-token pooling + inline ingest
