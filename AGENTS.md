@@ -153,8 +153,13 @@ at process start, so starting it first would leave it inert for the whole sessio
 every ingested row, which nothing repairs automatically (`classify_backfill_mode` is pinned `off`). The
 downloaded generations total 512,972,090 B (~489.2 MiB — `models/v15` 11,436,190 B + `models/v13`
 501,535,900 B), which is the payload the APK no longer carries: the 0.4.0 debug APK measured 540,330,690 B
-with them staged, and the post-diet APK size is **pending the parent's build measurement** (expect ~489 MB
-smaller, less the few MB of keyword assets that remain). `.assets_version` is now
+with them staged and the post-diet APK measures **51,313,609 B** (49 MiB) — 489,017,081 B smaller, 90.5 %.
+That figure needs one packaging caveat: AGP writes the new, smaller APK over the old one and leaves the
+freed region as dead bytes inside the zip (measured: 482,603,215 B of gap before
+`assets/dht_crawler/torrent_search_keywords.txt`, so the first post-diet build still weighed 537,114,957 B).
+Deleting `app/build/outputs/apk/debug/app-debug.apk` and `app/build/intermediates/{apk,packaged_assets,
+compressed_assets}` before rebuilding gives the true size; a `clean` build is not needed and would rebuild
+every native dependency. `.assets_version` is now
 `<versionCode>|keywords` (`CrawlerConfig.stampValue`) — it names the keyword payload only, so a classifier
 bump can no longer force a restage; it is a crawler-level file (`files/crawler/.assets_version`, **not**
 under `models/`). `ensureAssets` stages the keyword files only and the `v<digits>` sweep is **gone**:
@@ -430,6 +435,17 @@ v13 manifest and on-device `sha256sum`; **1,947/1,947** adult0-movie rows at `mo
 v13}, `.assets_version` = `4|models/v15|models/v13` — that stamp format predates the APK diet; it is now
 `<versionCode>|keywords`, and `files/crawler/models/` is populated by the crawler's `--fetch-models`
 instead of by asset staging.
+
+**Post-diet device verification (b078fce, 2026-11-23).** The diet APK installs at **51,313,609 B** and on
+first launch rewrote `.assets_version` from `4|models/v15|models/v13` to **`4|keywords`** while leaving
+`files/crawler/models/` untouched (v13 479 MB + v15 11 MB) — the sweep no longer reaches it. The mbedTLS
+TLS path, previously only proven on the host's OpenSSL, ran on-device: `libdhtcrawler.so --fetch-models
+--models-dir ./mftest` downloaded and verified **512,953,487 B in 50 s** (4 files + 2 manifests, exit 0),
+and a second run was a no-op (0 downloaded, 2.6 s of hashing). `/stats` publishes
+`bep51_cache_fetch` = `{"last_result":"not_attempted","enabled":true,...}` on a warm cache, with
+`classifier.clf_ver` 15, `cram.enabled` true, `adult_hide_threshold` **0.375** and `movie_kind` generation
+13 / `model_ready` true — the crawler started on the pre-existing models, so `maybeFetchCrawlerModels`
+correctly skipped the download.
 
 **Accepted costs (design §1 — carried, not waived).** tv_kind v1 heldout drift **+2.73 pp**, and v2 is
 **val-validated only** (its heldout analogue is an extrapolation, never a measurement); val ECE
