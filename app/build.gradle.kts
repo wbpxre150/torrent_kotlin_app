@@ -523,7 +523,7 @@ tasks.register("buildLlama") {
     }
 }
 tasks.register("prepareDhtCrawlerSrc") {
-    description = "Copy dht_crawler sources to build/native/src/dht_crawler and apply the patches"
+    description = "Copy dht_crawler sources to build/native/src/dht_crawler and apply the submodule patches"
 
     val crawlerSrc = providers.gradleProperty("dhtCrawlerSrc").orNull?.let { file(it).absoluteFile }
         ?: file("src/main/cpp/dht_crawler")
@@ -554,71 +554,19 @@ tasks.register("prepareDhtCrawlerSrc") {
             // also trips the daemon JVM's non-UTF-8 filename encoding on this host
             exclude("lib/civetweb/test")
         }
-        // 3. Apply the upstream patches in the fixed order below (new patches go LAST)
+        // 3. Apply the remaining patches in the fixed order below (new patches go LAST).
+        //
+        // Only the three fixes that patch third-party *submodules* live here. Every
+        // other crawler change that used to be applied at this point is committed
+        // directly in the dht_crawler repository (one commit per former patch), so a
+        // standalone clone of dht_crawler builds without this pipeline. The crawler's
+        // own `make` applies these same three (guarded and idempotent); this list
+        // exists because the Android build compiles the copied tree with CMake/NDK and
+        // never runs that Makefile.
         for (patchName in listOf(
             "bencode-cap-fix.patch",
             "bencode-init-fix.patch",
-            "civetweb-stop-flag-atomic.patch",
-            "bep51-periodic-cache-save.patch",
-            "restore-database.patch",
-            "clear-failure-filter.patch",
-            "remove-porn-filter.patch",
-            "save-categories.patch",
-            "search-rows-filtered-name.patch",
-            "rebuild-fts-database.patch",
-            "search-movie-kind-facet.patch",
-            "random-facet-pool.patch",
-            "movie-kind-conjunctive.patch",
-            "maintenance-progress.patch",
-            "movie-kind-v10-streaming.patch",
-            "adult-v11-backfill.patch",
-            "movie-kind-v13-default.patch",
-            // 18th: concurrent-duplicate-fetch suppression (in-flight claim set +
-            // bloom-on-fetch-success) and the periodic re-seed of the counts
-            // /stats publishes. See include/inflight_set.h.
-            "inflight-dedup.patch",
-            // 19th: get_peers/metadata rate tuning + honest stats split
-            "getpeers-metadata-tuning.patch",
-            // 20th: last-interval ("windowed") rates in /stats aggregate, sampled
-            // by the supervisor monitor thread every 10 s. See
-            // include/stats_window.h. Additive only: every lifetime key keeps
-            // its exact meaning.
-            "stats-last-interval.patch",
-            // 21st: fail-open, TTL-aged, supervisor-shared per-address TCP
-            // connect-failure memory (tree_metadata_peer_blacklist_ttl_sec,
-            // default 0 = off) + the skip-to-empty guard and the /stats block.
-            // See include/meta_peer_fail.h.
-            "metadata-peer-fail-map.patch",
-            // 22nd: peer-fail map capacity 8192 -> 131072 (Stage-3 W3 sizing
-            // blocker). The 3/4-load clear threshold (98,304) must exceed the
-            // whole 600 s TTL working set (~66-80k entries at the measured
-            // ~110-133 NEW distinct fail addresses/s), otherwise the table
-            // churns and no entry ever reaches its TTL. One constant plus
-            // comments - no behaviour, key or /stats schema change.
-            "meta-peer-fail-capacity.patch",
-            // 23rd: BEP51 query + dedup-funnel instrumentation (per-tree and
-            // summed /stats blocks: queries sent, responses received, timeouts,
-            // and the bloom / in-flight / queue-full / pushed split of the
-            // samples a response offers). Counters only - no behaviour change,
-            // no new key, no existing key changes meaning.
-            "bep51-funnel-stats.patch",
-            // 24th: abort an in-flight metadata fetch on supervisor shutdown,
-            // and make its global deadline monotonic-ms instead of
-            // time(NULL) seconds. Without the abort, tree_metadata_worker_func
-            // only re-checks the stop between fetches and thread_tree_destroy()
-            // joins the workers unbounded, so every crawler stop (settings
-            // apply, app exit, maintenance one-shot) waited out the 60 s
-            // metadata deadline. RATE_BASED respawns are excluded by the
-            // reason gate, and no counter, key or /stats field changes.
-            "shutdown-abort-metadata-fetch.patch",
-            // 25th: the CRAM (generation v15) engine - one forward pass per row
-            // for category, tv_kind and adult, replacing fastText/.ftz. This
-            // patch adds the pure-C99 module (src/cram.c + include/cram.h, the
-            // meta_peer_fail shape), its fixture-driven host test (tests-cram,
-            // fixtures committed under tests/fixtures/cram/) and the Makefile
-            // targets. src/classifier.c, http_api.c and config.c are rewired by
-            // the second half of this patch. See include/cram.h.
-            "cram-category-tvkind.patch"
+            "civetweb-stop-flag-atomic.patch"
         )) {
             project.exec {
                 commandLine("patch", "-p1", "-d", destDir.absolutePath, "-i", file("$destDir/patches/$patchName").absolutePath)

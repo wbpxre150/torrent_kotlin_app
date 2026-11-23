@@ -114,7 +114,7 @@ prefix is required by the packaging step — they are **exec'd as PIE binaries, 
 | Output | Source | Built by | Role |
 |---|---|---|---|
 | `libtransmissiond.so` | transmission **4.1.2** tarball + `src/main/cpp/transmission-fork/` | `buildTransmission` → `apply_fork.py` → CMake/NDK | BitTorrent daemon; disk I/O routed to SAF gateway via `/saf/usb` sentinel path |
-| `libdhtcrawler.so` | vendored `src/main/cpp/dht_crawler/` | `buildDhtCrawler` → `prepareDhtCrawlerSrc` (copy + 23 patches) → CMake | DHT keyspace crawler; SQLite DB; civetweb HTTP API; bloom-filter dedup |
+| `libdhtcrawler.so` | vendored `src/main/cpp/dht_crawler/` | `buildDhtCrawler` → `prepareDhtCrawlerSrc` (copy + 3 submodule patches) → CMake | DHT keyspace crawler; SQLite DB; civetweb HTTP API; bloom-filter dedup |
 | `libftpserver.so` | `src/main/cpp/ftp-server/` (C11) | `buildFtpServer` → CMake/NDK | FTP server for media clients; posix or SAF backend (SAF talks to `SafIpcServer`) |
 
 **Task graph:** `buildMbedtls` (mbedTLS **3.6.6**) → `buildCurl` (curl **8.20.0**) → `buildTransmission`;
@@ -456,43 +456,53 @@ proximal-L1 sparsity, Adam on this space.
   prebuilt archive — override `TPARSE_LIB` or you measure the wrong parser.
 - Adding a `torrent_class` column means five places in the C tree plus the Kotlin mirror — see invariant 14.
 
-**dht_crawler patches (order is fixed, applied by `prepareDhtCrawlerSrc`):** the 25-entry list in
-`app/build.gradle.kts` opens with the three upstream fixes — `bencode-cap-fix.patch` →
-`bencode-init-fix.patch` → `civetweb-stop-flag-atomic.patch` — and closes with
-`movie-kind-v10-streaming.patch` (last-token pooling + inline ingest classification),
-`adult-v11-backfill.patch` (the token-gated adult backfill, `adult_clf_ver`, `classify_backfill_mode`),
-`movie-kind-v13-default.patch` (flips only the compiled-in model-dir default — three literals in
-`src/config.c`, `include/movie_kind.h` `MOVIE_KIND_MODEL_DIR_DEFAULT` and the `include/config.h`
-comment — so the vendored tree stays pristine), `inflight-dedup.patch` (18th) and
-`getpeers-metadata-tuning.patch` (19th: the `/stats` success-metric split + per-outcome metadata
-failure attribution + get_peers round-idle/slot-budget/finish-on-peers/miss-penalty mechanisms + metadata
-piece-idle eviction, all as **opt-in knobs shipped at legacy defaults** — five 30-minute on-device windows
-measured the tuning net-negative, so patch 19 ships the instrumentation and the keys, not the behaviour),
-`stats-last-interval.patch` (20th: last-interval "windowed" rates in `/stats aggregate` — the
-pure `stats_window` module plus a sampler on the supervisor monitor thread; additive only, every lifetime
-key keeps its exact meaning), `metadata-peer-fail-map.patch` (21st: the fail-open per-address TCP
-connect-failure memory — `src/meta_peer_fail.c` + `include/meta_peer_fail.h`, host-tested by
-`make tests-meta-peer-fail`), `meta-peer-fail-capacity.patch` (22nd: the capacity corrective, 8192 →
-131,072 slots — constant + comments only, no behaviour change), `bep51-funnel-stats.patch` (23rd: the BEP51 query + dedup-funnel counters — per-tree `trees[].bep51` and
-summed `supervisor.bep51`, counters only, no behaviour change and no config key) and
-`shutdown-abort-metadata-fetch.patch` (24th: `tree_fetch_metadata_parallel()` breaks when
-`shutdown_reason` is `SHUTDOWN_REASON_SUPERVISOR` — the metadata workers only re-check the stop *between*
-fetches and `thread_tree_destroy()` joins them unbounded, so one in-flight 60 s attempt held every crawler
-stop (settings apply, app exit, maintenance one-shot) for the whole metadata deadline; the same hunk makes
-that deadline monotonic-ms instead of `time(NULL)` seconds, whose `difftime > timeout/1000` test could
-overrun to 61 s and cross the app's SIGTERM grace. `SHUTDOWN_REASON_RATE_BASED` respawns are excluded by
-the reason gate, and no counter, key or `/stats` field changes) and
-`cram-category-tvkind.patch` (25th and last: the whole CRAM v15 single-engine integration — new
-`src/cram.c` + `include/cram.h` (container loader with sha verification, the feature/CSR build,
-`cram_predict`'s masked 48-state argmin + raw adult marginal, `cram_strip_adult_tokens`), new
-`tests/test_cram.c` + the `tests-cram` / `tests-asan-cram` Makefile targets, the `src/classifier.c`
-rewire (fastText/ftc removed, 50-file cap, adult rewire onto CRAM, all-or-nothing degraded path,
-`adult_clf_ver` 15 in `classifier_write_meta()`), the `classifier_stats_t` + `src/http_api.c` `/stats`
-shape (`cram_sha256`/`cram_vocab_sha256` + the `cram` sub-object), and the compiled-in
-`classifier_model_dir` default in `src/config.c`); new patches go LAST, as the 26th slot.
-Upstream fixes belong in `patches/`.
+**dht_crawler history — merged in-tree.** The crawler's features used to ship as 25 `.patch` files applied
+by `prepareDhtCrawlerSrc`. Twenty-two of them are now **committed directly in the `dht_crawler`
+repository** (one commit per former patch, subjects prefixed `crawler:`), and their patch files are
+deleted, so a plain clone of `dht_crawler` builds standalone with its own `make` — no Android pipeline
+required. `app/build.gradle.kts` and `app/src/main/cpp/dht_crawler/patches/` now carry **only the three
+fixes that patch third-party submodules** — `bencode-cap-fix.patch` → `bencode-init-fix.patch` →
+`civetweb-stop-flag-atomic.patch` — because `lib/bencode-c` and `lib/civetweb` are upstream submodules
+(their own `make` applies the same three, guarded and idempotent; the Gradle list exists only because the
+Android build compiles the copied tree with CMake/NDK and never runs that Makefile). New submodule fixes
+go LAST, as the 4th slot; every other crawler change is a normal commit in the crawler repo.
+
+The merged series, in its original order (the numbers are the old series slots, kept because older plans
+and measurement reports cite them): `movie-kind-v10-streaming` (last-token pooling + inline ingest
+classification), `adult-v11-backfill` (the token-gated adult backfill, `adult_clf_ver`,
+`classify_backfill_mode`), `movie-kind-v13-default` (flips only the compiled-in model-dir default — three
+literals in `src/config.c`, `include/movie_kind.h` `MOVIE_KIND_MODEL_DIR_DEFAULT` and the
+`include/config.h` comment), `inflight-dedup` (18th) and `getpeers-metadata-tuning` (19th: the `/stats`
+success-metric split + per-outcome metadata failure attribution + get_peers
+round-idle/slot-budget/finish-on-peers/miss-penalty mechanisms + metadata piece-idle eviction, all as
+**opt-in knobs shipped at legacy defaults** — five 30-minute on-device windows measured the tuning
+net-negative, so the commit ships the instrumentation and the keys, not the behaviour),
+`stats-last-interval` (20th: last-interval "windowed" rates in `/stats aggregate` — the pure
+`stats_window` module plus a sampler on the supervisor monitor thread; additive only, every lifetime key
+keeps its exact meaning), `metadata-peer-fail-map` (21st: the fail-open per-address TCP connect-failure
+memory — `src/meta_peer_fail.c` + `include/meta_peer_fail.h`, host-tested by
+`make tests-meta-peer-fail`), `meta-peer-fail-capacity` (22nd: the capacity corrective, 8192 → 131,072
+slots — constant + comments only, no behaviour change), `bep51-funnel-stats` (23rd: the BEP51 query +
+dedup-funnel counters — per-tree `trees[].bep51` and summed `supervisor.bep51`, counters only, no
+behaviour change and no config key), `shutdown-abort-metadata-fetch` (24th:
+`tree_fetch_metadata_parallel()` breaks when `shutdown_reason` is `SHUTDOWN_REASON_SUPERVISOR` — the
+metadata workers only re-check the stop *between* fetches and `thread_tree_destroy()` joins them
+unbounded, so one in-flight 60 s attempt held every crawler stop (settings apply, app exit, maintenance
+one-shot) for the whole metadata deadline; the same hunk makes that deadline monotonic-ms instead of
+`time(NULL)` seconds, whose `difftime > timeout/1000` test could overrun to 61 s and cross the app's
+SIGTERM grace. `SHUTDOWN_REASON_RATE_BASED` respawns are excluded by the reason gate, and no counter, key
+or `/stats` field changes) and `cram-category-tvkind` (25th and last: the whole CRAM v15 single-engine
+integration — new `src/cram.c` + `include/cram.h` (container loader with sha verification, the
+feature/CSR build, `cram_predict`'s masked 48-state argmin + raw adult marginal,
+`cram_strip_adult_tokens`), new `tests/test_cram.c` + the `tests-cram` / `tests-asan-cram` Makefile
+targets, the `src/classifier.c` rewire (fastText/ftc removed, 50-file cap, adult rewire onto CRAM,
+all-or-nothing degraded path, `adult_clf_ver` 15 in `classifier_write_meta()`), the `classifier_stats_t`
++ `src/http_api.c` `/stats` shape (`cram_sha256`/`cram_vocab_sha256` + the `cram` sub-object), and the
+compiled-in `classifier_model_dir` default in `src/config.c`).
+
 See the vendored repo's `CLAUDE.md` for its architecture (thread trees, bloom filters, schema) and its
-`CONFIG_INI.md` for the patch-19/21 config keys and the patch-20/22 `/stats` blocks.
+`CONFIG_INI.md` for the get_peers/metadata config keys and the last-interval / peer-fail / BEP51 `/stats`
+blocks.
 
 **`/stats` after patch 19 (measured — the instrumentation is the win, the tuning is not).** `aggregate` publishes both
 denominators beside their percentages: `metadata_attempts_total` with `metadata_fetch_success_percent`
@@ -562,7 +572,7 @@ across trees. Patch 21 adds `tree_metadata_peer_blacklist_ttl_sec` (compiled def
 clamp 60..3600, warn-and-clamp) and one supervisor-shared map (`src/meta_peer_fail.c`: 131,072 slots × 32 B =
 4 MiB, open addressing + FNV-1a, one `pthread_mutex_t`, lazy TTL ageing on the lookup/insert path only —
 no new thread; the load-factor clear at 3/4 is fail-open). **Capacity is sized by the TTL working set**
-(patch 22, `meta-peer-fail-capacity.patch`): 131,072 × 3/4 = 98,304 clear threshold > the ~66,000–79,800
+(patch 22, in-tree as `META_PEER_FAIL_CAPACITY` in `include/meta_peer_fail.h`): 131,072 × 3/4 = 98,304 clear threshold > the ~66,000–79,800
 entries a 600 s TTL accumulates at the measured ~110–133 NEW distinct fail addresses/s (~23 % margin), and
 4 MiB ≈ 0.2 % of the measured 2.04 GB crawler RSS. The original 8192 slots (clear at 6,144) were wiped every
 ~50–70 s at that rate, so `expired_total` stayed 0 and entries died by capacity clear, never by TTL. Fail-open is absolute: `ttl_sec = 0` never
@@ -584,7 +594,7 @@ the fail-open rule still holds for a config that omits the key; only the shipped
 `gp_probe.py` reads the block (`MPF_KEYS`, a `peer-fail map` row, a missing-feature check) so a window
 report can never show a blank column.
 
-**BEP51 query + dedup-funnel counters (patch 23).** `bep51-funnel-stats.patch` is the 23rd and last patch and
+**BEP51 query + dedup-funnel counters (patch 23).** The 23rd and last commit of the merged series changes **no behaviour and no config key**: eight per-tree atomics — `queries_sent_total`,
 changes **no behaviour and no config key**: eight per-tree atomics — `queries_sent_total`,
 `responses_received_total`, `timeouts_total`, `samples_offered_total`, `bloom_rejected_total`,
 `inflight_refused_total`, `queue_full_total`, `samples_pushed_total` — are published per tree as
@@ -664,7 +674,9 @@ rewritten on a settings apply, so a hand-edited `config.ini` survives a restart.
 1. **Submodules first:** run `git submodule update --init --recursive` inside
    `app/src/main/cpp/dht_crawler/` before building — `prepareDhtCrawlerSrc` hard-fails without it.
 2. **Never edit vendored sources** (`dht_crawler/lib/`, tarball-extracted transmission): changes are
-   wiped on rebuild. Crawler fixes go in `dht_crawler/patches/`; transmission changes go in
+   wiped on rebuild. Crawler fixes are normal commits **in the `dht_crawler` repository itself** (it is a
+   fork, `wbpxre150/dht_crawler`); fixes to its `lib/` submodules go in `dht_crawler/patches/` and are
+   applied by `prepareDhtCrawlerSrc`; transmission changes go in
    `transmission-fork/apply_fork.py` (idempotent, marker-gated) or its fork files.
 3. **Exec binaries in place** from `nativeLibraryDir` — do not extract to a writable work dir
    (W^X / SELinux `apk_data_file`); both `ProcessSupervisor` and `OneShotRunner` rely on this.
