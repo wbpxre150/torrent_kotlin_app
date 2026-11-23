@@ -190,6 +190,15 @@ max_draining_trees = 16
 
 # ==== BEP51 Cache Settings ====
 bep51_cache_path = data/bep51_cache.dat
+# Published cache: when the local cache holds fewer than global_bootstrap_target
+# nodes, the crawler fetches this file once instead of discovering nodes from
+# routers (a cold start otherwise aborts if discovery is slow). A failed fetch is
+# non-fatal and falls through to the router bootstrap. Empty = never fetch.
+bep51_cache_url = https://unjumble.au/bep51/bep51_cache.dat
+bep51_cache_fetch_timeout_sec = 30
+# CA overrides for that fetch; empty = the system trust store.
+bep51_cache_ca_file =
+bep51_cache_ca_dir =
 bep51_cache_capacity = 50000
 bep51_cache_submit_percent = 17
 

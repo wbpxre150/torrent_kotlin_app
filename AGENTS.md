@@ -466,9 +466,36 @@ fixes that patch third-party submodules** — `bencode-cap-fix.patch` → `benco
 (their own `make` applies the same three, guarded and idempotent; the Gradle list exists only because the
 Android build compiles the copied tree with CMake/NDK and never runs that Makefile). New submodule fixes
 go LAST, as the 4th slot; every other crawler change is a normal commit in the crawler repo.
-The crawler's own `make tests` (15 binaries) is hermetic — no Android checkout needed: the CRAM v15
+The crawler's own `make tests` (16 binaries) is hermetic — no Android checkout needed: the CRAM v15
 container is vendored at `tests/fixtures/cram/models/v15` (override `CRAM_MODEL_DIR`) and utf8proc
-2.12.0 at `tests/vendor/utf8proc`. `CLF_ANDROID_DIR` now feeds only the optional `clf-backfill` target.
+2.12.0 at `vendor/utf8proc`. `CLF_ANDROID_DIR` is gone; `tparse/` (80 KB) is vendored so the classifier
+flavours build standalone.
+
+**The crawler now ships and feeds itself.** `make` alone compiles both engines **inert** (no
+`CLF_ENABLED` / `MK_ENABLED`); the flavours are `make clf` (CRAM only, `build/clf/dht_crawler`),
+`make llama` (pinned llama.cpp `18ab62a8`, tarball sha `34bd70e2…`, static CPU-only into
+`build/llama-install`) and `make full` (both engines, `build/full/dht_crawler`). Weights come from
+`make models` → `tools/fetch-models.sh`, which downloads **`https://unjumble.au/bep51/models/<gen>/`**
+(v15 `cram.bin`/`cram_vocab.bin`/`manifest.json`, v13 `movie_kind_backbone_Q4_0.gguf`/`movie_kind_head.bin`/
+`manifest.json`, ~490 MB) and verifies each file against the sha256 pinned in the script before installing
+it into `./models/<gen>` — the compiled-in default dirs, so no config change is needed. The bucket is the
+R2 `unjumble` bucket (`bep51/` prefix) behind the `unjumble.au` custom domain; the app still stages its own
+copy into APK assets, unchanged.
+
+**The BEP51 cache is fetched by the crawler too** (it used to be the Kotlin app's job only).
+`bep51_cache_url` (default `https://unjumble.au/bep51/bep51_cache.dat`, ~1.9 MB / 50,000 nodes; empty
+disables), `bep51_cache_fetch_timeout_sec` (30) and `bep51_cache_ca_file`/`_dir` (empty = system trust
+store) drive a cold-start fetch in `supervisor_start()` via the new `src/http_fetch.c` (OpenSSL, chain +
+hostname/IP-SAN verification, redirects, chunked, byte cap, deadline). The download is validated with the
+loader's own magic+sha256 checks against a scratch cache and renamed into place only on success, so a
+failure falls through to the router bootstrap **unchanged** — which matters because that path aborts
+startup unless it finds `global_bootstrap_target` nodes. `--fetch-bep51-cache` runs the same fetch as a
+one-shot. Measured on a clean tree: cold start → fetch 50,000 nodes → `/stats` in **2 s** (previously
+100 s+ or an abort).
+
+`config.ini` is **no longer tracked** in the crawler repo (invariant 11: it carries the operator's
+ssh/rclone backup host, user and paths). It stays on disk; the sanitized template is
+`app/src/main/assets/dht_crawler/config.ini.default`, which now carries the four `bep51_cache_*` keys.
 
 The merged series, in its original order (the numbers are the old series slots, kept because older plans
 and measurement reports cite them): `movie-kind-v10-streaming` (last-token pooling + inline ingest

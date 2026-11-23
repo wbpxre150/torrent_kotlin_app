@@ -82,11 +82,14 @@ object CrawlerKeys {
         // BEP51 cache
         "bep51_cache_path", "bep51_cache_capacity", "bep51_cache_submit_percent",
         "bep51_node_cooldown_sec",
+        // Published-cache download (the crawler fetches this when its cache is cold)
+        "bep51_cache_url", "bep51_cache_fetch_timeout_sec",
     )
 
     /** Path keys — the app owns the internal-storage layout; never user-overridable. */
     val PATH_KEYS: Set<String> = setOf(
         "db_path", "bloom_path", "bep51_cache_path",
+        "bep51_cache_ca_file", "bep51_cache_ca_dir",
         "backup_path", "ssh_dest_path", "ssh_key_path", "ssh_bookmark_path",
         "rclone_dest_path", "rclone_bookmark_path",
         "classifier_model_dir", "movie_kind_model_dir", "hard_block_file",

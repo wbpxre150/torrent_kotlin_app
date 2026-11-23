@@ -131,6 +131,10 @@ set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/ftc/ftc.cc
 # added above, only the dhtcrawler target below is defined after it, so the
 # vendored sources never see CLF_ENABLED.
 add_compile_definitions(CLF_ENABLED)
+# src/http_fetch.c (the BEP51 published-cache download) speaks TLS through mbedTLS
+# here, because this build has no OpenSSL at all: the crawler's sha256 comes from
+# compat/openssl/sha.h over libmbedcrypto. The host Makefile build uses OpenSSL.
+add_compile_definitions(HTTP_FETCH_MBEDTLS)
 # Movie-kind gating: MK_ENABLED exists only when Gradle's buildLlama handed us a
 # llama.cpp install prefix. Defined after tparse/ftc/utf8proc and before
 # add_executable, so it reaches the dhtcrawler target only -- a plain `cmake`
@@ -229,6 +233,10 @@ target_link_libraries(dhtcrawler PRIVATE
     c++_static
     ${LIBUV_INSTALL}/lib/libuv.a
     ${MBEDTLS_INSTALL}/lib/libmbedcrypto.a
+    # TLS + X.509 for src/http_fetch.c. Only the crawler target links these; the
+    # tparse/ftc/utf8proc targets above never see the defines.
+    ${MBEDTLS_INSTALL}/lib/libmbedtls.a
+    ${MBEDTLS_INSTALL}/lib/libmbedx509.a
     m
     dl
     log
