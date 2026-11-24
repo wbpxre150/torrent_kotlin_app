@@ -68,6 +68,7 @@ class ControlServerDashboardTest {
         val notWired = ApplyResult(false, "test", false)
         return ControlServer(
             tokenManager = tokenManagerWith(TOKEN),
+            selectionWatcher = inertSelectionWatcher(),
             serviceState = MutableStateFlow(ServiceState.Running),
             daemonStatuses = { daemons },
             safStatus = { SafStatus(false, false, null, null) },

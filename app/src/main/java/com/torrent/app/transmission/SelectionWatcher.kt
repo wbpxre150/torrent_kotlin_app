@@ -173,6 +173,20 @@ class SelectionWatcher internal constructor(
         threads.clear()
     }
 
+    /**
+     * Re-arms the watcher after the graceful-stop teardown, the same way
+     * `DbRestoreManager`/`Bep51BackupManager` are re-armed on Start: the
+     * service INSTANCE survives a graceful stop, so a later Start reaches
+     * `onStartCommand` without a second `onCreate` and the `stop()` above would
+     * otherwise leave [resumePending] and every later `register` inert — a
+     * subset add would then download the whole torrent, the one outcome the
+     * fail-safe exists to prevent. Idempotent; [resumePending] re-arms the
+     * persisted intents.
+     */
+    fun start() {
+        stopped = false
+    }
+
     // ---------------------------------------------------------------- watch loop
 
     private fun spawn(entry: PendingSelection, generation: Int) {

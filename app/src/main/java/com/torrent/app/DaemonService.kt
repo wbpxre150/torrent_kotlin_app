@@ -227,6 +227,13 @@ class DaemonService : Service() {
     // /api/transmission/add route and the crawler-proxy route; built once in
     // onCreate (needs configStore + gateway).
     @Volatile private var crawlerAddHandler: CrawlerAddHandler? = null
+    // Torrent-page stage 5: the subset add's watch loop and its persisted
+    // intents. Built once in onCreate (it outlives a transmission restart) and
+    // shared by identity: CrawlerAddHandler gets it as its `selectionRegistrar`,
+    // ControlServer reads it for `api/transmission/selection-status`, and the
+    // shutdown planner stops it. A second instance would let registration and
+    // status disagree about which torrents are being watched.
+    private lateinit var selectionWatcher: com.torrent.app.transmission.SelectionWatcher
 
     override fun onCreate() {
         super.onCreate()
@@ -423,10 +430,28 @@ class DaemonService : Service() {
         // loopback as a placeholder) so it is always listed in the daemons
         // table; the wifi gate rebinds it to the real IP before any start.
         registerFtpSupervisor("127.0.0.1")
+        // Torrent-page stage 5: the subset add's watcher, built BEFORE the add
+        // handler because the handler holds it as its `selectionRegistrar`. Its
+        // intents live in their own prefs file, so a pending selection survives
+        // an app death and is re-armed by onStartCommand (the crash fail-safe:
+        // an intent is never silently dropped, which would leave the torrent
+        // downloading everything).
+        selectionWatcher = com.torrent.app.transmission.SelectionWatcher(
+            // Fresh credentials per RPC call (like transmissionRpcSummary): a
+            // settings apply must not need a rebuilt watcher.
+            rpcFactory = {
+                val tx = configStore.load().transmission
+                com.torrent.app.transmission.TransmissionRpcClient(tx.username, tx.password)
+            },
+            store = com.torrent.app.transmission.SharedPrefsPendingSelectionStore(
+                getSharedPreferences("pending_selections", MODE_PRIVATE)),
+            clock = System::currentTimeMillis,
+        )
         crawlerAddHandler = CrawlerAddHandler(
             store = configStore,
             gateway = { gateway },
             crawlerDbFile = { File(filesDir, "crawler/data/torrents.db") },
+            selectionRegistrar = selectionWatcher,
         )
         controlServer = ControlServer(
             tokenManager = tokenManager,
@@ -480,6 +505,7 @@ class DaemonService : Service() {
             modelsStatus = { modelFetchStatusHolder.status },
             cloudflaredStatus = ::getCloudflaredStatus,
             addHandler = crawlerAddHandler,
+            selectionWatcher = selectionWatcher,
             crawlerRestoreDbStatus = { dbRestore.status },
 )
         wifiGateMonitor = WifiGateMonitor(this)
@@ -591,6 +617,15 @@ class DaemonService : Service() {
         observeWifiForFtp()
         observeWifiForCrawler()
         startSupervisors()
+        // Torrent-page stage 5: re-arm the subset-add watcher. `start()` undoes
+        // the teardown's stop() (this service instance survives a graceful stop,
+        // so onCreate does not run again — same re-arm as dbRestore above), then
+        // resumePending() watches every persisted intent with its ORIGINAL
+        // addedAt/timeoutMs: an intent whose deadline passed while the app was
+        // down pauses at once. Both are idempotent, so a sticky redelivery is
+        // harmless; the watch loops retry while transmission boots.
+        selectionWatcher.start()
+        selectionWatcher.resumePending()
         return START_STICKY
     }
 
@@ -2392,6 +2427,15 @@ class DaemonService : Service() {
                 bep51Backup.stop()
                 dbBackup.stop()
                 dbRestore.stop()
+            },
+            GracefulShutdownPlanner.Step("stop-selection-watcher") {
+                // The subset-add watcher WRITES to transmission (`files-unwanted`,
+                // `paused`) and retries a pause up to 120 times, so it must be
+                // dead before the transmission supervisor goes away — and before
+                // the dashboard that reports its state. Its own step (rather than
+                // folded into stop-observers) keeps the failure attribution
+                // granular; stop() is idempotent.
+                selectionWatcher.stop()
             },
             GracefulShutdownPlanner.Step("stop-crawler") {
                 stopCrawlerForShutdown()

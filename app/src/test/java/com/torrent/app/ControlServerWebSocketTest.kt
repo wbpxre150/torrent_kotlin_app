@@ -346,6 +346,7 @@ class ControlServerWebSocketTest {
         return LiveServer(
             ControlServer(
                 tokenManager = tokenManagerWith(token),
+                selectionWatcher = inertSelectionWatcher(),
                 serviceState = MutableStateFlow(ServiceState.Running),
                 daemonStatuses = { daemons },
                 safStatus = { SafStatus(false, false, null, null) },

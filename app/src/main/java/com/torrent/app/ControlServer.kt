@@ -128,6 +128,11 @@ class ControlServer(
     // Search-dashboard stage 2: same-origin POST /api/transmission/add (mirrors
     // CrawlerProxyServer's route); null = the route answers 503.
     private val addHandler: CrawlerAddHandler? = null,
+    // Torrent-page stage 5: the subset add's live watch state. The
+    // /api/transmission/selection-status route reads it, and DaemonService hands
+    // this same instance to CrawlerAddHandler as its `selectionRegistrar`, so the
+    // route and the handler always describe one watcher.
+    private val selectionWatcher: com.torrent.app.transmission.SelectionWatcher,
     // Cloudflare Tunnel status (Stage 3): /api/status and the dashboard frame.
     // Fail-closed default so an unwired ControlServer still renders the block.
     private val cloudflaredStatus: () -> com.torrent.app.CloudflaredStatus =
@@ -495,6 +500,81 @@ class ControlServer(
                                 outcome.toJson(),
                                 ContentType.Application.Json,
                                 HttpStatusCode.fromValue(outcome.httpStatus),
+                            )
+                        }
+                    }
+
+                    // Torrent-page stage 5: subset add. A magnet is the only add
+                    // mechanism (no `.torrent` can be synthesised), so the
+                    // deselection cannot ride the add itself: the body's
+                    // `unselected` paths are the crawler DB's root-relative paths
+                    // of the files the user UNCHECKED (every file starts checked,
+                    // so an empty list is the whole-torrent case and is rejected
+                    // as `bad_selection:empty` — the old route stays the whole-
+                    // torrent path), and the handler schedules the watch that
+                    // applies `files-unwanted` once transmission has the
+                    // metadata. Same thin-adapter shape as the route above; auth
+                    // is the route interceptor, there is no second check.
+                    post("api/transmission/add-selected") {
+                        val handler = addHandler
+                        if (handler == null) {
+                            call.respondText(
+                                """{"ok":false,"error":"db_unavailable"}""",
+                                ContentType.Application.Json,
+                                HttpStatusCode.ServiceUnavailable,
+                            )
+                        } else {
+                            // A blank or unparseable body is a request error, not
+                            // an empty selection: it never reaches the handler.
+                            val body: org.json.JSONObject? = try {
+                                val text = call.receiveText()
+                                if (text.isBlank()) null else org.json.JSONObject(text)
+                            } catch (e: Exception) {
+                                null
+                            }
+                            if (body == null) {
+                                call.respondText(
+                                    """{"ok":false,"error":"bad_request:body"}""",
+                                    ContentType.Application.Json,
+                                    HttpStatusCode.BadRequest,
+                                )
+                            } else {
+                                val outcome = handler.addSelected(
+                                    hashHex = call.request.queryParameters["hash"] ?: "",
+                                    // A missing/empty `unselected` array is passed
+                                    // through as an empty list: the handler's
+                                    // `BadSelection("empty")` is the one place
+                                    // that decides it.
+                                    unselectedPaths = selectionPaths(body),
+                                    timeoutMs = body.optLong(
+                                        "timeoutMs", SELECTION_TIMEOUT_MS_DEFAULT),
+                                )
+                                call.respondText(
+                                    outcome.toJson(),
+                                    ContentType.Application.Json,
+                                    HttpStatusCode.fromValue(outcome.httpStatus),
+                                )
+                            }
+                        }
+                    }
+
+                    // Torrent-page stage 5: the subset add's watch state, polled
+                    // by the page after an `add-selected` (the metadata wait is
+                    // minutes, so the page cannot block on the add). An unknown
+                    // hash reports `"state":"none"` — the whole-torrent route
+                    // registers no watch at all.
+                    get("api/transmission/selection-status") {
+                        val hash = torrentHash(call.request.queryParameters["hash"])
+                        if (hash == null) {
+                            call.respondText(
+                                """{"ok":false,"error":"bad_request:hash"}""",
+                                ContentType.Application.Json,
+                                HttpStatusCode.BadRequest,
+                            )
+                        } else {
+                            call.respondText(
+                                buildSelectionStatusJson(hash, selectionWatcher.status(hash)),
+                                ContentType.Application.Json,
                             )
                         }
                     }
@@ -2703,6 +2783,51 @@ class ControlServer(
             }
             return hash.lowercase()
         }
+
+        /**
+         * Default watch deadline for a subset add: 10 minutes. The measured
+         * metadata latency of a live magnet is minutes, so the page's
+         * `timeoutMs` is an override (the deterministic fail-safe trigger a
+         * tester injects), never the normal path; `CrawlerAddHandler` clamps
+         * whatever arrives to 1 000..900 000 ms itself.
+         */
+        internal const val SELECTION_TIMEOUT_MS_DEFAULT = 600_000L
+
+        /**
+         * The `unselected` field of an `add-selected` body as a list of paths.
+         * Absent, non-array or empty yields an empty list on purpose: the
+         * handler's `BadSelection("empty")` is the single place that rejects it,
+         * so the route never duplicates that rule. Non-string members are read
+         * as their `toString()` (a numeric path is nonsense either way, and the
+         * handler then fails it as `unknown_path:`).
+         */
+        internal fun selectionPaths(body: org.json.JSONObject): List<String> {
+            val arr = body.optJSONArray("unselected") ?: return emptyList()
+            val out = ArrayList<String>(arr.length())
+            for (i in 0 until arr.length()) {
+                val v = arr.opt(i)
+                if (v != null && v != org.json.JSONObject.NULL) out.add(v.toString())
+            }
+            return out
+        }
+
+        /**
+         * The `selection-status` response body. An unwatched hash reports
+         * `"state":"none"` with zeroed counters ([SelectionStatus.NONE]), which
+         * is what the page treats as "the whole-torrent route was used".
+         */
+        internal fun buildSelectionStatusJson(
+            hash: String,
+            status: com.torrent.app.transmission.SelectionStatus,
+        ): String = org.json.JSONObject()
+            .put("ok", true)
+            .put("hash", hash)
+            .put("state", status.state)
+            .put("detail", status.detail)
+            .put("unselectedCount", status.unselectedCount)
+            .put("addedAt", status.addedAt)
+            .put("updatedAt", status.updatedAt)
+            .toString()
 
         /**
          * Builds the crawler loopback path for `/torrent/info?hash=<hex>`.
