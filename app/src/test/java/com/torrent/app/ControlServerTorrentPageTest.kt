@@ -128,4 +128,67 @@ class ControlServerTorrentPageTest {
         assertTrue(first.contains("<a href=\"/search\">Search</a>"))
         assertFalse(first.contains("id=\"back\""))
     }
+
+    @Test fun page_hasSelectionHelpers() {
+        // Stage 6: three helpers in the file-tools row plus the running count.
+        for (id in listOf("sel-all-btn", "sel-none-btn", "sel-invert-btn", "sel-count")) {
+            assertTrue("missing id $id", page.contains("id=\"$id\""))
+        }
+        for (label in listOf("Select all", "Select none", "Invert")) {
+            assertTrue("missing label $label", page.contains(">$label</button>"))
+        }
+        // The four pinned action buttons keep their exact ids and labels.
+        assertTrue(page.contains(
+            "id=\"add-btn\" class=\"btn secondary\" type=\"button\">&#10133; Add to Transmission</button>"))
+    }
+
+    @Test fun page_rowsGetCheckboxes() {
+        // Every row gets a checkbox built in the loadFiles() loop and is checked
+        // unless its path was deselected (absence from `unchecked` means selected,
+        // so the whole torrent stays the default).
+        assertTrue(page.contains("var unchecked = {};"))
+        assertTrue(page.contains("cb.type = 'checkbox';"))
+        assertTrue(page.contains("cb.className = 'file-check';"))
+        assertTrue(page.contains("cb.checked = !unchecked[fpath];"))
+        assertTrue(page.contains("row.appendChild(cb);"))
+        // The path stays a closure variable: no data-* attribute, no innerHTML.
+        assertFalse(page.contains("data-path"))
+        assertFalse(page.contains("innerHTML"))
+    }
+
+    @Test fun page_addUsesTheSelectionEndpointWhenFilesAreUnchecked() {
+        assertTrue(page.contains("var un = Object.keys(unchecked);"))
+        assertTrue(page.contains("/api/transmission/add-selected?hash="))
+        assertTrue(page.contains("headers: { 'Content-Type': 'application/json' }"))
+        assertTrue(page.contains("JSON.stringify({ unselected: un, timeoutMs: 600000 })"))
+        // Nothing unchecked = the whole torrent: the old route and contract stay.
+        assertTrue(page.contains(
+            "fetch('/api/transmission/add?hash=' + encodeURIComponent(hash), { method: 'POST' })"))
+    }
+
+    @Test fun page_pollsSelectionStatus() {
+        assertTrue(page.contains("/api/transmission/selection-status?hash="))
+        // The five states the watcher reports, and the paused banner wording.
+        assertTrue(page.contains("paused_metadata_timeout"))
+        assertTrue(page.contains("paused_mismatch"))
+        assertTrue(page.contains("paused_apply_failed"))
+        assertTrue(page.contains("Waiting for metadata to apply the file selection"))
+        assertTrue(page.contains("File selection applied"))
+        assertTrue(page.contains("Metadata did not arrive in time "))
+        assertTrue(page.contains("Selection could not be matched to torrent files "))
+        assertTrue(page.contains("Could not apply the selection "))
+        // Every paused/error state renders the shared red banner.
+        assertTrue(page.contains("box.className = isErr ? 'banner red' : 'banner';"))
+        // The subset toast and the bad_selection message.
+        assertTrue(page.contains("selecting files"))
+        assertTrue(page.contains("Invalid file selection"))
+    }
+
+    @Test fun page_hasNoDollarSign() {
+        // The raw-string trap: a dollar sign inside TORRENT_JS/TORRENT_CSS is
+        // Kotlin template interpolation and cannot be escaped in a raw string, so
+        // the rendered page must never contain one (no JS template literals, no
+        // jQuery). Nothing guards this property today.
+        assertFalse("buildTorrentPage() must not contain a dollar sign", page.contains("$"))
+    }
 }

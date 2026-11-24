@@ -4384,6 +4384,7 @@ ${adultSelectionRow(adultSelection)}
             <div class="wrap">
             <header><h1 id="name">Torrent</h1><nav><a href="/">Dashboard</a><a href="/stats">Crawler stats</a><a href="/search">Search</a></nav></header>
             <div id="banner" class="banner red" hidden></div>
+            <div id="sel-status" class="banner" hidden></div>
             <div id="detail" hidden>
               <div class="meta" id="meta"></div>
               <p class="hint">Select keywords for search:</p>
@@ -4399,6 +4400,10 @@ ${adultSelectionRow(adultSelection)}
               <h3>Files</h3>
               <div class="file-tools">
                 <input id="file-filter" type="search" placeholder="Filter files&hellip;" autocomplete="off">
+                <button id="sel-all-btn" class="btn secondary" type="button">Select all</button>
+                <button id="sel-none-btn" class="btn secondary" type="button">Select none</button>
+                <button id="sel-invert-btn" class="btn secondary" type="button">Invert</button>
+                <span id="sel-count" class="hint"></span>
               </div>
               <ul class="file-list" id="file-list"></ul>
               <div class="sentinel" id="sentinel">Loading&hellip;</div>
@@ -4426,12 +4431,14 @@ ${adultSelectionRow(adultSelection)}
             .pill.on{background:var(--blue);border-color:var(--blue);color:#fff;font-weight:600}
             .query-preview{background:var(--chip);color:var(--blue);padding:6px 10px;border-radius:8px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85rem;margin:8px 0;overflow-wrap:anywhere}
             .btnrow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:12px 0}
-            .file-tools{display:flex;gap:8px;margin:8px 0}
+            .file-tools{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}
+            #sel-count{margin-left:auto}
             #file-filter{flex:1 1 auto;min-width:0;height:44px;padding:0 14px;font-size:.95rem;color:var(--text);border:1px solid #dadce0;border-radius:22px;outline:none;background:#fff}
             #file-filter:focus{border-color:var(--blue);box-shadow:0 0 0 2px var(--chip)}
             .file-list{list-style:none;margin:0;padding:0;background:var(--card);border:1px solid #e3e7ee;border-radius:12px;overflow:hidden}
             .file-list li{display:flex;justify-content:space-between;gap:8px;padding:8px 12px;border-top:1px solid #eee;font-size:.9rem}
             .file-list li:first-child{border-top:none}
+            .file-list li input[type=checkbox]{flex-shrink:0;align-self:center;margin-right:8px}
             .file-path{overflow-wrap:anywhere}
             .file-size{color:var(--muted);flex-shrink:0;white-space:nowrap}
             .sentinel{padding:10px;text-align:center;color:var(--muted);font-size:.85rem}
@@ -4456,6 +4463,11 @@ ${adultSelectionRow(adultSelection)}
               var filterTimer = null;
               var toastTimer = null;
               var fileGen = 0;
+              // Selection state is keyed by file PATH, not by batch position: an
+              // absent key means checked, so every file starts selected (today's
+              // default) and the map survives paging and filter resets.
+              var unchecked = {};
+              var selTimer = null;
 
               function el(id) { return document.getElementById(id); }
 
@@ -4607,6 +4619,52 @@ ${adultSelectionRow(adultSelection)}
 
               function setSentinel(text) { el('sentinel').textContent = text; }
 
+              // Row identity is the file path, kept in a closure variable (no
+              // data-* attributes): `unchecked` maps a deselected path to true,
+              // so a selection survives paging and filter resets.
+              function setChecked(p, on) {
+                if (on) delete unchecked[p];
+                else unchecked[p] = true;
+                updateSelCount();
+              }
+
+              function rowToggle(p) {
+                return function () { setChecked(p, this.checked); };
+              }
+
+              function updateSelCount() {
+                var rows = el('file-list').querySelectorAll('li');
+                var n = 0;
+                for (var i = 0; i < rows.length; i++) {
+                  var cb = rows[i].querySelector('input.file-check');
+                  if (cb && cb.checked) n++;
+                }
+                el('sel-count').textContent = n + ' of ' + rows.length + ' shown files selected';
+              }
+
+              // The three helpers act on the DISPLAYED rows only (the list is
+              // lazily paged, so "all" means every loaded and filtered row) and
+              // sync `unchecked` by each row's path.
+              function applyToDisplayed(mode) {
+                var rows = el('file-list').querySelectorAll('li');
+                for (var i = 0; i < rows.length; i++) {
+                  var cb = rows[i].querySelector('input.file-check');
+                  if (!cb) continue;
+                  if (mode === 'all') cb.checked = true;
+                  else if (mode === 'none') cb.checked = false;
+                  else cb.checked = !cb.checked;
+                  var span = rows[i].querySelector('.file-path');
+                  var p = span ? String(span.textContent) : '';
+                  if (cb.checked) delete unchecked[p];
+                  else unchecked[p] = true;
+                }
+                updateSelCount();
+              }
+
+              el('sel-all-btn').onclick = function () { applyToDisplayed('all'); };
+              el('sel-none-btn').onclick = function () { applyToDisplayed('none'); };
+              el('sel-invert-btn').onclick = function () { applyToDisplayed('invert'); };
+
               function loadFiles() {
                 if (fileLoading || !fileHasMore) return;
                 fileLoading = true;
@@ -4624,17 +4682,26 @@ ${adultSelectionRow(adultSelection)}
                     var files = payload.files || [];
                     var list = el('file-list');
                     for (var i = 0; i < files.length; i++) {
+                      var f = files[i];
+                      var fpath = f.path != null ? String(f.path) : '';
                       var row = document.createElement('li');
+                      var cb = document.createElement('input');
+                      cb.type = 'checkbox';
+                      cb.className = 'file-check';
+                      cb.checked = !unchecked[fpath];
+                      cb.onchange = rowToggle(fpath);
                       var path = document.createElement('span');
                       path.className = 'file-path';
-                      path.textContent = files[i].path != null ? String(files[i].path) : '';
+                      path.textContent = fpath;
                       var size = document.createElement('span');
                       size.className = 'file-size';
-                      size.textContent = fmtSize(files[i].size_bytes);
+                      size.textContent = fmtSize(f.size_bytes);
+                      row.appendChild(cb);
                       row.appendChild(path);
                       row.appendChild(size);
                       list.appendChild(row);
                     }
+                    updateSelCount();
                     fileOffset += files.length;
                     fileHasMore = !!payload.has_more;
                     var total = typeof payload.total === 'number' ? payload.total : fileOffset;
@@ -4675,6 +4742,87 @@ ${adultSelectionRow(adultSelection)}
                   rpc_failed: 'Transmission RPC error'
                 };
                 return map[d.error] || 'Add failed';
+              }
+
+              // The add-selected outcome map: the same insufficient_space
+              // byte-count wording as addMessage, plus the subset failures.
+              function addSelMessage(d) {
+                if (!d) return 'Add failed';
+                if (d.ok) {
+                  return d.duplicate ? 'Already added (duplicate)'
+                    : 'Added to Transmission \u2014 selecting files\u2026';
+                }
+                if (d.error === 'insufficient_space') {
+                  return 'Not enough free space (torrent ' + fmtGiB(d.sizeBytes) +
+                    ', free ' + fmtGiB(d.freeBytes) + ')';
+                }
+                if (d.error === 'bad_selection') {
+                  return d.detail ? 'Invalid file selection (' + d.detail + ')'
+                    : 'Invalid file selection';
+                }
+                var map = {
+                  bad_request: 'Add failed',
+                  bad_hash: 'Bad info hash',
+                  db_unavailable: 'Crawler DB unavailable',
+                  not_found: 'Torrent not found in the crawler DB',
+                  no_storage: 'No storage configured',
+                  rpc_failed: 'Transmission RPC error'
+                };
+                return map[d.error] || 'Add failed';
+              }
+
+              // The subset add is asynchronous: transmission exposes files[] only
+              // once metadata arrives, and the watcher then applies the
+              // deselection (or pauses the torrent). One timer polls its state.
+              function setSelStatus(text, isErr) {
+                var box = el('sel-status');
+                if (!text) {
+                  box.textContent = '';
+                  box.className = 'banner';
+                  box.setAttribute('hidden', '');
+                  return;
+                }
+                box.textContent = text;
+                box.className = isErr ? 'banner red' : 'banner';
+                box.removeAttribute('hidden');
+              }
+
+              function pollSelectionStatus() {
+                if (!hash) return;
+                if (selTimer) clearTimeout(selTimer);
+                selTimer = setTimeout(function () {
+                  selTimer = null;
+                  fetchSelectionStatus();
+                }, 3000);
+              }
+
+              function fetchSelectionStatus() {
+                fetch('/api/transmission/selection-status?hash=' + encodeURIComponent(hash))
+                  .then(function (r) { return r.json().catch(function () { return null; }); })
+                  .then(function (d) {
+                    var state = d && d.ok ? String(d.state || 'none') : '';
+                    if (state === 'none') { setSelStatus('', false); return; }
+                    if (state === 'pending') {
+                      setSelStatus('Waiting for metadata to apply the file selection\u2026', false);
+                      pollSelectionStatus();
+                      return;
+                    }
+                    if (state === 'applied') { setSelStatus('File selection applied', false); return; }
+                    if (state === 'paused_metadata_timeout') {
+                      setSelStatus('Metadata did not arrive in time \u2014 torrent paused', true);
+                      return;
+                    }
+                    if (state === 'paused_mismatch') {
+                      setSelStatus('Selection could not be matched to torrent files \u2014 torrent paused', true);
+                      return;
+                    }
+                    if (state === 'paused_apply_failed') {
+                      setSelStatus('Could not apply the selection \u2014 torrent paused', true);
+                      return;
+                    }
+                    setSelStatus('Selection status: ' + (state || 'unknown'), true);
+                  })
+                  .catch(function () { pollSelectionStatus(); });
               }
 
               el('imdb-btn').onclick = function () {
@@ -4727,11 +4875,26 @@ ${adultSelectionRow(adultSelection)}
                 if (btn.disabled) return;
                 btn.disabled = true;
                 // The control_token cookie authenticates this POST (as on /search).
-                fetch('/api/transmission/add?hash=' + encodeURIComponent(hash), { method: 'POST' })
+                // Nothing unchecked means the whole torrent: that request and its
+                // response contract are unchanged.
+                var un = Object.keys(unchecked);
+                var req = un.length === 0
+                  ? fetch('/api/transmission/add?hash=' + encodeURIComponent(hash), { method: 'POST' })
+                  : fetch('/api/transmission/add-selected?hash=' + encodeURIComponent(hash), {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ unselected: un, timeoutMs: 600000 })
+                    });
+                req
                   .then(function (r) { return r.json().catch(function () { return null; }); })
                   .then(function (d) {
                     btn.disabled = false;
-                    toast(addMessage(d), !(d && d.ok));
+                    if (un.length === 0) {
+                      toast(addMessage(d), !(d && d.ok));
+                      return;
+                    }
+                    toast(addSelMessage(d), !(d && d.ok));
+                    if (d && d.ok) pollSelectionStatus();
                   })
                   .catch(function () {
                     btn.disabled = false;
@@ -4757,6 +4920,9 @@ ${adultSelectionRow(adultSelection)}
               }
 
               loadInfo();
+              // A pause forced by a previous session (or by curl) must be visible
+              // after a page reload: one status read at boot.
+              pollSelectionStatus();
             })();
         """.trimIndent()
 
