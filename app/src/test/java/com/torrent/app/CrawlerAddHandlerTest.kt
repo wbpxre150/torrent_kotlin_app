@@ -10,6 +10,8 @@ import com.torrent.app.storage.SafStorageGateway
 import com.torrent.app.transmission.TorrentAddResult
 import com.torrent.app.transmission.TorrentAdder
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -30,6 +32,15 @@ class CrawlerAddHandlerTest {
         const val NAME = "Show S01 (720p)"
         const val SIZE = 1_500_000_000L
         const val SUBPATH = "torrent_data"
+
+        // The torrent's file rows: two prefixed files and one root-level file,
+        // summing to SIZE. FILE_A/FILE_B share the "Season 1" prefix.
+        const val FILE_A = "Season 1/E01.mkv"
+        const val FILE_B = "Season 1/E02.mkv"
+        const val FILE_C = "sample.nfo"
+        const val SIZE_A = 700_000_000L
+        const val SIZE_B = 700_000_000L
+        const val SIZE_C = 100_000_000L
     }
 
     private lateinit var context: Context
@@ -39,6 +50,20 @@ class CrawlerAddHandlerTest {
     @Volatile private var rpcResult = TorrentAddResult(true, false, null)
     @Volatile private var lastMagnet: String? = null
     @Volatile private var lastDownloadDir: String? = null
+
+    private var registrarCalls = 0
+    @Volatile private var registeredHash: String? = null
+    @Volatile private var registeredName: String? = null
+    @Volatile private var registeredPaths: Set<String>? = null
+    @Volatile private var registeredTimeout = -1L
+
+    private val recordingRegistrar = SelectionRegistrar { hash, name, paths, timeout ->
+        registrarCalls++
+        registeredHash = hash
+        registeredName = name
+        registeredPaths = paths
+        registeredTimeout = timeout
+    }
 
     private val fakeRpc = object : TorrentAdder {
         override fun torrentAdd(filename: String, downloadDir: String): TorrentAddResult {
@@ -56,6 +81,11 @@ class CrawlerAddHandlerTest {
         rpcResult = TorrentAddResult(true, false, null)
         lastMagnet = null
         lastDownloadDir = null
+        registrarCalls = 0
+        registeredHash = null
+        registeredName = null
+        registeredPaths = null
+        registeredTimeout = -1L
         dbFile = File(context.cacheDir, "torrents-test.db")
         dbFile.delete()
         SQLiteDatabase.openOrCreateDatabase(dbFile, null).use { sdb ->
@@ -70,6 +100,33 @@ class CrawlerAddHandlerTest {
                 put("size_bytes", SIZE)
                 put("added_timestamp", 0)
             })
+            sdb.execSQL(
+                "CREATE TABLE path_prefixes (id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                    "prefix TEXT NOT NULL UNIQUE)")
+            sdb.execSQL(
+                "CREATE TABLE torrent_files (id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                    "torrent_id INTEGER NOT NULL, prefix_id INTEGER, " +
+                    "filename TEXT NOT NULL, size_bytes INTEGER NOT NULL, " +
+                    "file_index SMALLINT NOT NULL)")
+            val torrentId = sdb.rawQuery("SELECT id FROM torrents", null).use { c ->
+                c.moveToFirst()
+                c.getLong(0)
+            }
+            val seasonId = sdb.insert("path_prefixes", null, ContentValues().apply {
+                put("prefix", "Season 1")
+            })
+            fun insertFile(prefixId: Long?, filename: String, size: Long, index: Int) {
+                sdb.insert("torrent_files", null, ContentValues().apply {
+                    put("torrent_id", torrentId)
+                    if (prefixId != null) put("prefix_id", prefixId)
+                    put("filename", filename)
+                    put("size_bytes", size)
+                    put("file_index", index)
+                })
+            }
+            insertFile(seasonId, "E01.mkv", SIZE_A, 0)
+            insertFile(seasonId, "E02.mkv", SIZE_B, 1)
+            insertFile(null, "sample.nfo", SIZE_C, 2)
         }
     }
 
@@ -77,6 +134,7 @@ class CrawlerAddHandlerTest {
         gatewayValue: SafStorageGateway? = Mockito.mock(SafStorageGateway::class.java),
         db: File? = dbFile,
         freeBytes: Long = 10L * 1024 * 1024 * 1024,
+        registrar: SelectionRegistrar? = null,
     ): CrawlerAddHandler {
         gatewayValue?.let { Mockito.`when`(it.availableBytes()).thenReturn(freeBytes) }
         return CrawlerAddHandler(
@@ -84,6 +142,7 @@ class CrawlerAddHandlerTest {
             gateway = { gatewayValue },
             crawlerDbFile = { db },
             rpcFactory = { _, _ -> fakeRpc },
+            selectionRegistrar = registrar,
         )
     }
 
@@ -170,6 +229,162 @@ class CrawlerAddHandlerTest {
         val outcome = handler().add(HASH)
         assertEquals(502, outcome.httpStatus)
         assertEquals("""{"ok":false,"error":"rpc_failed"}""", outcome.toJson())
+    }
+
+    // ---- addSelected (plan 12 stage 3) ----
+
+    @Test
+    fun addSelected_success_pinsJsonSelectedBytesAndMagnetParityWithAdd() {
+        val outcome = handler(registrar = recordingRegistrar).addSelected(HASH, listOf(FILE_C), 600_000)
+        assertEquals(200, outcome.httpStatus)
+        assertEquals(
+            """{"ok":true,"added":true,"duplicate":false,"name":"Show S01 (720p)","checked":true,"selectedBytes":${SIZE - SIZE_C},"unselectedCount":1,"selection":"pending"}""",
+            outcome.toJson())
+        assertEquals("/saf/usb/$SUBPATH", lastDownloadDir)
+
+        val selectedMagnet = lastMagnet
+        assertEquals("magnet:?xt=urn:btih:$HASH&dn=Show%20S01%20%28720p%29", selectedMagnet)
+        lastMagnet = null
+        handler().add(HASH) // the whole-torrent path builds a byte-identical magnet
+        assertEquals(selectedMagnet, lastMagnet)
+    }
+
+    @Test
+    fun addSelected_registersTheSelectionWithTheExactArguments() {
+        val outcome = handler(registrar = recordingRegistrar)
+            .addSelected(HASH, listOf(FILE_C, FILE_A), 600_000)
+        assertEquals(200, outcome.httpStatus)
+        assertEquals(1, registrarCalls)
+        assertEquals(HASH, registeredHash)
+        assertEquals(NAME, registeredName)
+        assertEquals(setOf(FILE_A, FILE_C), registeredPaths)
+        assertEquals(600_000L, registeredTimeout)
+    }
+
+    @Test
+    fun addSelected_clampsTheSelectionTimeoutToTheHandlerBounds() {
+        handler(registrar = recordingRegistrar).addSelected(HASH, listOf(FILE_C), 50)
+        assertEquals(1_000L, registeredTimeout)
+        handler(registrar = recordingRegistrar).addSelected(HASH, listOf(FILE_C), 10_000_000)
+        assertEquals(900_000L, registeredTimeout)
+    }
+
+    @Test
+    fun addSelected_duplicateAdd_stillSchedulesTheWatch() {
+        rpcResult = TorrentAddResult(true, true, null)
+        val outcome = handler(registrar = recordingRegistrar).addSelected(HASH, listOf(FILE_C), 600_000)
+        assertEquals(
+            """{"ok":true,"added":true,"duplicate":true,"name":"Show S01 (720p)","checked":true,"selectedBytes":${SIZE - SIZE_C},"unselectedCount":1,"selection":"pending"}""",
+            outcome.toJson())
+        assertEquals(1, registrarCalls)
+    }
+
+    @Test
+    fun addSelected_registrarThrows_stillReportsAdded() {
+        val throwing = SelectionRegistrar { _, _, _, _ -> throw IllegalStateException("boom") }
+        val outcome = handler(registrar = throwing).addSelected(HASH, listOf(FILE_C), 600_000)
+        assertEquals(200, outcome.httpStatus)
+        assertTrue(outcome is SelectedAddOutcome.Added)
+    }
+
+    @Test
+    fun addSelected_unknownPath_returns400WithTheFirstUnknownPath() {
+        val outcome = handler(registrar = recordingRegistrar)
+            .addSelected(HASH, listOf("nope.mkv", FILE_C), 600_000)
+        assertEquals(400, outcome.httpStatus)
+        assertEquals(
+            """{"ok":false,"error":"bad_selection","detail":"unknown_path:nope.mkv"}""",
+            outcome.toJson())
+        assertNull(lastMagnet)
+        assertEquals(0, registrarCalls)
+    }
+
+    @Test
+    fun addSelected_emptyOrBlankList_returns400BadSelectionEmpty() {
+        for (paths in listOf(emptyList<String>(), listOf("", "  "))) {
+            val outcome = handler().addSelected(HASH, paths, 600_000)
+            assertEquals(400, outcome.httpStatus)
+            assertEquals(
+                """{"ok":false,"error":"bad_selection","detail":"empty"}""", outcome.toJson())
+        }
+    }
+
+    @Test
+    fun addSelected_wholeTorrentDeselected_returns400BadSelectionNoFilesSelected() {
+        val outcome = handler().addSelected(HASH, listOf(FILE_A, FILE_B, FILE_C), 600_000)
+        assertEquals(400, outcome.httpStatus)
+        assertEquals(
+            """{"ok":false,"error":"bad_selection","detail":"no_files_selected"}""",
+            outcome.toJson())
+        assertNull(lastMagnet)
+    }
+
+    @Test
+    fun addSelected_moreThan200kPaths_returns400BadSelectionTooMany() {
+        val outcome = handler().addSelected(HASH, (0..200_000).map { "f$it" }, 600_000)
+        assertEquals(400, outcome.httpStatus)
+        assertEquals(
+            """{"ok":false,"error":"bad_selection","detail":"too_many"}""", outcome.toJson())
+    }
+
+    @Test
+    fun addSelected_spaceGateUsesTheSelectedBytesSoASubsetFitsWhereAddRefuses() {
+        val free = SIZE - 1 // the whole 1.5 GB torrent does not fit, the 1.4 GB subset does
+        assertEquals(507, handler(freeBytes = free).add(HASH).httpStatus)
+
+        val outcome = handler(freeBytes = free, registrar = recordingRegistrar)
+            .addSelected(HASH, listOf(FILE_C), 600_000)
+        assertEquals(200, outcome.httpStatus)
+        assertEquals(SIZE - SIZE_C, (outcome as SelectedAddOutcome.Added).selectedBytes)
+        assertEquals(1, registrarCalls)
+    }
+
+    @Test
+    fun addSelected_selectedBytesOverFreeSpace_returns507WithTheSelectedBytes() {
+        val free = 1_000_000_000L
+        val outcome = handler(freeBytes = free).addSelected(HASH, listOf(FILE_C), 600_000)
+        assertEquals(507, outcome.httpStatus)
+        assertEquals(
+            """{"ok":false,"error":"insufficient_space","sizeBytes":${SIZE - SIZE_C},"freeBytes":$free}""",
+            outcome.toJson())
+        assertNull(lastMagnet)
+    }
+
+    @Test
+    fun addSelected_unknownFreeSpace_skipsTheGateAndReportsCheckedFalse() {
+        val outcome = handler(freeBytes = Long.MAX_VALUE)
+            .addSelected(HASH, listOf(FILE_C), 600_000)
+        assertEquals(
+            """{"ok":true,"added":true,"duplicate":false,"name":"Show S01 (720p)","checked":false,"selectedBytes":${SIZE - SIZE_C},"unselectedCount":1,"selection":"pending"}""",
+            outcome.toJson())
+    }
+
+    @Test
+    fun addSelected_errorOutcomesReuseTheExistingShapes() {
+        val bad = handler().addSelected("f".repeat(39), listOf(FILE_C), 600_000)
+        assertEquals(400, bad.httpStatus)
+        assertEquals("""{"ok":false,"error":"bad_hash"}""", bad.toJson())
+
+        for (db in listOf<File?>(null, File(context.cacheDir, "no-such-db.db"))) {
+            val o = handler(db = db).addSelected(HASH, listOf(FILE_C), 600_000)
+            assertEquals(503, o.httpStatus)
+            assertEquals("""{"ok":false,"error":"db_unavailable"}""", o.toJson())
+        }
+
+        val absent = handler().addSelected("f".repeat(40), listOf(FILE_C), 600_000)
+        assertEquals(404, absent.httpStatus)
+        assertEquals("""{"ok":false,"error":"not_found"}""", absent.toJson())
+
+        val noStorage = handler(gatewayValue = null).addSelected(HASH, listOf(FILE_C), 600_000)
+        assertEquals(503, noStorage.httpStatus)
+        assertEquals("""{"ok":false,"error":"no_storage"}""", noStorage.toJson())
+
+        rpcResult = TorrentAddResult(false, false, null)
+        val rpcFailed = handler(registrar = recordingRegistrar)
+            .addSelected(HASH, listOf(FILE_C), 600_000)
+        assertEquals(502, rpcFailed.httpStatus)
+        assertEquals("""{"ok":false,"error":"rpc_failed"}""", rpcFailed.toJson())
+        assertEquals(0, registrarCalls)
     }
 
     private fun bytes40(hex: String): ByteArray = ByteArray(20) { i ->

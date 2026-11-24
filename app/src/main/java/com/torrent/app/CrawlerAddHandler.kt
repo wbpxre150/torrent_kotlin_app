@@ -4,7 +4,9 @@ import android.database.sqlite.SQLiteDatabase
 import android.util.Log
 import com.torrent.app.config.ConfigStore
 import com.torrent.app.storage.SafStorageGateway
+import com.torrent.app.transmission.SelectionPlanner
 import com.torrent.app.transmission.TorrentAdder
+import com.torrent.app.transmission.TorrentAddResult
 import com.torrent.app.transmission.TransmissionRpcClient
 import java.io.File
 
@@ -82,6 +84,116 @@ sealed class CrawlerAddOutcome {
 }
 
 /**
+ * Hands a freshly added torrent's pending file selection to the watcher
+ * (plan 12 stage 3). [CrawlerAddHandler.addSelected] only schedules it: the
+ * magnet is the sole add mechanism, so `files-unwanted` can only be sent once
+ * transmission has the torrent's metadata, and the watcher pauses the torrent
+ * instead when that never happens.
+ *
+ * Implementations must not throw — the add has already succeeded. A registrar
+ * failure is logged and the request still reports [SelectedAddOutcome.Added].
+ */
+fun interface SelectionRegistrar {
+    fun register(hashHex: String, name: String, unselectedPaths: Set<String>, timeoutMs: Long)
+}
+
+/**
+ * Outcome of one `/api/transmission/add-selected` request (plan 12 stage 3).
+ *
+ * Same style as [CrawlerAddOutcome] — plain data + hand-rolled JSON, no Ktor —
+ * but a separate type, so the existing `/api/transmission/add` contract (which
+ * the crawler's C UI parses verbatim) stays byte-identical.
+ */
+sealed class SelectedAddOutcome {
+    abstract val httpStatus: Int
+    abstract fun toJson(): String
+
+    /** 400 — hash is not exactly 40 lowercase hex chars. */
+    object BadHash : SelectedAddOutcome() {
+        override val httpStatus = 400
+        override fun toJson() = """{"ok":false,"error":"bad_hash"}"""
+    }
+
+    /** 503 — the crawler database file is missing or unreadable. */
+    object DbUnavailable : SelectedAddOutcome() {
+        override val httpStatus = 503
+        override fun toJson() = """{"ok":false,"error":"db_unavailable"}"""
+    }
+
+    /** 404 — no row (or no file rows) for the info-hash in the crawler database. */
+    object NotFound : SelectedAddOutcome() {
+        override val httpStatus = 404
+        override fun toJson() = """{"ok":false,"error":"not_found"}"""
+    }
+
+    /** 503 — no SAF gateway (USB tree not granted). */
+    object NoStorage : SelectedAddOutcome() {
+        override val httpStatus = 503
+        override fun toJson() = """{"ok":false,"error":"no_storage"}"""
+    }
+
+    /** 502 — transmission did not accept the torrent (daemon down / RPC error). */
+    object RpcFailed : SelectedAddOutcome() {
+        override val httpStatus = 502
+        override fun toJson() = """{"ok":false,"error":"rpc_failed"}"""
+    }
+
+    /**
+     * 400 — the deselection list itself is unusable. [detail] is one of `empty`
+     * (no/blank list), `too_many` (more than [CrawlerAddHandler.MAX_UNSELECTED_PATHS]
+     * paths), `no_files_selected` (the deselection covers every file) or
+     * `unknown_path:<path>` (the first path absent from the DB's file list).
+     */
+    data class BadSelection(val detail: String) : SelectedAddOutcome() {
+        override val httpStatus = 400
+        override fun toJson() =
+            """{"ok":false,"error":"bad_selection","detail":"${jsonEscape(detail)}"}"""
+    }
+
+    /**
+     * 507 — the *selected* subset is bigger than the drive's free space. Same
+     * JSON shape as [CrawlerAddOutcome.InsufficientSpace] so the page's existing
+     * `insufficient_space` message renders it unchanged, which is why `sizeBytes`
+     * here is [selectedBytes] and not the whole torrent.
+     */
+    data class InsufficientSpace(val selectedBytes: Long, val freeBytes: Long) :
+        SelectedAddOutcome() {
+        override val httpStatus = 507
+        override fun toJson() =
+            """{"ok":false,"error":"insufficient_space","sizeBytes":$selectedBytes,"freeBytes":$freeBytes}"""
+    }
+
+    /** 200 — added; the file selection is scheduled, hence `"selection":"pending"`. */
+    data class Added(
+        val duplicate: Boolean,
+        val name: String,
+        val checked: Boolean,
+        val selectedBytes: Long,
+        val unselectedCount: Int,
+    ) : SelectedAddOutcome() {
+        override val httpStatus = 200
+        override fun toJson(): String =
+            """{"ok":true,"added":true,"duplicate":$duplicate,"name":"${jsonEscape(name)}","checked":$checked,"selectedBytes":$selectedBytes,"unselectedCount":$unselectedCount,"selection":"pending"}"""
+    }
+
+    /** Minimal JSON string escaper, byte-identical to [CrawlerAddOutcome.jsonEscape]. */
+    internal fun jsonEscape(s: String): String = buildString {
+        for (ch in s) {
+            when (ch) {
+                '\\' -> append("\\\\")
+                '"' -> append("\\\"")
+                '\n' -> append("\\n")
+                '\r' -> append("\\r")
+                '\t' -> append("\\t")
+                '\b' -> append("\\b")
+                '\u000C' -> append("\\f")
+                else -> if (ch.code < 0x20) append("\\u%04x".format(ch.code)) else append(ch)
+            }
+        }
+    }
+}
+
+/**
  * Adds a crawler-DB torrent to the transmission daemon (plan 11 D2).
  *
  * Plain Kotlin (no Ktor) so it is unit-testable: the proxy route is a thin
@@ -96,6 +208,8 @@ class CrawlerAddHandler(
     private val crawlerDbFile: () -> File?,
     private val rpcFactory: (String, String) -> TorrentAdder =
         { user, pass -> TransmissionRpcClient(user, pass) },
+    /** Scheduler for a subset add's `files-unwanted`; null keeps the whole-torrent path only. */
+    private val selectionRegistrar: SelectionRegistrar? = null,
 ) {
     fun add(hashHex: String): CrawlerAddOutcome {
         if (!HASH_REX.matches(hashHex)) return CrawlerAddOutcome.BadHash
@@ -122,6 +236,97 @@ class CrawlerAddHandler(
             if (sizeBytes > free) return CrawlerAddOutcome.InsufficientSpace(sizeBytes, free)
         }
 
+        val r = addMagnet(hashHex, name) ?: return CrawlerAddOutcome.RpcFailed
+        return if (r.ok) CrawlerAddOutcome.Added(r.duplicate, name, checked)
+        else CrawlerAddOutcome.RpcFailed
+    }
+
+    /**
+     * Adds a torrent with a subset of its files deselected (plan 12 stage 3).
+     *
+     * The magnet is the only add mechanism (no `.torrent` can be synthesised), so
+     * the deselection cannot ride the add itself: [unselectedPaths] are the
+     * crawler DB's root-relative paths, validated against the DB's own file list,
+     * and the resulting `files-unwanted` is applied by the watcher once
+     * transmission has the metadata (scheduled through [selectionRegistrar]).
+     *
+     * The free-space gate uses the **selected** total, so a torrent whose whole
+     * size exceeds the drive's free space is still addable when the picked subset
+     * fits.
+     */
+    fun addSelected(
+        hashHex: String,
+        unselectedPaths: List<String>,
+        timeoutMs: Long,
+    ): SelectedAddOutcome {
+        if (!HASH_REX.matches(hashHex)) return SelectedAddOutcome.BadHash
+
+        val dbFile = crawlerDbFile()
+        if (dbFile == null || !dbFile.exists()) return SelectedAddOutcome.DbUnavailable
+
+        // The name is needed for the magnet's dn= and for the watcher's
+        // name-mismatch guard, so it is read exactly as [add] reads it.
+        val name = (try {
+            queryTorrent(dbFile, hashHex)?.first
+        } catch (e: Exception) {
+            Log.w(TAG, "crawler db read failed: ${e.message}")
+            null
+        }) ?: return SelectedAddOutcome.NotFound
+
+        val allFiles: List<Pair<String, Long>>? = try {
+            queryTorrentFiles(dbFile, hashHex)
+        } catch (e: Exception) {
+            Log.w(TAG, "crawler db file read failed: ${e.message}")
+            null
+        }
+        if (allFiles.isNullOrEmpty()) return SelectedAddOutcome.NotFound
+
+        if (unselectedPaths.isEmpty() || unselectedPaths.all { it.isBlank() }) {
+            return SelectedAddOutcome.BadSelection("empty")
+        }
+        if (unselectedPaths.size > MAX_UNSELECTED_PATHS) {
+            return SelectedAddOutcome.BadSelection("too_many")
+        }
+        val unselected = unselectedPaths.toSet()
+        if (allFiles.all { it.first in unselected }) {
+            return SelectedAddOutcome.BadSelection("no_files_selected")
+        }
+        // The selected total doubles as the path validation: selectedTotalBytes
+        // returns null only for a path that is not in the DB's file list.
+        val selectedBytes = SelectionPlanner.selectedTotalBytes(allFiles, unselected)
+            ?: return SelectedAddOutcome.BadSelection(
+                "unknown_path:" + firstUnknownPath(allFiles, unselected))
+
+        val g = gateway() ?: return SelectedAddOutcome.NoStorage
+        var checked = false
+        val free = g.availableBytes()
+        if (free != Long.MAX_VALUE) {
+            // Long.MAX_VALUE means "never probed": skip the check, as [add] does.
+            checked = true
+            if (selectedBytes > free) return SelectedAddOutcome.InsufficientSpace(selectedBytes, free)
+        }
+
+        val r = addMagnet(hashHex, name) ?: return SelectedAddOutcome.RpcFailed
+        if (!r.ok) return SelectedAddOutcome.RpcFailed
+
+        // A registrar failure must not fail the add — the torrent is already in
+        // transmission, and the watcher's own pause guard is the transmission-side
+        // `wanted` check.
+        try {
+            selectionRegistrar?.register(
+                hashHex,
+                name,
+                unselected,
+                timeoutMs.coerceIn(MIN_SELECTION_TIMEOUT_MS, MAX_SELECTION_TIMEOUT_MS),
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "selection register failed: ${e.message}")
+        }
+        return SelectedAddOutcome.Added(r.duplicate, name, checked, selectedBytes, unselected.size)
+    }
+
+    /** Magnet build + `torrent-add` into the shared data dir; null when the RPC throws. */
+    private fun addMagnet(hashHex: String, name: String): TorrentAddResult? {
         // Byte-parity with the crawler's C url_encode (http_api.c): alnum +
         // '-._~' literal, everything else percent-encoded per UTF-8 byte —
         // so the add-button magnet matches the crawler's own magnet links.
@@ -129,15 +334,47 @@ class CrawlerAddHandler(
         val cfg = store.load()
         val downloadDir = if (cfg.dataSubpath.isEmpty()) TransmissionConfig.USB_DOWNLOAD_DIR
                           else "${TransmissionConfig.USB_DOWNLOAD_DIR}/${cfg.dataSubpath}"
-        val r = try {
+        return try {
             rpcFactory(cfg.transmission.username, cfg.transmission.password)
                 .torrentAdd(magnet, downloadDir)
         } catch (e: Exception) {
             Log.w(TAG, "torrent-add failed: ${e.message}")
-            return CrawlerAddOutcome.RpcFailed
+            null
         }
-        return if (r.ok) CrawlerAddOutcome.Added(r.duplicate, name, checked)
-        else CrawlerAddOutcome.RpcFailed
+    }
+
+    /** First deselected path absent from [allFiles] (only used to name a validation failure). */
+    private fun firstUnknownPath(
+        allFiles: List<Pair<String, Long>>,
+        unselected: Set<String>,
+    ): String {
+        val known = HashSet<String>(allFiles.size * 2)
+        allFiles.forEach { known.add(it.first) }
+        return unselected.firstOrNull { it !in known } ?: ""
+    }
+
+    /**
+     * `(root-relative path, size_bytes)` for every file of the info-hash, in
+     * `file_index` order; null when the DB read fails.
+     *
+     * Mirrors the crawler's own page query (database.c:2281-2293) so the paths the
+     * dashboard shows are exactly the paths validated here.
+     */
+    private fun queryTorrentFiles(dbFile: File, hashHex: String): List<Pair<String, Long>>? {
+        // The validated 40-hex chars are inlined as a SQLite hex blob literal
+        // (X'...'), exactly as in [queryTorrent].
+        val sql = "SELECT COALESCE(pp.prefix || '/' || tf.filename, tf.filename) AS path, " +
+            "tf.size_bytes FROM torrent_files tf " +
+            "JOIN torrents t ON t.id = tf.torrent_id " +
+            "LEFT JOIN path_prefixes pp ON tf.prefix_id = pp.id " +
+            "WHERE t.info_hash = X'$hashHex' ORDER BY tf.file_index"
+        SQLiteDatabase.openDatabase(dbFile.path, null, SQLiteDatabase.OPEN_READONLY).use { sdb ->
+            sdb.rawQuery(sql, null).use { c ->
+                val files = ArrayList<Pair<String, Long>>(c.count)
+                while (c.moveToNext()) files.add(c.getString(0) to c.getLong(1))
+                return files
+            }
+        }
     }
 
     /** `name` + `size_bytes` for the 20-byte info-hash blob, or null (never writes). */
@@ -161,6 +398,13 @@ class CrawlerAddHandler(
         private val HASH_REX = Regex("[0-9a-f]{40}")
 
         private const val MAGNET_PREFIX = "magnet:?xt=urn:btih:"
+
+        /** Upper bound on a deselection body (the page can only send loaded rows). */
+        private const val MAX_UNSELECTED_PATHS = 200_000
+
+        /** Selection-watch timeout bounds; the route applies the 600 s default. */
+        private const val MIN_SELECTION_TIMEOUT_MS = 1_000L
+        private const val MAX_SELECTION_TIMEOUT_MS = 900_000L
 
         /** dn= encoding with byte parity to the crawler C url_encode. */
         internal fun magnetDn(name: String): String = buildString {
