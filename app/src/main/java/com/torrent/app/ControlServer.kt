@@ -4495,6 +4495,7 @@ ${adultSelectionRow(adultSelection)}
             .btnrow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:12px 0}
             .file-tools{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}
             #sel-count{margin-left:auto}
+            #add-btn:disabled{opacity:.55;cursor:not-allowed}
             #file-filter{flex:1 1 auto;min-width:0;height:44px;padding:0 14px;font-size:.95rem;color:var(--text);border:1px solid #dadce0;border-radius:22px;outline:none;background:#fff}
             #file-filter:focus{border-color:var(--blue);box-shadow:0 0 0 2px var(--chip)}
             .file-list{list-style:none;margin:0;padding:0;background:var(--card);border:1px solid #e3e7ee;border-radius:12px;overflow:hidden}
@@ -4525,10 +4526,14 @@ ${adultSelectionRow(adultSelection)}
               var filterTimer = null;
               var toastTimer = null;
               var fileGen = 0;
-              // Selection state is keyed by file PATH, not by batch position: an
-              // absent key means checked, so every file starts selected (today's
-              // default) and the map survives paging and filter resets.
-              var unchecked = {};
+              // Selection state is a MODE plus a path-keyed set, so the helpers act
+              // on the WHOLE torrent instead of on the lazily loaded rows: mode
+              // 'all' starts every file selected and selSet holds the DESELECTED
+              // paths; mode 'none' starts nothing selected and selSet holds the
+              // SELECTED paths. The set survives paging and filter resets.
+              var selMode = 'all';
+              var selSet = {};   // mode 'all': deselected paths; mode 'none': selected paths
+              var torrentFiles = 0;   // whole-torrent file_count from /torrent/info
               var selTimer = null;
 
               function el(id) { return document.getElementById(id); }
@@ -4665,6 +4670,10 @@ ${adultSelectionRow(adultSelection)}
                 el('peer-info').textContent = peers + (peers === 1 ? ' peer' : ' peers');
                 renderPills(info.name, info.filtered_name);
                 showDetail();
+                // The only whole-torrent file count: the files API's payload.total
+                // is filter-scoped and must never drive the selection counter.
+                torrentFiles = files;
+                updateSelCount();
                 loadFiles();
               }
 
@@ -4682,11 +4691,13 @@ ${adultSelectionRow(adultSelection)}
               function setSentinel(text) { el('sentinel').textContent = text; }
 
               // Row identity is the file path, kept in a closure variable (no
-              // data-* attributes): `unchecked` maps a deselected path to true,
+              // data-* attributes): selMode + selSet decide a row's checked state,
               // so a selection survives paging and filter resets.
+              function isSel(p) { return (selMode === 'all') !== !!selSet[p]; }
+
               function setChecked(p, on) {
-                if (on) delete unchecked[p];
-                else unchecked[p] = true;
+                if (on === (selMode === 'all')) delete selSet[p];
+                else selSet[p] = true;
                 updateSelCount();
               }
 
@@ -4694,38 +4705,48 @@ ${adultSelectionRow(adultSelection)}
                 return function () { setChecked(p, this.checked); };
               }
 
+              // The counter is whole-torrent and filter-independent: it is derived
+              // from the mode, the set size and the torrent's file_count, never from
+              // the loaded rows. Before the info arrives (torrentFiles 0) it stays
+              // blank and Add keeps its current state, so a crawler outage cannot
+              // brick the button.
               function updateSelCount() {
-                var rows = el('file-list').querySelectorAll('li');
-                var n = 0;
-                for (var i = 0; i < rows.length; i++) {
-                  var cb = rows[i].querySelector('input.file-check');
-                  if (cb && cb.checked) n++;
-                }
-                el('sel-count').textContent = n + ' of ' + rows.length + ' shown files selected';
+                if (torrentFiles === 0) { el('sel-count').textContent = ''; return; }
+                var m = Object.keys(selSet).length;
+                var n = selMode === 'all' ? torrentFiles - m : m;
+                if (n < 0) n = 0;
+                if (n > torrentFiles) n = torrentFiles;
+                el('sel-count').textContent =
+                  n + ' of ' + torrentFiles + ' files selected' + (n === 0 ? ' \u2014 nothing to add' : '');
+                el('add-btn').disabled = n === 0;
               }
 
-              // The three helpers act on the DISPLAYED rows only (the list is
-              // lazily paged, so "all" means every loaded and filtered row) and
-              // sync `unchecked` by each row's path.
-              function applyToDisplayed(mode) {
+              // The three helpers act on the WHOLE torrent (mode + set), never on
+              // the loaded rows: rows are only a view, so paging and filters cannot
+              // resurrect a deselection. Invert flips the mode and keeps the set,
+              // which is exact and O(1) — no fetch, no row scan.
+              function applyToTorrent(mode) {
+                if (mode === 'all') { selMode = 'all'; selSet = {}; }
+                else if (mode === 'none') { selMode = 'none'; selSet = {}; }
+                else if (selMode === 'all') { selMode = 'none'; }
+                else { selMode = 'all'; }
+                syncRows();
+                updateSelCount();
+              }
+
+              function syncRows() {
                 var rows = el('file-list').querySelectorAll('li');
                 for (var i = 0; i < rows.length; i++) {
                   var cb = rows[i].querySelector('input.file-check');
                   if (!cb) continue;
-                  if (mode === 'all') cb.checked = true;
-                  else if (mode === 'none') cb.checked = false;
-                  else cb.checked = !cb.checked;
                   var span = rows[i].querySelector('.file-path');
-                  var p = span ? String(span.textContent) : '';
-                  if (cb.checked) delete unchecked[p];
-                  else unchecked[p] = true;
+                  if (span) cb.checked = isSel(String(span.textContent));
                 }
-                updateSelCount();
               }
 
-              el('sel-all-btn').onclick = function () { applyToDisplayed('all'); };
-              el('sel-none-btn').onclick = function () { applyToDisplayed('none'); };
-              el('sel-invert-btn').onclick = function () { applyToDisplayed('invert'); };
+              el('sel-all-btn').onclick = function () { applyToTorrent('all'); };
+              el('sel-none-btn').onclick = function () { applyToTorrent('none'); };
+              el('sel-invert-btn').onclick = function () { applyToTorrent('invert'); };
 
               function loadFiles() {
                 if (fileLoading || !fileHasMore) return;
@@ -4750,7 +4771,7 @@ ${adultSelectionRow(adultSelection)}
                       var cb = document.createElement('input');
                       cb.type = 'checkbox';
                       cb.className = 'file-check';
-                      cb.checked = !unchecked[fpath];
+                      cb.checked = isSel(fpath);
                       cb.onchange = rowToggle(fpath);
                       var path = document.createElement('span');
                       path.className = 'file-path';
@@ -4937,21 +4958,27 @@ ${adultSelectionRow(adultSelection)}
                 if (btn.disabled) return;
                 btn.disabled = true;
                 // The control_token cookie authenticates this POST (as on /search).
-                // Nothing unchecked means the whole torrent: that request and its
-                // response contract are unchanged.
-                var un = Object.keys(unchecked);
-                var req = un.length === 0
+                // Mode all with nothing deselected means the whole torrent: that
+                // request and its response contract are unchanged. Otherwise the
+                // mode picks the wire field — `unselected` for mode all, `selected`
+                // for mode none — and the server complements it against the
+                // torrent's own file list.
+                var marked = Object.keys(selSet);
+                var whole = selMode === 'all' && marked.length === 0;
+                var req = whole
                   ? fetch('/api/transmission/add?hash=' + encodeURIComponent(hash), { method: 'POST' })
                   : fetch('/api/transmission/add-selected?hash=' + encodeURIComponent(hash), {
                       method: 'POST',
                       headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ unselected: un, timeoutMs: 600000 })
+                      body: JSON.stringify(selMode === 'all'
+                        ? { unselected: marked, timeoutMs: 600000 }
+                        : { selected: marked, timeoutMs: 600000 })
                     });
                 req
                   .then(function (r) { return r.json().catch(function () { return null; }); })
                   .then(function (d) {
-                    btn.disabled = false;
-                    if (un.length === 0) {
+                    updateSelCount();
+                    if (whole) {
                       toast(addMessage(d), !(d && d.ok));
                       return;
                     }
@@ -4959,7 +4986,7 @@ ${adultSelectionRow(adultSelection)}
                     if (d && d.ok) pollSelectionStatus();
                   })
                   .catch(function () {
-                    btn.disabled = false;
+                    updateSelCount();
                     toast('Add failed', true);
                   });
               };

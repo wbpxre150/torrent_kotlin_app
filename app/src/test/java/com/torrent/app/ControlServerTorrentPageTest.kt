@@ -143,27 +143,44 @@ class ControlServerTorrentPageTest {
     }
 
     @Test fun page_rowsGetCheckboxes() {
-        // Every row gets a checkbox built in the loadFiles() loop and is checked
-        // unless its path was deselected (absence from `unchecked` means selected,
-        // so the whole torrent stays the default).
-        assertTrue(page.contains("var unchecked = {};"))
+        // Every row gets a checkbox built in the loadFiles() loop, and its checked
+        // state is derived from the whole-torrent mode+set (never from the rows),
+        // so a whole-torrent "select none" cannot be undone by paging.
+        assertTrue(page.contains("var selMode = 'all';"))
+        assertTrue(page.contains("var selSet = {};"))
         assertTrue(page.contains("cb.type = 'checkbox';"))
         assertTrue(page.contains("cb.className = 'file-check';"))
-        assertTrue(page.contains("cb.checked = !unchecked[fpath];"))
+        assertTrue(page.contains("cb.checked = isSel(fpath);"))
         assertTrue(page.contains("row.appendChild(cb);"))
         // The path stays a closure variable: no data-* attribute, no innerHTML.
         assertFalse(page.contains("data-path"))
         assertFalse(page.contains("innerHTML"))
     }
 
-    @Test fun page_addUsesTheSelectionEndpointWhenFilesAreUnchecked() {
-        assertTrue(page.contains("var un = Object.keys(unchecked);"))
-        assertTrue(page.contains("/api/transmission/add-selected?hash="))
-        assertTrue(page.contains("headers: { 'Content-Type': 'application/json' }"))
-        assertTrue(page.contains("JSON.stringify({ unselected: un, timeoutMs: 600000 })"))
-        // Nothing unchecked = the whole torrent: the old route and contract stay.
+    @Test fun page_addSendsTheRightWireFieldPerMode() {
+        // Mode all with nothing deselected = the whole torrent: the old route and
+        // its body-less contract stay byte-identical.
+        assertTrue(page.contains("var marked = Object.keys(selSet);"))
+        assertTrue(page.contains("var whole = selMode === 'all' && marked.length === 0;"))
         assertTrue(page.contains(
             "fetch('/api/transmission/add?hash=' + encodeURIComponent(hash), { method: 'POST' })"))
+        // Mode all with deselections sends `unselected`; mode none sends `selected`
+        // (the server complements it against the torrent's own file list).
+        assertTrue(page.contains("/api/transmission/add-selected?hash="))
+        assertTrue(page.contains("headers: { 'Content-Type': 'application/json' }"))
+        assertTrue(page.contains("{ unselected: marked, timeoutMs: 600000 }"))
+        assertTrue(page.contains("{ selected: marked, timeoutMs: 600000 }"))
+    }
+
+    @Test fun page_counterIsWholeTorrentAndDisablesAddAtZero() {
+        // The counter comes from the torrent's file_count — not from the loaded or
+        // filtered rows — carries the zero-selection hint, and drives the Add
+        // button's disabled state.
+        assertTrue(page.contains("torrentFiles = files;"))
+        assertTrue(page.contains("n + ' of ' + torrentFiles + ' files selected'"))
+        assertTrue(page.contains("' \\u2014 nothing to add'"))
+        assertTrue(page.contains("el('add-btn').disabled = n === 0;"))
+        assertFalse("the counter must not count loaded rows", page.contains("shown files"))
     }
 
     @Test fun page_pollsSelectionStatus() {
