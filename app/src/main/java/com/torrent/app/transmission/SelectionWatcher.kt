@@ -35,7 +35,7 @@ data class SelectionStatus(
 }
 
 /**
- * The three RPC calls the watcher makes, as a seam: `TransmissionRpcClient` is a final
+ * The four RPC calls the watcher makes, as a seam: `TransmissionRpcClient` is a final
  * class that cannot be faked in a plain-JVM test, and the watcher's whole behaviour is a
  * state machine over scripted RPC answers. Same shape as [TorrentAdder], which is the
  * fake-injected surface `CrawlerAddHandler` already tests through.
@@ -43,7 +43,12 @@ data class SelectionStatus(
 internal interface SelectionRpc {
     fun torrentGetFiles(hashString: String): TorrentFilesSnapshot?
     fun torrentSetFilesUnwanted(hashString: String, indices: List<Int>): String?
-    fun torrentSetPaused(hashString: String, paused: Boolean): Boolean
+
+    /** Stops one torrent (`torrent-stop`); true iff the daemon answered `success`. */
+    fun torrentStop(hashString: String): Boolean
+
+    /** Scoped `torrent-get` of `status`; null on RPC failure or an absent torrent. */
+    fun torrentGetStatus(hashString: String): Int?
 }
 
 /** Adapts the production [TransmissionRpcClient] onto [SelectionRpc]. */
@@ -56,8 +61,9 @@ internal class TransmissionRpcSelectionRpc(
     override fun torrentSetFilesUnwanted(hashString: String, indices: List<Int>): String? =
         client.torrentSetFilesUnwanted(hashString, indices)
 
-    override fun torrentSetPaused(hashString: String, paused: Boolean): Boolean =
-        client.torrentSetPaused(hashString, paused)
+    override fun torrentStop(hashString: String): Boolean = client.torrentStop(hashString)
+
+    override fun torrentGetStatus(hashString: String): Int? = client.torrentGetStatus(hashString)
 }
 
 /**
@@ -315,19 +321,50 @@ class SelectionWatcher internal constructor(
     }
 
     /**
-     * `torrent-set {"paused":true}` retried up to [pauseAttempts] times, [pollMs] apart:
+     * One pause attempt: `torrent-stop`, then a scoped read-back of `status`.
+     *
+     * True only when the daemon both answered `success` and now reports TR_STATUS_STOPPED. An
+     * absent torrent reads back null and fails the same way — safe (there is nothing to
+     * download) and visible, never a false "paused".
+     */
+    private fun stopAndConfirm(hash: String): Boolean {
+        val rpc = rpcFactory()
+        val stopped = try {
+            rpc.torrentStop(hash)
+        } catch (e: Exception) {
+            log("torrent-stop for $hash failed: ${e.message}")
+            false
+        }
+        if (!stopped) return false
+        val status = try {
+            rpc.torrentGetStatus(hash)
+        } catch (e: Exception) {
+            log("torrent-get status for $hash failed: ${e.message}")
+            null
+        }
+        if (status != TR_STATUS_STOPPED) {
+            log("torrent-stop for $hash answered success but status is ${status ?: "unknown"}")
+            return false
+        }
+        return true
+    }
+
+    /**
+     * Stops the torrent and CONFIRMS it, retried up to [pauseAttempts] times [pollMs] apart:
      * transmission may still be booting after an app restart.
+     *
+     * A confirmed pause means `torrent-stop` answered `success` **and** the read-back
+     * `torrent-get status` reports TR_STATUS_STOPPED (0). The result alone is never enough: the
+     * shipped 4.1.2 daemon answers `success` to `torrent-set {"paused":true}` while ignoring the
+     * key (measured on device), which is exactly how this fail-safe once reported a pause over a
+     * torrent that kept downloading. A non-success stop, a null read-back or a non-zero status
+     * consumes the attempt; exhaustion returns false so [finishAfterPause] records the visible
+     * [SelectionStatus.STATE_ERROR] "pause was not confirmed" state, never a false paused_*.
      */
     private fun pauseTorrent(entry: PendingSelection, generation: Int): Boolean {
         for (attempt in 1..pauseAttempts) {
             if (!isCurrent(entry.hashHex, generation)) return false
-            val ok = try {
-                rpcFactory().torrentSetPaused(entry.hashHex, true)
-            } catch (e: Exception) {
-                log("torrent-set paused for ${entry.hashHex} failed: ${e.message}")
-                false
-            }
-            if (ok) return true
+            if (stopAndConfirm(entry.hashHex)) return true
             if (attempt < pauseAttempts) {
                 // The retry sleep must never throw. This loop is also reached from runWatch's
                 // catch body (via finishAfterPause), and an exception thrown inside a catch
@@ -403,5 +440,8 @@ class SelectionWatcher internal constructor(
 
         /** ~10 min of retries at [DEFAULT_POLL_MS] while transmission boots. */
         const val DEFAULT_PAUSE_ATTEMPTS = 120
+
+        /** transmission's TR_STATUS_STOPPED — the only status a confirmed pause accepts. */
+        private const val TR_STATUS_STOPPED = 0
     }
 }

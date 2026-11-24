@@ -55,14 +55,27 @@ class SelectionWatcherTest {
         private val scripts = ConcurrentHashMap<String, Script>()
         val getCalls = AtomicInteger()
         val unwantedCalls = CopyOnWriteArrayList<Pair<String, List<Int>>>()
-        val pauseCalls = CopyOnWriteArrayList<Pair<String, Boolean>>()
+        val stopCalls = CopyOnWriteArrayList<String>()
+        val statusCalls = AtomicInteger()
 
         @Volatile var sticky: TorrentFilesSnapshot? = TorrentFilesSnapshot("", emptyList())
         @Volatile var unwantedResult: String? = "success"
-        @Volatile var pauseResult = true
 
-        /** Runs inside `torrent-set paused`, so a test can observe the state at pause time. */
-        @Volatile var onPause: (() -> Unit)? = null
+        /** `torrent-stop`'s result. True is the shipped daemon's answer — the effect is unproven. */
+        @Volatile var stopResult = true
+
+        /**
+         * What the read-back `torrent-get status` reports: 0 is TR_STATUS_STOPPED (a confirmed
+         * stop), 4 is TR_STATUS_DOWNLOAD (the lying-daemon shape this fail-safe must catch), and
+         * null is an absent torrent or a failed RPC.
+         */
+        @Volatile var statusAfterStop: Int? = 0
+
+        /** Runs inside `torrent-stop`, so a test can observe the state at stop time. */
+        @Volatile var onStop: (() -> Unit)? = null
+
+        /** Runs inside the read-back, so a test can observe the state at confirmation time. */
+        @Volatile var onStatus: (() -> Unit)? = null
 
         /** When set, `torrent-get` parks until it is released (deterministic supersede). */
         @Volatile var gate: CountDownLatch? = null
@@ -82,10 +95,16 @@ class SelectionWatcherTest {
             return unwantedResult
         }
 
-        override fun torrentSetPaused(hashString: String, paused: Boolean): Boolean {
-            pauseCalls.add(hashString to paused)
-            onPause?.invoke()
-            return pauseResult
+        override fun torrentStop(hashString: String): Boolean {
+            stopCalls.add(hashString)
+            onStop?.invoke()
+            return stopResult
+        }
+
+        override fun torrentGetStatus(hashString: String): Int? {
+            statusCalls.incrementAndGet()
+            onStatus?.invoke()
+            return statusAfterStop
         }
     }
 
@@ -165,7 +184,7 @@ class SelectionWatcherTest {
         assertEquals(emptyList<PendingSelection>(), store.all())
         assertEquals(1, status.unselectedCount)
         assertEquals(now.get(), status.updatedAt)
-        assertTrue(rpc.pauseCalls.isEmpty())
+        assertTrue(rpc.stopCalls.isEmpty())
     }
 
     @Test fun timeout_pausesTheTorrentAndReportsMetadataTimeout() {
@@ -175,7 +194,7 @@ class SelectionWatcherTest {
         w.register(hash, name, setOf("b.mkv"), 15_000L)
 
         val status = awaitState(w, hash, SelectionStatus.STATE_PAUSED_METADATA_TIMEOUT)
-        assertEquals(listOf(hash to true), rpc.pauseCalls.toList())
+        assertEquals(listOf(hash), rpc.stopCalls.toList())
         assertEquals(emptyList<PendingSelection>(), store.all())
         assertTrue(status.detail.contains("15000"))
         assertTrue(rpc.unwantedCalls.isEmpty())
@@ -190,7 +209,7 @@ class SelectionWatcherTest {
 
         val status = awaitState(w, hash, SelectionStatus.STATE_PAUSED_MISMATCH)
         assertTrue(status.detail.contains("gone.mkv"))
-        assertEquals(listOf(hash to true), rpc.pauseCalls.toList())
+        assertEquals(listOf(hash), rpc.stopCalls.toList())
         assertTrue(rpc.unwantedCalls.isEmpty())
         assertEquals(emptyList<PendingSelection>(), store.all())
     }
@@ -217,19 +236,19 @@ class SelectionWatcherTest {
 
         val status = awaitState(w, hash, SelectionStatus.STATE_PAUSED_APPLY_FAILED)
         assertTrue(status.detail.contains("file index out of range"))
-        assertEquals(listOf(hash to true), rpc.pauseCalls.toList())
+        assertEquals(listOf(hash), rpc.stopCalls.toList())
         assertEquals(emptyList<PendingSelection>(), store.all())
     }
 
     @Test fun pauseIsRetriedWhileTheRpcIsDownThenReportedAsError() {
         val rpc = FakeRpc()
-        rpc.pauseResult = false
+        rpc.stopResult = false
         val w = watcher(rpc, pauseAttempts = 3)
 
         w.register(hash, name, setOf("b.mkv"), 15_000L)
 
         val status = awaitState(w, hash, SelectionStatus.STATE_ERROR)
-        assertEquals(3, rpc.pauseCalls.size)
+        assertEquals(3, rpc.stopCalls.size)
         assertTrue(status.detail.contains("not confirmed"))
         assertEquals(emptyList<PendingSelection>(), store.all())
     }
@@ -251,7 +270,7 @@ class SelectionWatcherTest {
 
         val status = awaitState(w, hash, SelectionStatus.STATE_PAUSED_METADATA_TIMEOUT)
         assertEquals(0, rpc.getCalls.get())
-        assertEquals(listOf(hash to true), rpc.pauseCalls.toList())
+        assertEquals(listOf(hash), rpc.stopCalls.toList())
         assertEquals(emptyList<PendingSelection>(), store.all())
         assertEquals(now.get() - 1_000_000L, status.addedAt)
     }
@@ -327,14 +346,14 @@ class SelectionWatcherTest {
         // the generation is unchanged, so the intent must be dropped only after a pause.
         val rpc = FakeRpc() // sticky metadata-less snapshot: the loop parks in the sleeper
         val storeSizesAtPause = CopyOnWriteArrayList<Int>()
-        rpc.onPause = { storeSizesAtPause.add(store.all().size) }
+        rpc.onStop = { storeSizesAtPause.add(store.all().size) }
         val w = watcher(rpc, sleeper = { throw IllegalStateException("sleeper exploded") })
 
         w.register(hash, name, setOf("b.mkv"), 600_000L)
 
         val status = awaitState(w, hash, SelectionStatus.STATE_ERROR)
         assertEquals("sleeper exploded", status.detail)
-        assertEquals(listOf(hash to true), rpc.pauseCalls.toList())
+        assertEquals(listOf(hash), rpc.stopCalls.toList())
         assertEquals(listOf(1), storeSizesAtPause.toList())
         assertEquals(emptyList<PendingSelection>(), store.all())
     }
@@ -359,7 +378,7 @@ class SelectionWatcherTest {
         while (watchThreads.isEmpty() && System.nanoTime() < end) Thread.sleep(1)
         watchThreads.single().join(5_000L)
 
-        assertTrue(rpc.pauseCalls.isEmpty())
+        assertTrue(rpc.stopCalls.isEmpty())
         assertEquals(1, store.all().size)
         assertEquals(SelectionStatus.STATE_PENDING, w.status(hash).state)
     }
@@ -370,7 +389,7 @@ class SelectionWatcherTest {
         // escaped runWatch's catch body (an exception thrown inside a catch is not caught by
         // it) and died uncaught on the daemon thread — a process kill on Android.
         val rpc = FakeRpc()
-        rpc.pauseResult = false
+        rpc.stopResult = false
         val w = watcher(rpc, sleeper = { throw InterruptedException("pause retry interrupted") })
 
         val uncaught = withUncaughtCapture {
@@ -378,7 +397,7 @@ class SelectionWatcherTest {
 
             val status = awaitState(w, hash, SelectionStatus.STATE_ERROR)
             assertTrue(status.detail.contains("pause was not confirmed"))
-            assertEquals(listOf(hash to true), rpc.pauseCalls.toList())
+            assertEquals(listOf(hash), rpc.stopCalls.toList())
             assertEquals(emptyList<PendingSelection>(), store.all())
         }
         assertEquals(emptyList<Throwable>(), uncaught)
@@ -386,7 +405,7 @@ class SelectionWatcherTest {
 
     @Test fun interruptInThePauseRetrySleepAfterStop_keepsThePersistedIntent() {
         val rpc = FakeRpc() // metadata-less sticky snapshot: the loop parks in the sleeper
-        rpc.pauseResult = false
+        rpc.stopResult = false
         val sleepThreads = CopyOnWriteArrayList<Thread>()
         val w = watcher(
             rpc,
@@ -398,7 +417,7 @@ class SelectionWatcherTest {
         // The single pause attempt runs while the watcher is still current and stops it; the
         // retry sleep then fails with the watcher genuinely stopped, so the failed attempt must
         // stay the only pause call and the intent must survive for resumePending().
-        rpc.onPause = { watcher!!.stop() }
+        rpc.onStop = { watcher!!.stop() }
 
         val uncaught = withUncaughtCapture {
             w.register(hash, name, setOf("b.mkv"), 600_000L)
@@ -407,11 +426,49 @@ class SelectionWatcherTest {
             while (sleepThreads.size < 2 && System.nanoTime() < end) Thread.sleep(1)
             sleepThreads.first().join(5_000L)
 
-            assertEquals(listOf(hash to true), rpc.pauseCalls.toList())
+            assertEquals(listOf(hash), rpc.stopCalls.toList())
             assertEquals(1, store.all().size)
             assertEquals(SelectionStatus.STATE_PENDING, w.status(hash).state)
         }
         assertEquals(emptyList<Throwable>(), uncaught)
+    }
+
+    @Test fun stopConfirmedByReadBack_recordsThePausedStateOnlyAfterStatusIsZero() {
+        // `success` is not the confirmation: the paused_* state is recorded only once the scoped
+        // read-back reports TR_STATUS_STOPPED, and the intent is still persisted at that moment.
+        val rpc = FakeRpc()
+        rpc.statusAfterStop = 0
+        val storeSizesAtReadBack = CopyOnWriteArrayList<Int>()
+        rpc.onStatus = { storeSizesAtReadBack.add(store.all().size) }
+        val w = watcher(rpc)
+
+        w.register(hash, name, setOf("b.mkv"), 0L)
+
+        val status = awaitState(w, hash, SelectionStatus.STATE_PAUSED_METADATA_TIMEOUT)
+        assertEquals(listOf(hash), rpc.stopCalls.toList())
+        assertEquals(1, rpc.statusCalls.get())
+        assertEquals(listOf(1), storeSizesAtReadBack.toList())
+        assertEquals("metadata did not arrive within 0 ms", status.detail)
+        assertEquals(emptyList<PendingSelection>(), store.all())
+    }
+
+    @Test fun stopReportsSuccessButNeverStops_landsInTheVisibleErrorState() {
+        // The device-measured failure mode: the daemon answers success while the torrent keeps
+        // downloading. Every retry is consumed and the terminal state is `error` with the
+        // not-confirmed detail — never a paused_* state over a running torrent.
+        val rpc = FakeRpc()
+        rpc.stopResult = true
+        rpc.statusAfterStop = 4 // TR_STATUS_DOWNLOAD: not stopped.
+        val w = watcher(rpc, pauseAttempts = 3)
+
+        w.register(hash, name, setOf("b.mkv"), 0L)
+
+        val status = awaitState(w, hash, SelectionStatus.STATE_ERROR)
+        assertEquals(3, rpc.stopCalls.size)
+        assertEquals(3, rpc.statusCalls.get())
+        assertTrue(status.detail.contains("pause was not confirmed"))
+        assertTrue(status.detail.contains(SelectionStatus.STATE_PAUSED_METADATA_TIMEOUT))
+        assertEquals(emptyList<PendingSelection>(), store.all())
     }
 
     @Test fun start_reArmsTheWatcherAfterAGracefulStop() {

@@ -115,14 +115,47 @@ class TransmissionRpcClientTest {
         assertTrue(a.toString().contains("\"files-unwanted\":[]"))
     }
 
-    @Test fun buildTorrentSetPausedArgs_hasExactlyIdsAndPaused() {
-        val paused = TransmissionRpcClient.buildTorrentSetPausedArgs("abc123", true)
-        assertEquals(2, paused.length())
-        assertTrue(paused.has("ids"))
-        assertTrue(paused.has("paused"))
-        assertEquals("abc123", paused.getJSONArray("ids").getString(0))
-        assertTrue(paused.getBoolean("paused"))
-        assertFalse(TransmissionRpcClient.buildTorrentSetPausedArgs("abc123", false).getBoolean("paused"))
+    @Test fun buildTorrentStopArgs_hasExactlyTheIdsArray() {
+        // torrent-stop takes no other argument: the whole request is `{"ids":["abc123"]}`.
+        val a = TransmissionRpcClient.buildTorrentStopArgs("abc123")
+        assertEquals(1, a.length())
+        assertTrue(a.has("ids"))
+        assertEquals(1, a.getJSONArray("ids").length())
+        assertEquals("abc123", a.getJSONArray("ids").getString(0))
+        val o = JSONObject(TransmissionRpcClient.buildRequestBody("torrent-stop", a))
+        assertEquals("torrent-stop", o.getString("method"))
+        assertEquals("{\"ids\":[\"abc123\"]}", o.getJSONObject("arguments").toString())
+    }
+
+    @Test fun buildTorrentGetStatusArgs_hasExactlyFieldsStatusAndIds() {
+        val a = TransmissionRpcClient.buildTorrentGetStatusArgs("abc123")
+        assertEquals(2, a.length())
+        val fields = a.getJSONArray("fields")
+        assertEquals(1, fields.length())
+        assertEquals("status", fields.getString(0))
+        assertEquals(1, a.getJSONArray("ids").length())
+        assertEquals("abc123", a.getJSONArray("ids").getString(0))
+        assertEquals("{\"fields\":[\"status\"],\"ids\":[\"abc123\"]}", a.toString())
+    }
+
+    @Test fun parseTorrentStatus_returnsTheStatusValue() {
+        val stopped = TransmissionRpcClient.parseTorrentStatus(
+            JSONObject("{\"result\":\"success\",\"arguments\":{\"torrents\":[{\"status\":0}]}}"))
+        assertNotNull(stopped)
+        assertEquals(0, stopped!!.toInt())
+        val downloading = TransmissionRpcClient.parseTorrentStatus(
+            JSONObject("{\"result\":\"success\",\"arguments\":{\"torrents\":[{\"status\":4}]}}"))
+        assertNotNull(downloading)
+        assertEquals(4, downloading!!.toInt())
+    }
+
+    @Test fun parseTorrentStatus_emptyTorrentsAndFailedCallAreNull() {
+        // An absent torrent is "no answer", never status 0 — 0 is TR_STATUS_STOPPED, a real answer.
+        assertNull(TransmissionRpcClient.parseTorrentStatus(
+            JSONObject("{\"result\":\"success\",\"arguments\":{\"torrents\":[]}}")))
+        assertNull(TransmissionRpcClient.parseTorrentStatus(
+            JSONObject("{\"result\":\"success\",\"arguments\":{\"torrents\":[{\"name\":\"x\"}]}}")))
+        assertNull(TransmissionRpcClient.parseTorrentStatus(null))
     }
 
     @Test fun parseTorrentFilesSnapshot_mapsNameAndFiles() {

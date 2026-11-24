@@ -122,11 +122,30 @@ class TransmissionRpcClient(
         return resp.optString("result")
     }
 
-    /** Pauses (or resumes) one torrent. `result == "success"`; false on RPC failure or a non-success result. */
-    fun torrentSetPaused(hashString: String, paused: Boolean): Boolean {
-        val resp = call("torrent-set", buildTorrentSetPausedArgs(hashString, paused)) ?: return false
+    /**
+     * Stops one torrent with the legacy `torrent-stop` method. `result == "success"`; false on
+     * RPC failure or a non-success result.
+     *
+     * This is the only stop this app may use. On the shipped 4.1.2 build `torrent-set`
+     * `{"paused":true}` (and `{"status":0}`) answer `result: "success"` and are silently
+     * IGNORED — `rpcimpl.cc` wires `TR_KEY_paused` only into the torrent-add constructor, never
+     * into torrent-set's key switch — so a caller that trusted that result reported a pause
+     * while the whole torrent kept downloading. `torrent-stop` is measured to stop the same ids.
+     * Its own result is still not proof of the effect: pair it with [torrentGetStatus].
+     */
+    fun torrentStop(hashString: String): Boolean {
+        val resp = call("torrent-stop", buildTorrentStopArgs(hashString)) ?: return false
         return resp.optString("result") == "success"
     }
+
+    /**
+     * Scoped `torrent-get` of one torrent's `status` only — the read-back that confirms a
+     * [torrentStop] actually reached TR_STATUS_STOPPED (0). Null means the RPC failed or the
+     * torrent is not in the daemon's list; a present torrent answers its status integer, and 0
+     * is a real answer, never "unknown".
+     */
+    fun torrentGetStatus(hashString: String): Int? =
+        parseTorrentStatus(call("torrent-get", buildTorrentGetStatusArgs(hashString)))
 
     private fun call(method: String, arguments: JSONObject?): JSONObject? = try {
         callOnce(method, arguments, retry = true)
@@ -188,11 +207,19 @@ class TransmissionRpcClient(
                 .put("ids", JSONArray(listOf(hash)))
                 .put("files-unwanted", JSONArray(indices))
 
-        /** Pure argument builder for pausing/resuming one torrent (`torrent-set` `paused`). */
-        fun buildTorrentSetPausedArgs(hash: String, paused: Boolean): JSONObject =
+        /**
+         * Pure argument builder for `torrent-stop`: only `ids`. The method takes no other
+         * argument, and it is the stop that actually works on the shipped 4.1.2 build.
+         */
+        fun buildTorrentStopArgs(hash: String): JSONObject =
             JSONObject()
                 .put("ids", JSONArray(listOf(hash)))
-                .put("paused", paused)
+
+        /** Pure argument builder for the scoped `torrent-get` that reads one torrent's `status`. */
+        fun buildTorrentGetStatusArgs(hash: String): JSONObject =
+            JSONObject()
+                .put("fields", JSONArray(listOf("status")))
+                .put("ids", JSONArray(listOf(hash)))
 
         /**
          * Pure parse of a `torrent-get` response carrying `name` + `files`. An empty
@@ -217,6 +244,20 @@ class TransmissionRpcClient(
                 }
             }
             return TorrentFilesSnapshot(name = torrent.optString("name"), files = files)
+        }
+
+        /**
+         * Pure parse of a `torrent-get` response carrying `status`. An empty
+         * `arguments.torrents` array (torrent not in the daemon, or daemon down) yields null, as
+         * does a torrent object with no `status` key; a present `status` is returned as-is —
+         * `0` is TR_STATUS_STOPPED, a real answer that must never be confused with "unknown".
+         */
+        fun parseTorrentStatus(resp: JSONObject?): Int? {
+            val torrents = resp?.optJSONObject("arguments")?.optJSONArray("torrents") ?: return null
+            if (torrents.length() == 0) return null
+            val torrent = torrents.optJSONObject(0) ?: return null
+            if (!torrent.has("status")) return null
+            return torrent.optInt("status", -1)
         }
 
         /**
