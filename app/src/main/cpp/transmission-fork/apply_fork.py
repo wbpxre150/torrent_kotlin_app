@@ -424,7 +424,7 @@ def main():
                 "    rc = snprintf(buf + i, 2048 - i, \"7:samples%d:\", num_samples * 20);\n"
                 "    INC(i, rc, 2048);\n"
                 "    COPY(buf, i, samples, num_samples * 20, 2048);\n"
-                "    rc = snprintf(buf + i, 2048 - i, \"4:numi%de\", num); INC(i, rc, 2048);\n"
+                "    rc = snprintf(buf + i, 2048 - i, \"3:numi%de\", num); INC(i, rc, 2048);\n"
                 "    rc = snprintf(buf + i, 2048 - i, \"8:intervali%de\", interval);\n"
                 "    INC(i, rc, 2048);\n"
                 "\n"

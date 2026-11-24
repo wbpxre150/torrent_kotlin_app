@@ -244,6 +244,11 @@ tasks.register("buildTransmission") {
     inputs.file("src/main/cpp/transmission-fork/disk-io.h")
     inputs.file("src/main/cpp/transmission-fork/disk-io.cc")
     inputs.file("src/main/cpp/transmission-fork/apply_fork.py")
+    // Host harness for the BEP51 responder (tests/run_dht_bep51.sh compiles the
+    // patched third-party/dht/dht.c with plain gcc; not Gradle-invoked, but a
+    // fork file must be registered so a fork change is visible to this task).
+    inputs.file("src/main/cpp/transmission-fork/tests/dht_bep51_test.c")
+    inputs.file("src/main/cpp/transmission-fork/tests/run_dht_bep51.sh")
     // A version bump must invalidate the cached .so: the doLast below is the
     // only thing that runs the fetch/patch/configure/build steps.
     inputs.property("transmissionVersion", txVersion)
