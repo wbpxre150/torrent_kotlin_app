@@ -3821,6 +3821,165 @@ def main():
         text = text.replace(old, new, 1)
         with open(tor_cc4, "w", encoding="utf-8") as f:
             f.write(text)
+
+    # 29. Patch libtransmission/rpcimpl.cc + session.h + session.cc: ANDROID fork:
+    #     bep51 -- register the two BEP51 settings keys in session_accessors().
+    #
+    #     Settings::Fields binds dht_sample_infohashes_enabled / _interval for
+    #     settings.json load/save, but RPC session-set and session-get are driven
+    #     ONLY by the session_accessors() map in rpcimpl.cc: session-set silently
+    #     ignores params it does not know and still returns success, and
+    #     session-get emits only map keys.  Without these entries the documented
+    #     RPC disable path is a silent no-op.
+    #
+    #     The setters cannot live in rpcimpl.cc -- setSettings() and settings_
+    #     are private to tr_session (session.h:1225 "private:", the setSettings
+    #     overloads at :1264-1265, settings_ at :1385) and are reachable only
+    #     through friend free functions, which is why every other setter in that
+    #     map calls a tr_sessionSetXxx().  So this block also adds the two
+    #     functions in session.cc using the tr_sessionSetDHTEnabled /
+    #     tr_sessionSetPeerPort idiom (copy settings_, assign,
+    #     run_in_session_thread -> setSettings), plus their friend declarations.
+    rpcimpl_cc = os.path.join(libt, "rpcimpl.cc")
+    with open(rpcimpl_cc, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: bep51 rpc session-set" not in text:
+        old = (
+            "    map.try_emplace(\n"
+            "        TR_KEY_dht_enabled,\n"
+            "        [](tr_session const& src) -> tr_variant { return src.allowsDHT(); },\n"
+            "        [](tr_session& tgt, tr_variant const& src, ErrorInfo& /*err*/)\n"
+            "        {\n"
+            "            if (auto const val = src.value_if<bool>())\n"
+            "            {\n"
+            "                tr_sessionSetDHTEnabled(&tgt, *val);\n"
+            "            }\n"
+            "        });\n"
+        )
+        new = old + (
+            "\n"
+            "    // ANDROID fork: bep51 rpc session-set -- Settings::Fields binds these\n"
+            "    // two keys for settings.json, but session-set/session-get only look at\n"
+            "    // this map, so without these entries the RPC toggle is a silent\n"
+            "    // no-op.  The getters read the live settings; the setters go through\n"
+            "    // the public tr_sessionSetXxx() free functions in session.cc, which is\n"
+            "    // the only way in (setSettings/settings_ are private).\n"
+            "    map.try_emplace(\n"
+            "        TR_KEY_dht_sample_infohashes_enabled,\n"
+            "        [](tr_session const& src) -> tr_variant { return src.settings().dht_sample_infohashes_enabled; },\n"
+            "        [](tr_session& tgt, tr_variant const& src, ErrorInfo& /*err*/)\n"
+            "        {\n"
+            "            if (auto const val = src.value_if<bool>())\n"
+            "            {\n"
+            "                tr_sessionSetDhtSampleInfohashesEnabled(&tgt, *val);\n"
+            "            }\n"
+            "        });\n"
+            "\n"
+            "    // ANDROID fork: bep51 rpc session-set -- a request may carry a negative\n"
+            "    // integer; reject it here so the int64 -> size_t conversion cannot\n"
+            "    // wrap to a huge interval.  The advertised value is clamped to 0..21600\n"
+            "    // at the read site in tr-dht.cc, which stays the authority.\n"
+            "    map.try_emplace(\n"
+            "        TR_KEY_dht_sample_infohashes_interval,\n"
+            "        [](tr_session const& src) -> tr_variant { return src.settings().dht_sample_infohashes_interval; },\n"
+            "        [](tr_session& tgt, tr_variant const& src, ErrorInfo& /*err*/)\n"
+            "        {\n"
+            "            if (auto const val = src.value_if<int64_t>(); val && *val >= 0)\n"
+            "            {\n"
+            "                tr_sessionSetDhtSampleInfohashesInterval(&tgt, static_cast<size_t>(*val));\n"
+            "            }\n"
+            "        });\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: TR_KEY_dht_enabled session accessor not found in libtransmission/rpcimpl.cc")
+        text = text.replace(old, new, 1)
+        with open(rpcimpl_cc, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    sess_h_bep51_rpc = os.path.join(libt, "session.h")
+    with open(sess_h_bep51_rpc, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "tr_sessionSetDhtSampleInfohashesEnabled" not in text:
+        old = "    friend void tr_sessionSetDHTEnabled(tr_session* session, bool enabled);\n"
+        new = (
+            "    friend void tr_sessionSetDHTEnabled(tr_session* session, bool enabled);\n"
+            "    // ANDROID fork: bep51 -- RPC-settable sample_infohashes keys.\n"
+            "    friend void tr_sessionSetDhtSampleInfohashesEnabled(tr_session* session, bool enabled);\n"
+            "    friend void tr_sessionSetDhtSampleInfohashesInterval(tr_session* session, size_t interval);\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: tr_sessionSetDHTEnabled friend not found in libtransmission/session.h")
+        text = text.replace(old, new, 1)
+        with open(sess_h_bep51_rpc, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    sess_cc_bep51_rpc = os.path.join(libt, "session.cc")
+    with open(sess_cc_bep51_rpc, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "tr_sessionSetDhtSampleInfohashesEnabled" not in text:
+        old = (
+            "void tr_sessionSetDHTEnabled(tr_session* session, bool enabled)\n"
+            "{\n"
+            "    TR_ASSERT(session != nullptr);\n"
+            "\n"
+            "    if (enabled != session->allowsDHT())\n"
+            "    {\n"
+            "        session->run_in_session_thread(\n"
+            "            [session, enabled]()\n"
+            "            {\n"
+            "                auto settings = session->settings_;\n"
+            "                settings.dht_enabled = enabled;\n"
+            "                session->setSettings(std::move(settings), false);\n"
+            "            });\n"
+            "    }\n"
+            "}\n"
+        )
+        new = old + (
+            "\n"
+            "// ANDROID fork: bep51 -- RPC-settable sample_infohashes keys.  Same\n"
+            "// idiom as tr_sessionSetDHTEnabled above: mutate a copy of settings_ and\n"
+            "// hand it to setSettings() on the session thread, so the change is\n"
+            "// serialised with the rest of the session and gets saved.  A negative\n"
+            "// interval never reaches here (the RPC setter rejects it before the\n"
+            "// int64 -> size_t conversion) and the advertised value is clamped to\n"
+            "// 0..21600 at the tr-dht.cc read site, which stays the authority.\n"
+            "void tr_sessionSetDhtSampleInfohashesEnabled(tr_session* session, bool enabled)\n"
+            "{\n"
+            "    TR_ASSERT(session != nullptr);\n"
+            "\n"
+            "    if (enabled != session->settings().dht_sample_infohashes_enabled)\n"
+            "    {\n"
+            "        session->run_in_session_thread(\n"
+            "            [session, enabled]()\n"
+            "            {\n"
+            "                auto settings = session->settings_;\n"
+            "                settings.dht_sample_infohashes_enabled = enabled;\n"
+            "                session->setSettings(std::move(settings), false);\n"
+            "            });\n"
+            "    }\n"
+            "}\n"
+            "\n"
+            "void tr_sessionSetDhtSampleInfohashesInterval(tr_session* session, size_t interval)\n"
+            "{\n"
+            "    TR_ASSERT(session != nullptr);\n"
+            "\n"
+            "    if (interval != session->settings().dht_sample_infohashes_interval)\n"
+            "    {\n"
+            "        session->run_in_session_thread(\n"
+            "            [session, interval]()\n"
+            "            {\n"
+            "                auto settings = session->settings_;\n"
+            "                settings.dht_sample_infohashes_interval = interval;\n"
+            "                session->setSettings(std::move(settings), false);\n"
+            "            });\n"
+            "    }\n"
+            "}\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: tr_sessionSetDHTEnabled body not found in libtransmission/session.cc")
+        text = text.replace(old, new, 1)
+        with open(sess_cc_bep51_rpc, "w", encoding="utf-8") as f:
+            f.write(text)
     print("apply_fork: OK")
 
 if __name__ == "__main__":
