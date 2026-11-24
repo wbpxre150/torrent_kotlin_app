@@ -268,6 +268,226 @@ def main():
         with open(le_cmake, "w", encoding="utf-8") as f:
             f.write(text)
 
+    # 6c. Patch third-party/dht/dht.c: BEP51 sample_infohashes responder
+    #     framing.  dht.c learns the query type, dispatches it exactly like
+    #     find_node, and answers with id/nodes/num/interval/samples.  The
+    #     torrent set itself comes from libtransmission through the new
+    #     required extern declared in dht.h -- a negative return from it means
+    #     "disabled" and the handler stays silent, which is how dht.c already
+    #     treats every unknown query today.  samples is ALWAYS emitted (even
+    #     empty, "7:samples0:"), unlike the send_nodes_peers skip-empty-string
+    #     idiom, because BEP51 requires the key to be present.
+    #     Marker-gated + text.replace(old, new, 1) like blocks 2/3b, so a re-run
+    #     on an already-patched tree is a no-op (buildTransmission only extracts
+    #     the tarball when srcDir is absent).
+    dht_dir = os.path.join(src_root, "third-party", "dht")
+    dht_c = os.path.join(dht_dir, "dht.c")
+    with open(dht_c, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: bep51" not in text:
+        dht_c_patches = [
+            (
+                "message type defines",
+                "#define GET_PEERS 4\n"
+                "#define ANNOUNCE_PEER 5\n",
+                "#define GET_PEERS 4\n"
+                "#define ANNOUNCE_PEER 5\n"
+                "/* ANDROID fork: bep51 -- BEP51 sample_infohashes responder. */\n"
+                "#define SAMPLE_INFOHASHES 6\n",
+            ),
+            (
+                "send_closest_nodes prototype",
+                "static int send_closest_nodes(const struct sockaddr *sa, int salen,\n"
+                "                              const unsigned char *tid, int tid_len,\n"
+                "                              const unsigned char *id, int want,\n"
+                "                              int af, struct storage *st,\n"
+                "                              const unsigned char *token, int token_len);\n",
+                "static int send_closest_nodes(const struct sockaddr *sa, int salen,\n"
+                "                              const unsigned char *tid, int tid_len,\n"
+                "                              const unsigned char *id, int want,\n"
+                "                              int af, struct storage *st,\n"
+                "                              const unsigned char *token, int token_len);\n"
+                "static int send_sample_infohashes(const struct sockaddr *sa, int salen,\n"
+                "                                  const unsigned char *tid, int tid_len,\n"
+                "                                  const unsigned char *target, int want);\n",
+            ),
+            (
+                "ANNOUNCE_PEER dispatch tail",
+                "            send_peer_announced(from, fromlen, m.tid, m.tid_len);\n"
+                "        }\n"
+                "    }\n",
+                "            send_peer_announced(from, fromlen, m.tid, m.tid_len);\n"
+                "            break;\n"
+                "        /* ANDROID fork: bep51 -- sample_infohashes is dispatched\n"
+                "           exactly like find_node.  send_sample_infohashes() sends\n"
+                "           nothing when the responder is disabled. */\n"
+                "        case SAMPLE_INFOHASHES:\n"
+                "            debugf(\"Sample infohashes!\\n\");\n"
+                "            new_node(m.id, from, fromlen, 1);\n"
+                "            send_sample_infohashes(from, fromlen, m.tid, m.tid_len,\n"
+                "                                   m.target, m.want);\n"
+                "            break;\n"
+                "        }\n"
+                "    }\n",
+            ),
+            (
+                "send_closest_nodes tail",
+                "    return send_nodes_peers(sa, salen, tid, tid_len,\n"
+                "                            nodes, numnodes * 26,\n"
+                "                            nodes6, numnodes6 * 38,\n"
+                "                            af, st, token, token_len);\n"
+                "}\n",
+                "    return send_nodes_peers(sa, salen, tid, tid_len,\n"
+                "                            nodes, numnodes * 26,\n"
+                "                            nodes6, numnodes6 * 38,\n"
+                "                            af, st, token, token_len);\n"
+                "}\n"
+                "\n"
+                "/* ANDROID fork: bep51 -- answer sample_infohashes (BEP51) with the\n"
+                "   session's torrent set.  samples/num/interval come from\n"
+                "   libtransmission through the required extern declared in dht.h; a\n"
+                "   negative return means the responder is disabled and we send\n"
+                "   nothing at all, exactly like any unknown query today.  Node\n"
+                "   selection mirrors send_closest_nodes(); no token is sent because\n"
+                "   this query does not carry one. */\n"
+                "static int\n"
+                "send_sample_infohashes(const struct sockaddr *sa, int salen,\n"
+                "                       const unsigned char *tid, int tid_len,\n"
+                "                       const unsigned char *target, int want)\n"
+                "{\n"
+                "    /* libtorrent parity: at most 20 samples, i.e. 20 * 20 == 400\n"
+                "       octets. */\n"
+                "    unsigned char samples[20 * 20];\n"
+                "    unsigned char nodes[8 * 26];\n"
+                "    unsigned char nodes6[8 * 38];\n"
+                "    char buf[2048];\n"
+                "    int i = 0, rc, numnodes = 0, numnodes6 = 0;\n"
+                "    int num = 0, interval = 0, num_samples, avail;\n"
+                "    struct bucket *b;\n"
+                "\n"
+                "    num_samples = dht_sample_infohashes(samples, 20, &num, &interval);\n"
+                "    if(num_samples < 0)\n"
+                "        return -1;\n"
+                "    if(num_samples > 20)\n"
+                "        num_samples = 20;\n"
+                "\n"
+                "    if(want <= 0)\n"
+                "        want = sa->sa_family == AF_INET ? WANT4 : WANT6;\n"
+                "\n"
+                "    if((want & WANT4)) {\n"
+                "        b = find_bucket(target, AF_INET);\n"
+                "        if(b) {\n"
+                "            numnodes = buffer_closest_nodes(nodes, numnodes, target, b);\n"
+                "            if(b->next)\n"
+                "                numnodes = buffer_closest_nodes(nodes, numnodes, target,\n"
+                "                                                b->next);\n"
+                "            b = previous_bucket(b);\n"
+                "            if(b)\n"
+                "                numnodes = buffer_closest_nodes(nodes, numnodes, target, b);\n"
+                "        }\n"
+                "    }\n"
+                "\n"
+                "    if((want & WANT6)) {\n"
+                "        b = find_bucket(target, AF_INET6);\n"
+                "        if(b) {\n"
+                "            numnodes6 = buffer_closest_nodes(nodes6, numnodes6, target, b);\n"
+                "            if(b->next)\n"
+                "                numnodes6 = buffer_closest_nodes(nodes6, numnodes6, target,\n"
+                "                                                 b->next);\n"
+                "            b = previous_bucket(b);\n"
+                "            if(b)\n"
+                "                numnodes6 = buffer_closest_nodes(nodes6, numnodes6, target, b);\n"
+                "        }\n"
+                "    }\n"
+                "\n"
+                "    rc = snprintf(buf + i, 2048 - i, \"d1:rd2:id20:\"); INC(i, rc, 2048);\n"
+                "    COPY(buf, i, myid, 20, 2048);\n"
+                "    if(numnodes > 0) {\n"
+                "        rc = snprintf(buf + i, 2048 - i, \"5:nodes%d:\", numnodes * 26);\n"
+                "        INC(i, rc, 2048);\n"
+                "        COPY(buf, i, nodes, numnodes * 26, 2048);\n"
+                "    }\n"
+                "    if(numnodes6 > 0) {\n"
+                "        rc = snprintf(buf + i, 2048 - i, \"6:nodes6%d:\", numnodes6 * 38);\n"
+                "        INC(i, rc, 2048);\n"
+                "        COPY(buf, i, nodes6, numnodes6 * 38, 2048);\n"
+                "    }\n"
+                "\n"
+                "    /* Buffer safety: the whole reply must fit the 2048-octet send\n"
+                "       buffer.  The fixed part (id, nodes, num, interval, tid, tail)\n"
+                "       is bounded well below it, but clamp the sample count downward\n"
+                "       if it ever would not. */\n"
+                "    avail = 2048 - i - (tid_len + 80);\n"
+                "    while(num_samples > 0 && 12 + num_samples * 20 > avail)\n"
+                "        num_samples--;\n"
+                "\n"
+                "    rc = snprintf(buf + i, 2048 - i, \"7:samples%d:\", num_samples * 20);\n"
+                "    INC(i, rc, 2048);\n"
+                "    COPY(buf, i, samples, num_samples * 20, 2048);\n"
+                "    rc = snprintf(buf + i, 2048 - i, \"4:numi%de\", num); INC(i, rc, 2048);\n"
+                "    rc = snprintf(buf + i, 2048 - i, \"8:intervali%de\", interval);\n"
+                "    INC(i, rc, 2048);\n"
+                "\n"
+                "    rc = snprintf(buf + i, 2048 - i, \"e1:t%d:\", tid_len); INC(i, rc, 2048);\n"
+                "    COPY(buf, i, tid, tid_len, 2048);\n"
+                "    ADD_V(buf, i, 2048);\n"
+                "    rc = snprintf(buf + i, 2048 - i, \"1:y1:re\"); INC(i, rc, 2048);\n"
+                "\n"
+                "    return dht_send(buf, i, 0, sa, salen);\n"
+                "\n"
+                " fail:\n"
+                "    errno = ENOSPC;\n"
+                "    return -1;\n"
+                "}\n",
+            ),
+            (
+                "parse_message announce_peer probe",
+                "    if(dht_memmem(buf, buflen, \"1:q13:announce_peer\", 19))\n"
+                "       return ANNOUNCE_PEER;\n"
+                "    return -1;\n",
+                "    if(dht_memmem(buf, buflen, \"1:q13:announce_peer\", 19))\n"
+                "       return ANNOUNCE_PEER;\n"
+                "    /* ANDROID fork: bep51 -- 23 == strlen(\"1:q17:sample_infohashes\"). */\n"
+                "    if(dht_memmem(buf, buflen, \"1:q17:sample_infohashes\", 23))\n"
+                "       return SAMPLE_INFOHASHES;\n"
+                "    return -1;\n",
+            ),
+        ]
+        for name, old, new in dht_c_patches:
+            if old not in text:
+                sys.exit("ERROR: " + name + " not found in third-party/dht/dht.c")
+            text = text.replace(old, new, 1)
+        with open(dht_c, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    # 6d. Patch third-party/dht/dht.h: declare the sample_infohashes extern
+    #     beside the other four required externs.  Contract: fills up to
+    #     max_samples 20-octet infohashes into samples and returns how many it
+    #     wrote; *num is the total number of tracked infohashes, *interval the
+    #     clamped refresh interval in seconds; returns -1 when the responder is
+    #     disabled, in which case dht.c sends no reply at all.
+    dht_h = os.path.join(dht_dir, "dht.h")
+    with open(dht_h, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: bep51" not in text:
+        old = "int dht_random_bytes(void *buf, size_t size);\n"
+        new = (
+            "int dht_random_bytes(void *buf, size_t size);\n"
+            "/* ANDROID fork: bep51 -- BEP51 sample_infohashes responder.\n"
+            "   Writes up to max_samples 20-octet infohashes into samples and\n"
+            "   returns how many it wrote.  *num receives the total number of\n"
+            "   infohashes currently tracked and *interval the refresh interval in\n"
+            "   seconds (clamped to the spec range 0..21600 by the provider).\n"
+            "   Returns -1 when the responder is disabled. */\n"
+            "int dht_sample_infohashes(unsigned char *samples, int max_samples,\n"
+            "                          int *num, int *interval);\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: dht_random_bytes extern not found in third-party/dht/dht.h")
+        text = text.replace(old, new, 1)
+        with open(dht_h, "w", encoding="utf-8") as f:
+            f.write(text)
+
     # 7. Patch file-capacity.cc: guard sys/quota.h on Android.
     fc2 = os.path.join(libt, "file-capacity.cc")
     with open(fc2, "r", encoding="utf-8") as f:
