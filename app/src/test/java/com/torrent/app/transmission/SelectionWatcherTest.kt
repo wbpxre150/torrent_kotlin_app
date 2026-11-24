@@ -61,6 +61,9 @@ class SelectionWatcherTest {
         @Volatile var unwantedResult: String? = "success"
         @Volatile var pauseResult = true
 
+        /** Runs inside `torrent-set paused`, so a test can observe the state at pause time. */
+        @Volatile var onPause: (() -> Unit)? = null
+
         /** When set, `torrent-get` parks until it is released (deterministic supersede). */
         @Volatile var gate: CountDownLatch? = null
 
@@ -81,6 +84,7 @@ class SelectionWatcherTest {
 
         override fun torrentSetPaused(hashString: String, paused: Boolean): Boolean {
             pauseCalls.add(hashString to paused)
+            onPause?.invoke()
             return pauseResult
         }
     }
@@ -91,11 +95,12 @@ class SelectionWatcherTest {
         rpc: FakeRpc,
         pollMs: Long = 5_000L,
         pauseAttempts: Int = 3,
+        sleeper: (Long) -> Unit = { ms -> now.addAndGet(ms) },
     ): SelectionWatcher = SelectionWatcher(
         rpcFactory = { rpc },
         store = store,
         clock = { now.get() },
-        sleeper = { ms -> now.addAndGet(ms) },
+        sleeper = sleeper,
         pollMs = pollMs,
         pauseAttempts = pauseAttempts,
     ).also { watcher = it }
@@ -299,6 +304,64 @@ class SelectionWatcherTest {
         assertEquals(1, store.all().size)
         assertEquals(SelectionStatus.STATE_PENDING, w.status(hash).state)
         assertTrue(rpc.unwantedCalls.isEmpty())
+    }
+
+    @Test fun exceptionWhileCurrent_attemptsThePauseBeforeDroppingTheIntent() {
+        // The reachable trigger: an exception escapes a live loop (the stop()/start() race) while
+        // the generation is unchanged, so the intent must be dropped only after a pause.
+        val rpc = FakeRpc() // sticky metadata-less snapshot: the loop parks in the sleeper
+        val storeSizesAtPause = CopyOnWriteArrayList<Int>()
+        rpc.onPause = { storeSizesAtPause.add(store.all().size) }
+        val w = watcher(rpc, sleeper = { throw IllegalStateException("sleeper exploded") })
+
+        w.register(hash, name, setOf("b.mkv"), 600_000L)
+
+        val status = awaitState(w, hash, SelectionStatus.STATE_ERROR)
+        assertEquals("sleeper exploded", status.detail)
+        assertEquals(listOf(hash to true), rpc.pauseCalls.toList())
+        assertEquals(listOf(1), storeSizesAtPause.toList())
+        assertEquals(emptyList<PendingSelection>(), store.all())
+    }
+
+    @Test fun exceptionAfterStop_pausesNothingAndKeepsThePersistedIntent() {
+        val rpc = FakeRpc()
+        val watchThreads = CopyOnWriteArrayList<Thread>()
+        val w = watcher(
+            rpc,
+            sleeper = {
+                // Genuinely stopped before the throw: pauseTorrent's isCurrent guard must make
+                // the pause a no-op, so the intent survives for resumePending().
+                watchThreads.add(Thread.currentThread())
+                watcher!!.stop()
+                throw IllegalStateException("interrupted")
+            },
+        )
+
+        w.register(hash, name, setOf("b.mkv"), 600_000L)
+
+        val end = System.nanoTime() + 5_000L * 1_000_000
+        while (watchThreads.isEmpty() && System.nanoTime() < end) Thread.sleep(1)
+        watchThreads.single().join(5_000L)
+
+        assertTrue(rpc.pauseCalls.isEmpty())
+        assertEquals(1, store.all().size)
+        assertEquals(SelectionStatus.STATE_PENDING, w.status(hash).state)
+    }
+
+    @Test fun start_reArmsTheWatcherAfterAGracefulStop() {
+        val rpc = FakeRpc()
+        rpc.sticky = snapshot("a.mkv", "b.mkv")
+        val w = watcher(rpc)
+
+        // A graceful stop/start cycle keeps the service instance, so only start() can make a
+        // later register live; without it the subset add would download the whole torrent.
+        w.stop()
+        w.start()
+        w.register(hash, name, setOf("b.mkv"), 600_000L)
+
+        awaitState(w, hash, SelectionStatus.STATE_APPLIED)
+        assertEquals(listOf(hash to listOf(1)), rpc.unwantedCalls.toList())
+        assertEquals(emptyList<PendingSelection>(), store.all())
     }
 
     @Test fun status_ofAnUnwatchedHashIsNone() {

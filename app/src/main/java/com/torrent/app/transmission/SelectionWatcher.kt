@@ -201,9 +201,17 @@ class SelectionWatcher internal constructor(
         try {
             watch(entry, generation)
         } catch (e: Exception) {
-            // A broken iteration must still end in a state the dashboard can show.
+            // A broken iteration must still end in a state the dashboard can show, and it must
+            // attempt the pause first: the reachable trigger is stop() then start() around a loop
+            // parked in the sleeper, where start() has already reset `stopped` and the generation
+            // was not bumped, so isCurrent is true and dropping the intent would leave the whole
+            // torrent downloading. When the watcher is genuinely stopped, pauseTorrent's
+            // isCurrent guard makes this a no-op and the intent survives for resumePending().
             log("watch for ${entry.hashHex} failed: ${e.message}")
-            finish(entry, generation, SelectionStatus.STATE_ERROR, e.message ?: e.javaClass.simpleName)
+            finishAfterPause(
+                entry, generation, SelectionStatus.STATE_ERROR,
+                e.message ?: e.javaClass.simpleName,
+            )
         } finally {
             threads.remove(entry.hashHex, Thread.currentThread())
         }
