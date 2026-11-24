@@ -488,6 +488,380 @@ def main():
         with open(dht_h, "w", encoding="utf-8") as f:
             f.write(text)
 
+    # 6e. Patch libtransmission/quark.h + quark.cc: the two new settings keys
+    #     for the BEP51 sample_infohashes responder.  The enum and the quark.cc
+    #     string table must stay in the same order, and quark.cc asserts that
+    #     order is sorted by string value, so the new keys go between
+    #     "dht-enabled" and "dht_enabled" ('-' 0x2d sorts before '_' 0x5f).
+    #     Brand-new keys, so no _kebab_APICOMPAT twin.
+    quark_h = os.path.join(libt, "quark.h")
+    with open(quark_h, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: bep51" not in text:
+        old = (
+            "    TR_KEY_dht_enabled_kebab_APICOMPAT,\n"
+            "    TR_KEY_dht_enabled,\n"
+        )
+        new = (
+            "    TR_KEY_dht_enabled_kebab_APICOMPAT,\n"
+            "    // ANDROID fork: bep51 -- BEP51 sample_infohashes responder settings.\n"
+            "    TR_KEY_dht_sample_infohashes_enabled,\n"
+            "    TR_KEY_dht_sample_infohashes_interval,\n"
+            "    TR_KEY_dht_enabled,\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: TR_KEY_dht_enabled enum entry not found in libtransmission/quark.h")
+        text = text.replace(old, new, 1)
+        with open(quark_h, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    quark_cc = os.path.join(libt, "quark.cc")
+    with open(quark_cc, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: bep51" not in text:
+        old = (
+            "    \"dht-enabled\"sv, // daemon, rpc, tr_session::Settings\n"
+            "    \"dht_enabled\"sv, // daemon, rpc, tr_session::Settings\n"
+        )
+        new = (
+            "    \"dht-enabled\"sv, // daemon, rpc, tr_session::Settings\n"
+            "    // ANDROID fork: bep51 -- BEP51 sample_infohashes responder settings.\n"
+            "    \"dht-sample-infohashes-enabled\"sv, // daemon, rpc, tr_session::Settings\n"
+            "    \"dht-sample-infohashes-interval\"sv, // daemon, rpc, tr_session::Settings\n"
+            "    \"dht_enabled\"sv, // daemon, rpc, tr_session::Settings\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: dht-enabled quark string not found in libtransmission/quark.cc")
+        text = text.replace(old, new, 1)
+        with open(quark_cc, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    # 6f. Patch libtransmission/session.h: the two settings fields, their Fields
+    #     bindings (which is what makes them load from settings.json, persist on
+    #     the daemon's save and show up in session-get), and the DhtMediator
+    #     overrides.  The interval is size_t, not int: serializer.cc registers
+    #     converters for size_t/int64_t/uint64_t but NOT for int, so an int field
+    #     would serialize to an empty variant (session-get would publish null and
+    #     settings.json would not round-trip the value).
+    sess_h_bep51 = os.path.join(libt, "session.h")
+    with open(sess_h_bep51, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: bep51" not in text:
+        sess_h_patches = [
+            (
+                "Settings dht_enabled default",
+                "        bool dht_enabled = true;\n"
+                "        bool download_queue_enabled = true;\n",
+                "        bool dht_enabled = true;\n"
+                "        // ANDROID fork: bep51 -- BEP51 sample_infohashes responder.\n"
+                "        bool dht_sample_infohashes_enabled = true;\n"
+                "        size_t dht_sample_infohashes_interval = 21600U;\n"
+                "        bool download_queue_enabled = true;\n",
+            ),
+            (
+                "Fields dht_enabled binding",
+                "            Field<&Settings::dht_enabled>{ TR_KEY_dht_enabled },\n"
+                "            Field<&Settings::download_dir>{ TR_KEY_download_dir },\n",
+                "            Field<&Settings::dht_enabled>{ TR_KEY_dht_enabled },\n"
+                "            Field<&Settings::dht_sample_infohashes_enabled>{ TR_KEY_dht_sample_infohashes_enabled },\n"
+                "            Field<&Settings::dht_sample_infohashes_interval>{ TR_KEY_dht_sample_infohashes_interval },\n"
+                "            Field<&Settings::download_dir>{ TR_KEY_download_dir },\n",
+            ),
+            (
+                "DhtMediator declarations",
+                "        [[nodiscard]] tr_sha1_digest_t torrent_info_hash(tr_torrent_id_t id) const override;\n"
+                "\n"
+                "        [[nodiscard]] std::string_view config_dir() const override\n",
+                "        [[nodiscard]] tr_sha1_digest_t torrent_info_hash(tr_torrent_id_t id) const override;\n"
+                "\n"
+                "        // ANDROID fork: bep51 -- BEP51 sample_infohashes responder.  The\n"
+                "        // settings are read live, so an RPC toggle needs no restart.\n"
+                "        [[nodiscard]] bool sample_infohashes_enabled() const override;\n"
+                "\n"
+                "        [[nodiscard]] int sample_infohashes_interval() const override;\n"
+                "\n"
+                "        // Every torrent in the session -- deliberately NOT filtered by\n"
+                "        // allows_dht()/running the way torrents_allowing_dht() is.\n"
+                "        [[nodiscard]] std::vector<tr_sha1_digest_t> all_torrent_hashes() const override;\n"
+                "\n"
+                "        [[nodiscard]] std::string_view config_dir() const override\n",
+            ),
+        ]
+        for name, old, new in sess_h_patches:
+            if old not in text:
+                sys.exit("ERROR: " + name + " not found in libtransmission/session.h")
+            text = text.replace(old, new, 1)
+        with open(sess_h_bep51, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    # 6g. Patch libtransmission/session.cc: implement the three mediator
+    #     methods.  all_torrent_hashes() is the operator scope decision -- every
+    #     torrent in the session, with no allows_dht()/running filter.
+    sess_cc_bep51 = os.path.join(libt, "session.cc")
+    with open(sess_cc_bep51, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: bep51" not in text:
+        old = (
+            "    return {};\n"
+            "}\n"
+            "\n"
+            "void tr_session::DhtMediator::add_pex(tr_sha1_digest_t const& info_hash, tr_pex const* pex, size_t n_pex)\n"
+        )
+        new = (
+            "    return {};\n"
+            "}\n"
+            "\n"
+            "// ANDROID fork: bep51 -- BEP51 sample_infohashes responder.  Read live\n"
+            "// from the session settings so session-set needs no restart.\n"
+            "bool tr_session::DhtMediator::sample_infohashes_enabled() const\n"
+            "{\n"
+            "    return session_.settings().dht_sample_infohashes_enabled;\n"
+            "}\n"
+            "\n"
+            "int tr_session::DhtMediator::sample_infohashes_interval() const\n"
+            "{\n"
+            "    // Saturate: the setting is a size_t, the mediator contract is int.\n"
+            "    auto const stored = session_.settings().dht_sample_infohashes_interval;\n"
+            "    return stored > static_cast<size_t>(std::numeric_limits<int>::max()) ? std::numeric_limits<int>::max() :\n"
+            "                                                                          static_cast<int>(stored);\n"
+            "}\n"
+            "\n"
+            "std::vector<tr_sha1_digest_t> tr_session::DhtMediator::all_torrent_hashes() const\n"
+            "{\n"
+            "    auto hashes = std::vector<tr_sha1_digest_t>{};\n"
+            "    auto const& torrents = session_.torrents();\n"
+            "\n"
+            "    hashes.reserve(std::size(torrents));\n"
+            "    for (auto const* const tor : torrents)\n"
+            "    {\n"
+            "        hashes.push_back(tor->info_hash());\n"
+            "    }\n"
+            "\n"
+            "    return hashes;\n"
+            "}\n"
+            "\n"
+            "void tr_session::DhtMediator::add_pex(tr_sha1_digest_t const& info_hash, tr_pex const* pex, size_t n_pex)\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: tr_session::DhtMediator::torrent_info_hash tail not found in libtransmission/session.cc")
+        text = text.replace(old, new, 1)
+        with open(sess_cc_bep51, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    # 6h. Patch libtransmission/tr-dht.h: the three new mediator virtuals.
+    dht_mediator_h = os.path.join(libt, "tr-dht.h")
+    with open(dht_mediator_h, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: bep51" not in text:
+        old = (
+            "        [[nodiscard]] virtual std::vector<tr_torrent_id_t> torrents_allowing_dht() const = 0;\n"
+            "        [[nodiscard]] virtual tr_sha1_digest_t torrent_info_hash(tr_torrent_id_t) const = 0;\n"
+        )
+        new = (
+            "        [[nodiscard]] virtual std::vector<tr_torrent_id_t> torrents_allowing_dht() const = 0;\n"
+            "        [[nodiscard]] virtual tr_sha1_digest_t torrent_info_hash(tr_torrent_id_t) const = 0;\n"
+            "\n"
+            "        // ANDROID fork: bep51 -- BEP51 sample_infohashes responder.  The\n"
+            "        // enumeration is unfiltered on purpose: it is the whole session.\n"
+            "        [[nodiscard]] virtual bool sample_infohashes_enabled() const = 0;\n"
+            "        [[nodiscard]] virtual int sample_infohashes_interval() const = 0;\n"
+            "        [[nodiscard]] virtual std::vector<tr_sha1_digest_t> all_torrent_hashes() const = 0;\n"
+        )
+        if old not in text:
+            sys.exit("ERROR: tr_dht::Mediator virtuals not found in libtransmission/tr-dht.h")
+        text = text.replace(old, new, 1)
+        with open(dht_mediator_h, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    # 6i. Patch libtransmission/tr-dht.cc: implement the dht_sample_infohashes
+    #     extern declared in third-party/dht/dht.h.  dht.c calls it from its
+    #     packet handler on the session's libevent thread, so it uses the same
+    #     unlocked enumeration pattern on_announce_timer() already uses.  The
+    #     extern has no `this`, so the live tr_dht_impl registers itself in a
+    #     file-static pointer; the reply is served from an all-torrents snapshot
+    #     refreshed at most once per max(interval, 60) seconds, because queries
+    #     are only rate-limited by the DHT token bucket.  The interval is clamped
+    #     at this read site (libtorrent dht_storage.cpp parity) so a stored
+    #     out-of-range value can never produce an invalid reply, and the samples
+    #     are a uniform random subset without replacement (std::sample), not the
+    #     first N.
+    dht_tr_cc = os.path.join(libt, "tr-dht.cc")
+    with open(dht_tr_cc, "r", encoding="utf-8") as f:
+        text = f.read()
+    if "ANDROID fork: bep51" not in text:
+        tr_dht_cc_patches = [
+            (
+                "extern C block tail",
+                "} // extern \"C\"\n"
+                "\n"
+                "class tr_dht_impl final : public tr_dht\n",
+                "} // extern \"C\"\n"
+                "\n"
+                "// ANDROID fork: bep51 -- dht.c's sample_infohashes responder is a plain\n"
+                "// extern (declared in third-party/dht/dht.h) with no `this`, so the live\n"
+                "// DHT node registers itself here.  Set in the tr_dht_impl ctor, cleared\n"
+                "// in the dtor; null means no DHT node in this process and the extern\n"
+                "// answers -1.  The extern itself is defined below, after tr_dht_impl,\n"
+                "// because the snapshot cache lives there.\n"
+                "class tr_dht_impl;\n"
+                "static tr_dht_impl* bep51_impl = nullptr;\n"
+                "\n"
+                "class tr_dht_impl final : public tr_dht\n",
+            ),
+            (
+                "tr_dht_impl ctor tail",
+                "        on_announce_timer();\n"
+                "        announce_timer_->start_repeating(1s);\n"
+                "\n"
+                "        on_periodic_timer();\n"
+                "    }\n",
+                "        on_announce_timer();\n"
+                "        announce_timer_->start_repeating(1s);\n"
+                "\n"
+                "        on_periodic_timer();\n"
+                "\n"
+                "        bep51_impl = this; // ANDROID fork: bep51\n"
+                "    }\n",
+            ),
+            (
+                "tr_dht_impl dtor head",
+                "    ~tr_dht_impl() override\n"
+                "    {\n"
+                "        tr_logAddTrace(\"Uninitializing DHT\");\n",
+                "    ~tr_dht_impl() override\n"
+                "    {\n"
+                "        bep51_impl = nullptr; // ANDROID fork: bep51\n"
+                "\n"
+                "        tr_logAddTrace(\"Uninitializing DHT\");\n",
+            ),
+            (
+                "maybe_add_node head",
+                "    void maybe_add_node(tr_address const& addr, tr_port port) override\n",
+                "    // ANDROID fork: bep51 -- BEP51 sample_infohashes responder, reached\n"
+                "    // through the extern below.  Returns -1 when disabled (dht.c then\n"
+                "    // sends nothing at all), else the number of samples written.\n"
+                "    int sample_infohashes(unsigned char* samples, int max_samples, int* num, int* interval)\n"
+                "    {\n"
+                "        if (!mediator_.sample_infohashes_enabled())\n"
+                "        {\n"
+                "            return -1;\n"
+                "        }\n"
+                "\n"
+                "        // Clamp at the read site (libtorrent dht_storage.cpp parity).\n"
+                "        auto const clamped_interval = std::clamp(mediator_.sample_infohashes_interval(), 0, 21600);\n"
+                "        if (interval != nullptr)\n"
+                "        {\n"
+                "            *interval = clamped_interval;\n"
+                "        }\n"
+                "\n"
+                "        // Snapshot the session's infohashes at most once per\n"
+                "        // max(interval, 60) seconds; the 60 s floor keeps a burst of\n"
+                "        // queries from re-walking the torrent list per packet.\n"
+                "        auto const now = tr_time();\n"
+                "        auto const refresh_after = time_t{ std::max(clamped_interval, 60) };\n"
+                "        if (sample_infohashes_at_ == 0 || now < sample_infohashes_at_ || now - sample_infohashes_at_ >= refresh_after)\n"
+                "        {\n"
+                "            sample_infohashes_ = mediator_.all_torrent_hashes();\n"
+                "            sample_infohashes_at_ = now;\n"
+                "        }\n"
+                "\n"
+                "        if (num != nullptr)\n"
+                "        {\n"
+                "            *num = static_cast<int>(std::size(sample_infohashes_));\n"
+                "        }\n"
+                "\n"
+                "        if (samples == nullptr || max_samples <= 0)\n"
+                "        {\n"
+                "            return 0;\n"
+                "        }\n"
+                "\n"
+                "        // libtorrent parity: never more than 20 samples (400 octets).\n"
+                "        auto const n_wanted = std::min({ static_cast<size_t>(max_samples), size_t{ 20 }, std::size(sample_infohashes_) });\n"
+                "        auto chosen = std::array<tr_sha1_digest_t, 20>{};\n"
+                "        auto rng = tr_urbg<uint32_t>{};\n"
+                "        std::sample(std::begin(sample_infohashes_), std::end(sample_infohashes_), std::begin(chosen), n_wanted, rng);\n"
+                "        for (size_t i = 0; i < n_wanted; ++i)\n"
+                "        {\n"
+                "            std::copy_n(reinterpret_cast<unsigned char const*>(std::data(chosen[i])), 20, samples + i * 20);\n"
+                "        }\n"
+                "\n"
+                "        return static_cast<int>(n_wanted);\n"
+                "    }\n"
+                "\n"
+                "    void maybe_add_node(tr_address const& addr, tr_port port) override\n",
+            ),
+            (
+                "announce_times_ members",
+                "    std::map<tr_torrent_id_t, AnnounceInfo> announce_times_;\n"
+                "};\n",
+                "    std::map<tr_torrent_id_t, AnnounceInfo> announce_times_;\n"
+                "\n"
+                "    // ANDROID fork: bep51 -- cached all-torrents snapshot for the BEP51\n"
+                "    // responder, refreshed at most once per\n"
+                "    // max(sample_infohashes_interval, 60) seconds.  Only touched on the\n"
+                "    // session's libevent thread.\n"
+                "    std::vector<tr_sha1_digest_t> sample_infohashes_;\n"
+                "    time_t sample_infohashes_at_ = 0;\n"
+                "};\n",
+            ),
+            (
+                "tr_dht::create head",
+                "[[nodiscard]] std::unique_ptr<tr_dht> tr_dht::create(\n",
+                "// ANDROID fork: bep51 -- the responder extern declared in\n"
+                "// third-party/dht/dht.h.  Defined here, below tr_dht_impl, because the\n"
+                "// snapshot cache lives there.\n"
+                "extern \"C\" int dht_sample_infohashes(unsigned char* samples, int max_samples, int* num, int* interval)\n"
+                "{\n"
+                "    return bep51_impl != nullptr ? bep51_impl->sample_infohashes(samples, max_samples, num, interval) : -1;\n"
+                "}\n"
+                "\n"
+                "[[nodiscard]] std::unique_ptr<tr_dht> tr_dht::create(\n",
+            ),
+        ]
+        for name, old, new in tr_dht_cc_patches:
+            if old not in text:
+                sys.exit("ERROR: " + name + " not found in libtransmission/tr-dht.cc")
+            text = text.replace(old, new, 1)
+        with open(dht_tr_cc, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    # 6j. Patch tests/libtransmission/dht-test.cc: MockMediator is the only
+    #     other tr_dht::Mediator implementer, so it needs the three new virtuals
+    #     to stay consistent.  It is not compiled by buildTransmission
+    #     (-DENABLE_TESTS=OFF), so this is consistency, not a build dependency.
+    dht_test_cc = os.path.join(src_root, "tests", "libtransmission", "dht-test.cc")
+    if os.path.exists(dht_test_cc):
+        with open(dht_test_cc, "r", encoding="utf-8") as f:
+            text = f.read()
+        if "ANDROID fork: bep51" not in text:
+            old = (
+                "        [[nodiscard]] tr_sha1_digest_t torrent_info_hash(tr_torrent_id_t id) const override\n"
+            )
+            new = (
+                "        // ANDROID fork: bep51 -- BEP51 responder mediator surface.\n"
+                "        [[nodiscard]] bool sample_infohashes_enabled() const override\n"
+                "        {\n"
+                "            return true;\n"
+                "        }\n"
+                "\n"
+                "        [[nodiscard]] int sample_infohashes_interval() const override\n"
+                "        {\n"
+                "            return 21600;\n"
+                "        }\n"
+                "\n"
+                "        [[nodiscard]] std::vector<tr_sha1_digest_t> all_torrent_hashes() const override\n"
+                "        {\n"
+                "            return {};\n"
+                "        }\n"
+                "\n"
+                "        [[nodiscard]] tr_sha1_digest_t torrent_info_hash(tr_torrent_id_t id) const override\n"
+            )
+            if old not in text:
+                sys.exit("ERROR: MockMediator torrent_info_hash not found in tests/libtransmission/dht-test.cc")
+            text = text.replace(old, new, 1)
+            with open(dht_test_cc, "w", encoding="utf-8") as f:
+                f.write(text)
+
     # 7. Patch file-capacity.cc: guard sys/quota.h on Android.
     fc2 = os.path.join(libt, "file-capacity.cc")
     with open(fc2, "r", encoding="utf-8") as f:
