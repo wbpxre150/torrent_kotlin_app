@@ -183,6 +183,24 @@ class ControlServerTorrentPageTest {
         assertFalse("the counter must not count loaded rows", page.contains("shown files"))
     }
 
+    @Test fun page_selectionLogicIsPinned() {
+        // Reviewer P2 #2: the mode->set arithmetic, the toggle rule and the in-flight
+        // guard are the places where one inverted comparison silently flips the page
+        // while the whole suite stays green, so the literal expressions are pinned —
+        // not just the variables they read.
+        assertTrue(page.contains(
+            "function isSel(p) { return (selMode === 'all') !== Object.prototype.hasOwnProperty.call(selSet, p); }"))
+        assertTrue(page.contains("if (on === (selMode === 'all')) delete selSet[p];"))
+        assertTrue(page.contains("var n = selMode === 'all' ? torrentFiles - m : m;"))
+        // The in-flight Add guard: the flag is set with the in-flight disable, the
+        // disabled write is gated on it (so a tick or a lazy batch cannot re-enable
+        // the button mid-POST), and both terminals clear it before re-deriving state.
+        assertTrue(page.contains("var addBusy = false;"))
+        assertTrue(page.contains("addBusy = true;"))
+        assertTrue(page.contains("addBusy = false;"))
+        assertTrue(page.contains("if (!addBusy) el('add-btn').disabled = n === 0;"))
+    }
+
     @Test fun page_pollsSelectionStatus() {
         assertTrue(page.contains("/api/transmission/selection-status?hash="))
         // The five states the watcher reports, and the paused banner wording.

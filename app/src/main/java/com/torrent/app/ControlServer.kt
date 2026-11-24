@@ -566,7 +566,7 @@ class ControlServer(
                                     ContentType.Application.Json,
                                     HttpStatusCode.BadRequest,
                                 )
-                            } else if (body.has("unselected") && body.has("selected")) {
+                            } else if (selectionHasBothFields(body)) {
                                 // The two fields are XOR by contract: `unselected`
                                 // is mode ALL's deselection, `selected` is mode
                                 // NONE's inclusion list. Both at once is ambiguous.
@@ -576,8 +576,9 @@ class ControlServer(
                                     HttpStatusCode.BadRequest,
                                 )
                             } else {
+                                val hash = call.request.queryParameters["hash"] ?: ""
                                 val outcome = handler.addSelected(
-                                    hashHex = call.request.queryParameters["hash"] ?: "",
+                                    hashHex = hash,
                                     // A missing/empty array is passed through as an
                                     // empty list: the handler's `BadSelection("empty")`
                                     // is the one place that decides it.
@@ -593,6 +594,21 @@ class ControlServer(
                                         null
                                     },
                                 )
+                                // Parity with the whole-torrent route above: an
+                                // `add-selected` that selects every file registers no
+                                // watch at all (the complement is empty), so it
+                                // supersedes any earlier subset watch display for this
+                                // hash — the status map is never pruned on a timer, so
+                                // without this a stale "File selection applied" or
+                                // paused banner would outlive the re-add for the rest
+                                // of the process. Only `Added` clears (a refused add
+                                // leaves the hash's state alone) and the persisted
+                                // intent is untouched (a live watch re-publishes it).
+                                if (outcome is SelectedAddOutcome.Added &&
+                                    outcome.unselectedCount == 0
+                                ) {
+                                    selectionWatcher.clearStatus(hash)
+                                }
                                 call.respondText(
                                     outcome.toJson(),
                                     ContentType.Application.Json,
@@ -2864,6 +2880,15 @@ class ControlServer(
         }
 
         /**
+         * The `add-selected` body's two wire fields are XOR by contract: `unselected`
+         * is mode ALL's deselection list, `selected` is mode NONE's inclusion list.
+         * A body carrying both is ambiguous, so the route refuses it with
+         * `bad_request:body` before the handler (or the DB) is touched.
+         */
+        internal fun selectionHasBothFields(body: org.json.JSONObject): Boolean =
+            body.has("unselected") && body.has("selected")
+
+        /**
          * True when an `add-selected` body's declared `Content-Length` exceeds
          * [MAX_SELECTION_BODY_BYTES]. A missing or non-numeric header reports false, so
          * such a request keeps the pre-guard behaviour: read the body, then parse it.
@@ -4535,6 +4560,11 @@ ${adultSelectionRow(adultSelection)}
               var selSet = {};   // mode 'all': deselected paths; mode 'none': selected paths
               var torrentFiles = 0;   // whole-torrent file_count from /torrent/info
               var selTimer = null;
+              // True from the moment the add POST starts until its terminal runs:
+              // while it is set updateSelCount() must not re-enable the button, or
+              // ticking a row (or a lazy batch finishing) mid-flight would defeat
+              // the `if (btn.disabled) return;` re-entrancy guard and fire a second add.
+              var addBusy = false;
 
               function el(id) { return document.getElementById(id); }
 
@@ -4692,8 +4722,11 @@ ${adultSelectionRow(adultSelection)}
 
               // Row identity is the file path, kept in a closure variable (no
               // data-* attributes): selMode + selSet decide a row's checked state,
-              // so a selection survives paging and filter resets.
-              function isSel(p) { return (selMode === 'all') !== !!selSet[p]; }
+              // so a selection survives paging and filter resets. Membership is
+              // tested with hasOwnProperty, never truthiness: selSet is a plain
+              // object, so a path literally named `constructor`/`toString`/
+              // `__proto__` would otherwise read as a member and desync the counter.
+              function isSel(p) { return (selMode === 'all') !== Object.prototype.hasOwnProperty.call(selSet, p); }
 
               function setChecked(p, on) {
                 if (on === (selMode === 'all')) delete selSet[p];
@@ -4709,7 +4742,9 @@ ${adultSelectionRow(adultSelection)}
               // from the mode, the set size and the torrent's file_count, never from
               // the loaded rows. Before the info arrives (torrentFiles 0) it stays
               // blank and Add keeps its current state, so a crawler outage cannot
-              // brick the button.
+              // brick the button. While an add POST is in flight (addBusy) the
+              // disabled write is suppressed, so a tick or a lazy batch cannot
+              // re-enable the button and let a second add through.
               function updateSelCount() {
                 if (torrentFiles === 0) { el('sel-count').textContent = ''; return; }
                 var m = Object.keys(selSet).length;
@@ -4718,7 +4753,7 @@ ${adultSelectionRow(adultSelection)}
                 if (n > torrentFiles) n = torrentFiles;
                 el('sel-count').textContent =
                   n + ' of ' + torrentFiles + ' files selected' + (n === 0 ? ' \u2014 nothing to add' : '');
-                el('add-btn').disabled = n === 0;
+                if (!addBusy) el('add-btn').disabled = n === 0;
               }
 
               // The three helpers act on the WHOLE torrent (mode + set), never on
@@ -4957,6 +4992,7 @@ ${adultSelectionRow(adultSelection)}
                 var btn = el('add-btn');
                 if (btn.disabled) return;
                 btn.disabled = true;
+                addBusy = true;
                 // The control_token cookie authenticates this POST (as on /search).
                 // Mode all with nothing deselected means the whole torrent: that
                 // request and its response contract are unchanged. Otherwise the
@@ -4977,6 +5013,7 @@ ${adultSelectionRow(adultSelection)}
                 req
                   .then(function (r) { return r.json().catch(function () { return null; }); })
                   .then(function (d) {
+                    addBusy = false;
                     updateSelCount();
                     if (whole) {
                       toast(addMessage(d), !(d && d.ok));
@@ -4986,6 +5023,7 @@ ${adultSelectionRow(adultSelection)}
                     if (d && d.ok) pollSelectionStatus();
                   })
                   .catch(function () {
+                    addBusy = false;
                     updateSelCount();
                     toast('Add failed', true);
                   });

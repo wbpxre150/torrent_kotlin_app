@@ -106,6 +106,22 @@ class ControlServerHelpersTest {
         assertEquals(listOf("sample.nfo", "12"), ControlServer.selectionPaths(mixed, "selected"))
     }
 
+    @Test fun selectionHasBothFields_isXor() {
+        // `unselected` (mode ALL's deselection) and `selected` (mode NONE's inclusion
+        // list) are XOR by contract: the route refuses a body carrying both as
+        // `bad_request:body`, while a body carrying neither keeps the legacy shape
+        // (an empty list reaches the handler, which is the single rejecting place).
+        assertFalse(ControlServer.selectionHasBothFields(
+            org.json.JSONObject("""{"unselected":[]}""")))
+        assertFalse(ControlServer.selectionHasBothFields(
+            org.json.JSONObject("""{"selected":[]}""")))
+        assertTrue(ControlServer.selectionHasBothFields(
+            org.json.JSONObject("""{"unselected":["a.mkv"],"selected":["b.mkv"]}""")))
+        assertFalse(ControlServer.selectionHasBothFields(org.json.JSONObject("{}")))
+        assertFalse(ControlServer.selectionHasBothFields(
+            org.json.JSONObject("""{"timeoutMs":600000}""")))
+    }
+
     @Test fun parseCookieToken_returnsNullWhenAbsent() {
         assertNull(ControlServer.parseCookieToken("other=1"))
         assertNull(ControlServer.parseCookieToken(null))
