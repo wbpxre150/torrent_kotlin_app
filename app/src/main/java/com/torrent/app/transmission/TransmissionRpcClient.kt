@@ -89,9 +89,10 @@ class TransmissionRpcClient(
 
     /**
      * Adds a magnet (or .torrent path) to the daemon at normal priority
-     * (plan 11 D2). transmission 4.1.2 answers `result: "success"` for BOTH
+     * (plan 11 D2). transmission 4.1.4 answers `result: "success"` for BOTH
      * new and duplicate adds; a duplicate is signalled by a `torrent-duplicate`
-     * argument object (verified in the 4.1.2 rpcimpl.cc the fork builds from).
+     * argument object (verified in the 4.1.4 rpcimpl.cc the fork builds from; that file is
+     * byte-identical to 4.1.2's, so the 4.1.4 torrent-add hardening does not touch it).
      * Null response (daemon down / RPC error) or any non-success result is a
      * failure.
      */
@@ -126,7 +127,7 @@ class TransmissionRpcClient(
      * Stops one torrent with the legacy `torrent-stop` method. `result == "success"`; false on
      * RPC failure or a non-success result.
      *
-     * This is the only stop this app may use. On the shipped 4.1.2 build `torrent-set`
+     * This is the only stop this app may use. On the shipped 4.1.4 build `torrent-set`
      * `{"paused":true}` (and `{"status":0}`) answer `result: "success"` and are silently
      * IGNORED — `rpcimpl.cc` wires `TR_KEY_paused` only into the torrent-add constructor, never
      * into torrent-set's key switch — so a caller that trusted that result reported a pause
@@ -209,7 +210,7 @@ class TransmissionRpcClient(
 
         /**
          * Pure argument builder for `torrent-stop`: only `ids`. The method takes no other
-         * argument, and it is the stop that actually works on the shipped 4.1.2 build.
+         * argument, and it is the stop that actually works on the shipped 4.1.4 build.
          */
         fun buildTorrentStopArgs(hash: String): JSONObject =
             JSONObject()

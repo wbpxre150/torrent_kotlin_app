@@ -2681,6 +2681,9 @@ def main():
         # 26f. torrent.h: move is_piece_checked to the public section — the peer
         # upload path (add_next_block) needs it to choose between a lazy check
         # and a read. The private inline copy is removed.
+        # 4.1.4 upstream already declares it publicly right after has_piece, so
+        # both halves are conditional: insert only when the public slot is empty
+        # and drop the private copy only when this tree still has one.
         tor_h3 = os.path.join(libt, "torrent.h")
         with open(tor_h3, "r", encoding="utf-8") as f:
             text = f.read()
@@ -2690,22 +2693,25 @@ def main():
             "        return completion_.has_piece(piece);\n"
             "    }\n"
         )
-        new = (
-            "    [[nodiscard]] auto has_piece(tr_piece_index_t piece) const\n"
-            "    {\n"
-            "        return completion_.has_piece(piece);\n"
-            "    }\n"
-            "\n"
-            "    // ANDROID fork: TRANSMISSION_USB_SAF stage 3 async reads — the peer upload\n"
-            "    // path needs this to choose between a lazy check and a read.\n"
-            "    [[nodiscard]] TR_CONSTEXPR20 bool is_piece_checked(tr_piece_index_t piece) const\n"
-            "    {\n"
-            "        return checked_pieces_.test(piece);\n"
-            "    }\n"
-        )
         if old not in text:
             sys.exit("ERROR: torrent.h has_piece body not found")
-        text = text.replace(old, new, 1)
+        # Everything between has_piece and has_block is the public slot.
+        public_slot = text.split(old, 1)[1].split("has_block", 1)[0]
+        if "is_piece_checked" not in public_slot:
+            new = (
+                "    [[nodiscard]] auto has_piece(tr_piece_index_t piece) const\n"
+                "    {\n"
+                "        return completion_.has_piece(piece);\n"
+                "    }\n"
+                "\n"
+                "    // ANDROID fork: TRANSMISSION_USB_SAF stage 3 async reads — the peer upload\n"
+                "    // path needs this to choose between a lazy check and a read.\n"
+                "    [[nodiscard]] TR_CONSTEXPR20 bool is_piece_checked(tr_piece_index_t piece) const\n"
+                "    {\n"
+                "        return checked_pieces_.test(piece);\n"
+                "    }\n"
+            )
+            text = text.replace(old, new, 1)
         old = (
             "    [[nodiscard]] TR_CONSTEXPR20 bool is_piece_checked(tr_piece_index_t piece) const\n"
             "    {\n"
@@ -2719,9 +2725,8 @@ def main():
             "    // ANDROID fork: tri-state: 1=good, 0=corrupt, -1=read error.\n"
             "    [[nodiscard]] int check_piece(tr_piece_index_t piece) const;\n"
         )
-        if old not in text:
-            sys.exit("ERROR: torrent.h private is_piece_checked not found")
-        text = text.replace(old, new, 1)
+        if old in text:
+            text = text.replace(old, new, 1)
         with open(tor_h3, "w", encoding="utf-8") as f:
             f.write(text)
 

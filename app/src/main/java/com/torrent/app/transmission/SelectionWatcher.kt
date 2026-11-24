@@ -355,7 +355,7 @@ class SelectionWatcher internal constructor(
      *
      * A confirmed pause means `torrent-stop` answered `success` **and** the read-back
      * `torrent-get status` reports TR_STATUS_STOPPED (0). The result alone is never enough: the
-     * shipped 4.1.2 daemon answers `success` to `torrent-set {"paused":true}` while ignoring the
+     * shipped 4.1.4 daemon answers `success` to `torrent-set {"paused":true}` while ignoring the
      * key (measured on device), which is exactly how this fail-safe once reported a pause over a
      * torrent that kept downloading. A non-success stop, a null read-back or a non-zero status
      * consumes the attempt; exhaustion returns false so [finishAfterPause] records the visible

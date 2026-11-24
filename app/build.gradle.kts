@@ -15,8 +15,8 @@ android {
         applicationId = "com.torrent.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.4.0"
+        versionCode = 5
+        versionName = "0.4.1"
     }
 
     buildTypes {
@@ -212,7 +212,8 @@ tasks.register("buildCurl") {
     }
 }
 tasks.register("buildTransmission") {
-    description = "Cross-compile transmission-daemon 4.1.2 for arm64, package libtransmissiond.so"
+    val txVersion = "4.1.4"
+    description = "Cross-compile transmission-daemon $txVersion for arm64, package libtransmissiond.so"
     dependsOn("buildCurl")
 
     val ndk = providers.environmentVariable("ANDROID_NDK_HOME")
@@ -225,15 +226,15 @@ tasks.register("buildTransmission") {
     val toolchainFile = file("$ndkDir/build/cmake/android.toolchain.cmake")
 
     val nativeDir = file("build/native")
-    val srcDir = file("$nativeDir/src/transmission-4.1.2")
+    val srcDir = file("$nativeDir/src/transmission-$txVersion")
     val curlInstall = file("$nativeDir/curl-install")
     val mbedtlsInstall = file("$nativeDir/mbedtls-install")
     val buildDir = file("$nativeDir/build-transmission")
     val daemonOut = file("$buildDir/daemon/transmission-daemon")
     val jniLibsArm64 = file("src/main/jniLibs/arm64-v8a")
-    val tarball = file("$nativeDir/src/transmission-4.1.2.tar.xz")
+    val tarball = file("$nativeDir/src/transmission-$txVersion.tar.xz")
     // Official release tarball (includes vendored third-party submodules)
-    val url = "https://github.com/transmission/transmission/releases/download/4.1.2/transmission-4.1.2.tar.xz"
+    val url = "https://github.com/transmission/transmission/releases/download/$txVersion/transmission-$txVersion.tar.xz"
 
     outputs.file("$jniLibsArm64/libtransmissiond.so")
     inputs.file("src/main/cpp/transmission-fork/file-saf.h")
@@ -243,6 +244,9 @@ tasks.register("buildTransmission") {
     inputs.file("src/main/cpp/transmission-fork/disk-io.h")
     inputs.file("src/main/cpp/transmission-fork/disk-io.cc")
     inputs.file("src/main/cpp/transmission-fork/apply_fork.py")
+    // A version bump must invalidate the cached .so: the doLast below is the
+    // only thing that runs the fetch/patch/configure/build steps.
+    inputs.property("transmissionVersion", txVersion)
 
     doLast {
         // 1. Fetch tarball if missing
@@ -256,6 +260,18 @@ tasks.register("buildTransmission") {
         if (!srcDir.exists()) {
             project.exec {
                 commandLine("tar", "-xJf", tarball.absolutePath, "-C", srcDir.parentFile.absolutePath)
+            }
+        }
+        // 2a. A CMake cache left over from a different source tree (version bump)
+        //     makes configure fail with a home-directory mismatch; drop it so the
+        //     tree is configured from scratch.
+        val cacheFile = file("$buildDir/CMakeCache.txt")
+        if (cacheFile.exists()) {
+            val cachedSrc = cacheFile.readLines()
+                .firstOrNull { it.startsWith("CMAKE_HOME_DIRECTORY:") }
+                ?.substringAfter("=")
+            if (cachedSrc != srcDir.absolutePath) {
+                buildDir.deleteRecursively()
             }
         }
         // 2b. Apply the SAF storage fork (copy file-saf.* + patch file-posix/file-capacity/CMakeLists).
