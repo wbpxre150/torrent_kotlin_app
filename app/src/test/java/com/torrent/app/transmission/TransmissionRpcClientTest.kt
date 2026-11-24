@@ -2,6 +2,8 @@ package com.torrent.app.transmission
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -76,5 +78,83 @@ class TransmissionRpcClientTest {
         val args = TransmissionRpcClient.buildAltSpeedDisableArgs()
         assertFalse(args.getBoolean("alt-speed-enabled"))
         assertFalse(args.getBoolean("alt-speed-time-enabled"))
+    }
+
+    @Test fun buildTorrentGetFilesArgs_hasExactlyFieldsNameFilesAndIds() {
+        val a = TransmissionRpcClient.buildTorrentGetFilesArgs("abc123")
+        assertEquals(2, a.length())
+        assertTrue(a.has("fields"))
+        assertTrue(a.has("ids"))
+        val fields = a.getJSONArray("fields")
+        assertEquals(2, fields.length())
+        assertEquals("name", fields.getString(0))
+        assertEquals("files", fields.getString(1))
+        val ids = a.getJSONArray("ids")
+        assertEquals(1, ids.length())
+        assertEquals("abc123", ids.getString(0))
+    }
+
+    @Test fun buildTorrentSetFilesUnwantedArgs_hasExactlyIdsAndFilesUnwanted() {
+        val a = TransmissionRpcClient.buildTorrentSetFilesUnwantedArgs("abc123", listOf(0, 4, 7))
+        assertEquals(2, a.length())
+        assertTrue(a.has("ids"))
+        assertTrue(a.has("files-unwanted"))
+        assertEquals("abc123", a.getJSONArray("ids").getString(0))
+        val unwanted = a.getJSONArray("files-unwanted")
+        assertEquals(3, unwanted.length())
+        assertEquals(0, unwanted.getInt(0))
+        assertEquals(4, unwanted.getInt(1))
+        assertEquals(7, unwanted.getInt(2))
+    }
+
+    @Test fun buildTorrentSetFilesUnwantedArgs_emptyListIsSerialisedAsEmptyArray() {
+        // The key must be PRESENT with an empty array; omitting it would be a different request.
+        val a = TransmissionRpcClient.buildTorrentSetFilesUnwantedArgs("abc123", emptyList())
+        assertTrue(a.has("files-unwanted"))
+        assertEquals(0, a.getJSONArray("files-unwanted").length())
+        assertTrue(a.toString().contains("\"files-unwanted\":[]"))
+    }
+
+    @Test fun buildTorrentSetPausedArgs_hasExactlyIdsAndPaused() {
+        val paused = TransmissionRpcClient.buildTorrentSetPausedArgs("abc123", true)
+        assertEquals(2, paused.length())
+        assertTrue(paused.has("ids"))
+        assertTrue(paused.has("paused"))
+        assertEquals("abc123", paused.getJSONArray("ids").getString(0))
+        assertTrue(paused.getBoolean("paused"))
+        assertFalse(TransmissionRpcClient.buildTorrentSetPausedArgs("abc123", false).getBoolean("paused"))
+    }
+
+    @Test fun parseTorrentFilesSnapshot_mapsNameAndFiles() {
+        val resp = JSONObject(
+            "{\"result\":\"success\",\"arguments\":{\"torrents\":[{" +
+                "\"name\":\"My Torrent\",\"files\":[" +
+                "{\"name\":\"My Torrent/a.mkv\",\"length\":100,\"bytesCompleted\":40}," +
+                "{\"name\":\"My Torrent/sub/b.txt\",\"length\":20,\"bytesCompleted\":0}]}]}}")
+        val snap = TransmissionRpcClient.parseTorrentFilesSnapshot(resp)
+        assertNotNull(snap)
+        assertEquals("My Torrent", snap!!.name)
+        assertEquals(2, snap.files.size)
+        assertEquals("My Torrent/a.mkv", snap.files[0].name)
+        assertEquals(100L, snap.files[0].length)
+        assertEquals(40L, snap.files[0].bytesCompleted)
+        assertEquals("My Torrent/sub/b.txt", snap.files[1].name)
+        assertEquals(20L, snap.files[1].length)
+        assertEquals(0L, snap.files[1].bytesCompleted)
+    }
+
+    @Test fun parseTorrentFilesSnapshot_emptyFilesIsALegalPreMetadataSnapshot() {
+        val resp = JSONObject(
+            "{\"result\":\"success\",\"arguments\":{\"torrents\":[{\"name\":\"My Torrent\",\"files\":[]}]}}")
+        val snap = TransmissionRpcClient.parseTorrentFilesSnapshot(resp)
+        assertNotNull(snap)
+        assertEquals("My Torrent", snap!!.name)
+        assertTrue(snap.files.isEmpty())
+    }
+
+    @Test fun parseTorrentFilesSnapshot_emptyTorrentsAndFailedCallAreNull() {
+        assertNull(TransmissionRpcClient.parseTorrentFilesSnapshot(
+            JSONObject("{\"result\":\"success\",\"arguments\":{\"torrents\":[]}}")))
+        assertNull(TransmissionRpcClient.parseTorrentFilesSnapshot(null))
     }
 }

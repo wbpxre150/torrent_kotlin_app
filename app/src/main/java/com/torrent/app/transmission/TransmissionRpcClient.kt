@@ -30,6 +30,20 @@ data class TransmissionSummary(
 data class TorrentAddResult(val ok: Boolean, val duplicate: Boolean, val name: String?)
 
 /**
+ * One entry of a torrent's `files` array. [name] is transmission's own path for the file
+ * (`"<torrentName>/<path>"` for a multi-file torrent, the bare filename for a single-file one);
+ * the list position is the file index `torrent-set` addresses.
+ */
+data class TorrentFileEntry(val name: String, val length: Long, val bytesCompleted: Long)
+
+/**
+ * Per-torrent `torrent-get` snapshot of `name` + `files`. An empty [files] list is a LEGAL
+ * pre-metadata state (the torrent is known to the daemon but has no file list yet) — it is the
+ * `files.length > 0` test that means "metadata ready", not the presence of the snapshot.
+ */
+data class TorrentFilesSnapshot(val name: String, val files: List<TorrentFileEntry>)
+
+/**
  * Narrow RPC surface the add handler needs; lets unit tests inject a fake
  * instead of a live transmission daemon.
  */
@@ -89,6 +103,31 @@ class TransmissionRpcClient(
         return TorrentAddResult(true, duplicate, null)
     }
 
+    /**
+     * Per-torrent `torrent-get` of `name` + `files` — the subset-add watcher's metadata-ready
+     * signal. Null means the RPC failed (daemon down) or the torrent is not in the daemon's list;
+     * a snapshot whose [TorrentFilesSnapshot.files] is empty is a legal pre-metadata answer.
+     */
+    fun torrentGetFiles(hashString: String): TorrentFilesSnapshot? =
+        parseTorrentFilesSnapshot(call("torrent-get", buildTorrentGetFilesArgs(hashString)))
+
+    /**
+     * Marks [indices] (transmission file indices, i.e. positions in `files[]`) as unwanted and
+     * returns the raw `result` string (`"success"`, or e.g. `"file index out of range"`), so the
+     * caller can distinguish a rejected index list from an RPC failure. Null on RPC failure.
+     */
+    fun torrentSetFilesUnwanted(hashString: String, indices: List<Int>): String? {
+        val resp = call("torrent-set", buildTorrentSetFilesUnwantedArgs(hashString, indices))
+            ?: return null
+        return resp.optString("result")
+    }
+
+    /** Pauses (or resumes) one torrent. `result == "success"`; false on RPC failure or a non-success result. */
+    fun torrentSetPaused(hashString: String, paused: Boolean): Boolean {
+        val resp = call("torrent-set", buildTorrentSetPausedArgs(hashString, paused)) ?: return false
+        return resp.optString("result") == "success"
+    }
+
     private fun call(method: String, arguments: JSONObject?): JSONObject? = try {
         callOnce(method, arguments, retry = true)
     } catch (e: Exception) { Log.w(TAG, "rpc $method failed: ${e.message}"); null }
@@ -132,6 +171,53 @@ class TransmissionRpcClient(
                 .put("filename", filename)
                 .put("download-dir", downloadDir)
                 .put("bandwidthPriority", 0)
+
+        /** Pure argument builder for a per-torrent `torrent-get` of the file list. */
+        fun buildTorrentGetFilesArgs(hash: String): JSONObject =
+            JSONObject()
+                .put("fields", JSONArray(listOf("name", "files")))
+                .put("ids", JSONArray(listOf(hash)))
+
+        /**
+         * Pure argument builder for `torrent-set` with `files-unwanted`. An empty [indices] list
+         * is still serialised as an empty array (`"files-unwanted":[]`), never omitted — the key
+         * being present is what the daemon acts on.
+         */
+        fun buildTorrentSetFilesUnwantedArgs(hash: String, indices: List<Int>): JSONObject =
+            JSONObject()
+                .put("ids", JSONArray(listOf(hash)))
+                .put("files-unwanted", JSONArray(indices))
+
+        /** Pure argument builder for pausing/resuming one torrent (`torrent-set` `paused`). */
+        fun buildTorrentSetPausedArgs(hash: String, paused: Boolean): JSONObject =
+            JSONObject()
+                .put("ids", JSONArray(listOf(hash)))
+                .put("paused", paused)
+
+        /**
+         * Pure parse of a `torrent-get` response carrying `name` + `files`. An empty
+         * `arguments.torrents` array (torrent not in the daemon, or daemon down) yields null;
+         * a torrent whose `files` array is empty is a legal pre-metadata snapshot and is returned
+         * with an empty file list.
+         */
+        fun parseTorrentFilesSnapshot(resp: JSONObject?): TorrentFilesSnapshot? {
+            val torrents = resp?.optJSONObject("arguments")?.optJSONArray("torrents") ?: return null
+            if (torrents.length() == 0) return null
+            val torrent = torrents.optJSONObject(0) ?: return null
+            val files = mutableListOf<TorrentFileEntry>()
+            val filesArr = torrent.optJSONArray("files")
+            if (filesArr != null) {
+                for (i in 0 until filesArr.length()) {
+                    val f = filesArr.optJSONObject(i) ?: continue
+                    files.add(TorrentFileEntry(
+                        name = f.optString("name"),
+                        length = f.optLong("length", 0),
+                        bytesCompleted = f.optLong("bytesCompleted", 0),
+                    ))
+                }
+            }
+            return TorrentFilesSnapshot(name = torrent.optString("name"), files = files)
+        }
 
         /**
          * Pure argument builder for `session-set` of the app's speed form. The `speed-limit-*`
