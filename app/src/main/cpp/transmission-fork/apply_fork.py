@@ -679,12 +679,14 @@ def main():
     #     unlocked enumeration pattern on_announce_timer() already uses.  The
     #     extern has no `this`, so the live tr_dht_impl registers itself in a
     #     file-static pointer; the reply is served from an all-torrents snapshot
-    #     refreshed at most once per max(interval, 60) seconds, because queries
-    #     are only rate-limited by the DHT token bucket.  The interval is clamped
-    #     at this read site (libtorrent dht_storage.cpp parity) so a stored
-    #     out-of-range value can never produce an invalid reply, and the samples
-    #     are a uniform random subset without replacement (std::sample), not the
-    #     first N.
+    #     refreshed at most once per the effective interval, because queries
+    #     are only rate-limited by the DHT token bucket.  The configured interval
+    #     is clamped at this read site (libtorrent dht_storage.cpp parity) so a
+    #     stored out-of-range value can never produce an invalid reply, and the
+    #     same value is advertised in the reply AND used as the refresh gate (with
+    #     a 60 s floor, so the reply never promises a rate the cache does not
+    #     honour).  The samples are a uniform random subset without replacement
+    #     (std::sample), not the first N.
     dht_tr_cc = os.path.join(libt, "tr-dht.cc")
     with open(dht_tr_cc, "r", encoding="utf-8") as f:
         text = f.read()
@@ -730,7 +732,17 @@ def main():
                 "        tr_logAddTrace(\"Uninitializing DHT\");\n",
                 "    ~tr_dht_impl() override\n"
                 "    {\n"
-                "        bep51_impl = nullptr; // ANDROID fork: bep51\n"
+                "        // ANDROID fork: bep51 -- only unregister if the registration is\n"
+                "        // still ours.  tr_dht::create()'s new node is fully constructed\n"
+                "        // BEFORE unique_ptr::operator= destroys the old one, so the live\n"
+                "        // node has already registered itself when this dtor runs; an\n"
+                "        // unconditional clear would null the live pointer and silence\n"
+                "        // the responder for the rest of the process (any dht-enabled\n"
+                "        // toggle or peer-port change rebuilds the DHT).\n"
+                "        if (bep51_impl == this)\n"
+                "        {\n"
+                "            bep51_impl = nullptr;\n"
+                "        }\n"
                 "\n"
                 "        tr_logAddTrace(\"Uninitializing DHT\");\n",
             ),
@@ -747,18 +759,26 @@ def main():
                 "            return -1;\n"
                 "        }\n"
                 "\n"
-                "        // Clamp at the read site (libtorrent dht_storage.cpp parity).\n"
-                "        auto const clamped_interval = std::clamp(mediator_.sample_infohashes_interval(), 0, 21600);\n"
+                "        // Clamp at the read site (libtorrent dht_storage.cpp parity) and\n"
+                "        // apply the 60 s cache floor to the ADVERTISED value as well, so\n"
+                "        // the reply never promises a recompute rate the snapshot does not\n"
+                "        // honour.  Recorded divergence from libtorrent, which does\n"
+                "        // recompute per request at interval 0: our snapshot enumerates\n"
+                "        // the whole session on the libevent UDP thread and the DHT token\n"
+                "        // bucket is the only rate limit, so an unfloored cache would be a\n"
+                "        // UDP-query-flood DoS lever.  At the 21600 default nothing\n"
+                "        // changes and the value stays inside the spec range.\n"
+                "        auto const effective_interval = std::clamp(std::max(mediator_.sample_infohashes_interval(), 60), 0, 21600);\n"
                 "        if (interval != nullptr)\n"
                 "        {\n"
-                "            *interval = clamped_interval;\n"
+                "            *interval = effective_interval;\n"
                 "        }\n"
                 "\n"
                 "        // Snapshot the session's infohashes at most once per\n"
-                "        // max(interval, 60) seconds; the 60 s floor keeps a burst of\n"
-                "        // queries from re-walking the torrent list per packet.\n"
+                "        // effective_interval seconds -- the very value the reply\n"
+                "        // advertises, so reply and cache can never disagree.\n"
                 "        auto const now = tr_time();\n"
-                "        auto const refresh_after = time_t{ std::max(clamped_interval, 60) };\n"
+                "        auto const refresh_after = time_t{ effective_interval };\n"
                 "        if (sample_infohashes_at_ == 0 || now < sample_infohashes_at_ || now - sample_infohashes_at_ >= refresh_after)\n"
                 "        {\n"
                 "            sample_infohashes_ = mediator_.all_torrent_hashes();\n"
@@ -797,9 +817,9 @@ def main():
                 "    std::map<tr_torrent_id_t, AnnounceInfo> announce_times_;\n"
                 "\n"
                 "    // ANDROID fork: bep51 -- cached all-torrents snapshot for the BEP51\n"
-                "    // responder, refreshed at most once per\n"
-                "    // max(sample_infohashes_interval, 60) seconds.  Only touched on the\n"
-                "    // session's libevent thread.\n"
+                "    // responder, refreshed at most once per the effective interval\n"
+                "    // (max(configured, 60), clamped to 21600) -- the same value the reply\n"
+                "    // advertises.  Only touched on the session's libevent thread.\n"
                 "    std::vector<tr_sha1_digest_t> sample_infohashes_;\n"
                 "    time_t sample_infohashes_at_ = 0;\n"
                 "};\n",
