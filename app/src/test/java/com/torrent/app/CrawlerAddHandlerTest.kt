@@ -387,6 +387,71 @@ class CrawlerAddHandlerTest {
         assertEquals(0, registrarCalls)
     }
 
+    // ---- addSelected: the `selected` inclusion field (mode NONE) ----
+
+    @Test
+    fun addSelected_selectedFieldIsComplementedAgainstAllFiles() {
+        // The body names the CHECKED paths; the handler derives the deselection as
+        // their complement in the DB's file list, so a "select none + tick 3" add
+        // costs 3 paths instead of 27 595.
+        val outcome = handler(registrar = recordingRegistrar)
+            .addSelected(HASH, emptyList(), 600_000, selectedPaths = listOf(FILE_A, FILE_C))
+        assertEquals(200, outcome.httpStatus)
+        val added = outcome as SelectedAddOutcome.Added
+        assertEquals(SIZE - SIZE_B, added.selectedBytes) // FILE_A + FILE_C
+        assertEquals(1, added.unselectedCount)
+        assertEquals(1, registrarCalls)
+        assertEquals(setOf(FILE_B), registeredPaths)
+        assertEquals("magnet:?xt=urn:btih:$HASH&dn=Show%20S01%20%28720p%29", lastMagnet)
+    }
+
+    @Test
+    fun addSelected_selectedFieldUnknownPathIsRejected() {
+        val outcome = handler(registrar = recordingRegistrar)
+            .addSelected(HASH, emptyList(), 600_000, selectedPaths = listOf("nope.mkv", FILE_C))
+        assertEquals(400, outcome.httpStatus)
+        assertEquals(
+            """{"ok":false,"error":"bad_selection","detail":"unknown_path:nope.mkv"}""",
+            outcome.toJson())
+        assertNull(lastMagnet)
+        assertEquals(0, registrarCalls)
+    }
+
+    @Test
+    fun addSelected_selectedFieldEmptyIsRejected() {
+        for (paths in listOf(emptyList<String>(), listOf("", "  "))) {
+            val outcome = handler().addSelected(HASH, emptyList(), 600_000, selectedPaths = paths)
+            assertEquals(400, outcome.httpStatus)
+            assertEquals(
+                """{"ok":false,"error":"bad_selection","detail":"empty"}""",
+                outcome.toJson())
+        }
+    }
+
+    @Test
+    fun addSelected_selectedFieldCoveringEveryFileSkipsTheWatch() {
+        // Selecting every file is a valid selection, not an error: the complement
+        // is empty, so the magnet goes out and nothing is registered for the watch
+        // (the page's `selection-status` poll then reports `state:"none"`).
+        val outcome = handler(registrar = recordingRegistrar).addSelected(
+            HASH, emptyList(), 600_000, selectedPaths = listOf(FILE_A, FILE_B, FILE_C))
+        assertEquals(200, outcome.httpStatus)
+        val added = outcome as SelectedAddOutcome.Added
+        assertEquals(0, added.unselectedCount)
+        assertEquals(SIZE, added.selectedBytes)
+        assertEquals(0, registrarCalls)
+        assertEquals("magnet:?xt=urn:btih:$HASH&dn=Show%20S01%20%28720p%29", lastMagnet)
+    }
+
+    @Test
+    fun addSelected_selectedFieldIsCapped() {
+        val outcome = handler().addSelected(
+            HASH, emptyList(), 600_000, selectedPaths = (0..200_000).map { "f$it" })
+        assertEquals(400, outcome.httpStatus)
+        assertEquals(
+            """{"ok":false,"error":"bad_selection","detail":"too_many"}""", outcome.toJson())
+    }
+
     private fun bytes40(hex: String): ByteArray = ByteArray(20) { i ->
         hex.substring(2 * i, 2 * i + 2).toInt(16).toByte()
     }

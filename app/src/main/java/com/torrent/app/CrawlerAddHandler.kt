@@ -250,6 +250,13 @@ class CrawlerAddHandler(
      * and the resulting `files-unwanted` is applied by the watcher once
      * transmission has the metadata (scheduled through [selectionRegistrar]).
      *
+     * [selectedPaths] is the mode-NONE wire: the paths the user CHECKED, from
+     * which the deselection is derived as its complement in the DB's file list
+     * (a whole-torrent "select none" then costs three paths instead of 27 598).
+     * A null value (the default) keeps the legacy [unselectedPaths] semantics,
+     * so every pre-existing caller is unchanged. Selecting every file is a valid
+     * selection: the complement is empty, so the magnet is added with no watch.
+     *
      * The free-space gate uses the **selected** total, so a torrent whose whole
      * size exceeds the drive's free space is still addable when the picked subset
      * fits.
@@ -258,6 +265,7 @@ class CrawlerAddHandler(
         hashHex: String,
         unselectedPaths: List<String>,
         timeoutMs: Long,
+        selectedPaths: List<String>? = null,
     ): SelectedAddOutcome {
         if (!HASH_REX.matches(hashHex)) return SelectedAddOutcome.BadHash
 
@@ -281,15 +289,39 @@ class CrawlerAddHandler(
         }
         if (allFiles.isNullOrEmpty()) return SelectedAddOutcome.NotFound
 
-        if (unselectedPaths.isEmpty() || unselectedPaths.all { it.isBlank() }) {
-            return SelectedAddOutcome.BadSelection("empty")
-        }
-        if (unselectedPaths.size > MAX_UNSELECTED_PATHS) {
-            return SelectedAddOutcome.BadSelection("too_many")
-        }
-        val unselected = unselectedPaths.toSet()
-        if (allFiles.all { it.first in unselected }) {
-            return SelectedAddOutcome.BadSelection("no_files_selected")
+        val unselected: Set<String> = if (selectedPaths == null) {
+            // Legacy mode-ALL wire: the body names what the user UNCHECKED, so it
+            // must be a strict subset of the torrent's files.
+            if (unselectedPaths.isEmpty() || unselectedPaths.all { it.isBlank() }) {
+                return SelectedAddOutcome.BadSelection("empty")
+            }
+            if (unselectedPaths.size > MAX_UNSELECTED_PATHS) {
+                return SelectedAddOutcome.BadSelection("too_many")
+            }
+            val set = unselectedPaths.toSet()
+            if (allFiles.all { it.first in set }) {
+                return SelectedAddOutcome.BadSelection("no_files_selected")
+            }
+            set
+        } else {
+            // Mode-NONE wire: the body names what the user CHECKED, so the
+            // deselection is its complement in the DB's file list. Validating the
+            // inclusion side is what makes a bad path fail by name instead of
+            // vanishing into a 27 598-entry complement.
+            if (selectedPaths.isEmpty() || selectedPaths.all { it.isBlank() }) {
+                return SelectedAddOutcome.BadSelection("empty")
+            }
+            if (selectedPaths.size > MAX_UNSELECTED_PATHS) {
+                return SelectedAddOutcome.BadSelection("too_many")
+            }
+            val wanted = selectedPaths.toSet()
+            val allPaths = HashSet<String>(allFiles.size * 2)
+            for (f in allFiles) allPaths.add(f.first)
+            val unknown = selectedPaths.firstOrNull { it !in allPaths }
+            if (unknown != null) return SelectedAddOutcome.BadSelection("unknown_path:$unknown")
+            val complement = LinkedHashSet<String>()
+            for (f in allFiles) if (f.first !in wanted) complement.add(f.first)
+            complement // empty means "every file selected" == the whole torrent
         }
         // The selected total doubles as the path validation: selectedTotalBytes
         // returns null only for a path that is not in the DB's file list.
@@ -311,16 +343,20 @@ class CrawlerAddHandler(
 
         // A registrar failure must not fail the add — the torrent is already in
         // transmission, and the watcher's own pause guard is the transmission-side
-        // `wanted` check.
-        try {
-            selectionRegistrar?.register(
-                hashHex,
-                name,
-                unselected,
-                timeoutMs.coerceIn(MIN_SELECTION_TIMEOUT_MS, MAX_SELECTION_TIMEOUT_MS),
-            )
-        } catch (e: Exception) {
-            Log.w(TAG, "selection register failed: ${e.message}")
+        // `wanted` check. An empty deselection (every file selected) has nothing
+        // to apply, so no watch is scheduled and `selection-status` reports
+        // `state:"none"` for it.
+        if (unselected.isNotEmpty()) {
+            try {
+                selectionRegistrar?.register(
+                    hashHex,
+                    name,
+                    unselected,
+                    timeoutMs.coerceIn(MIN_SELECTION_TIMEOUT_MS, MAX_SELECTION_TIMEOUT_MS),
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "selection register failed: ${e.message}")
+            }
         }
         return SelectedAddOutcome.Added(r.duplicate, name, checked, selectedBytes, unselected.size)
     }
@@ -399,7 +435,16 @@ class CrawlerAddHandler(
 
         private const val MAGNET_PREFIX = "magnet:?xt=urn:btih:"
 
-        /** Upper bound on a deselection body (the page can only send loaded rows). */
+        /**
+         * Upper bound on either path array of an `add-selected` body. Both are
+         * whole-torrent-scoped now: a mode-ALL body carries the UNCHECKED paths
+         * and a mode-NONE body the CHECKED ones, so neither is a loaded-row
+         * subset any more. The route's 4 MiB `MAX_SELECTION_BODY_BYTES` binds
+         * first for any realistic torrent — 27 598 paths is ~1.4 MB (3x
+         * headroom) and ~75 000 paths would already be refused by the body cap —
+         * so `too_many` is reachable only by a non-page client. The cap stays as
+         * the loud backstop.
+         */
         private const val MAX_UNSELECTED_PATHS = 200_000
 
         /** Selection-watch timeout bounds; the route applies the 600 s default. */

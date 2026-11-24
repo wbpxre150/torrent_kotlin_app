@@ -69,6 +69,43 @@ class ControlServerHelpersTest {
         assertTrue(ControlServer.selectionBodyTooLarge("4194305"))
         assertTrue(ControlServer.selectionBodyTooLarge("99999999999"))
     }
+    @Test fun selectionPaths_readsTheUnselectedField() {
+        // Both wire fields are read by the same helper: mode ALL sends the paths the
+        // user UNCHECKED, mode NONE the ones they CHECKED. An absent/non-array field
+        // still yields an empty list, so the handler stays the single rejecting place;
+        // non-string members are read as `toString()` and a JSON null is skipped.
+        val body = org.json.JSONObject(
+            """{"unselected":["Season 1/E01.mkv","sample.nfo"],"timeoutMs":600000}""")
+        assertEquals(
+            listOf("Season 1/E01.mkv", "sample.nfo"),
+            ControlServer.selectionPaths(body, "unselected"))
+        assertEquals(emptyList<String>(), ControlServer.selectionPaths(body, "selected"))
+
+        assertTrue(ControlServer.selectionPaths(org.json.JSONObject("{}"), "unselected").isEmpty())
+        assertTrue(
+            ControlServer.selectionPaths(
+                org.json.JSONObject("""{"unselected":"not-an-array"}"""), "unselected").isEmpty())
+
+        val mixed = org.json.JSONObject("""{"unselected":[7,null,"sample.nfo"]}""")
+        assertEquals(listOf("7", "sample.nfo"), ControlServer.selectionPaths(mixed, "unselected"))
+    }
+
+    @Test fun selectionPaths_readsTheSelectedField() {
+        val body = org.json.JSONObject("""{"selected":["sample.nfo","Season 1/E01.mkv"]}""")
+        assertEquals(
+            listOf("sample.nfo", "Season 1/E01.mkv"),
+            ControlServer.selectionPaths(body, "selected"))
+        assertEquals(emptyList<String>(), ControlServer.selectionPaths(body, "unselected"))
+
+        assertTrue(ControlServer.selectionPaths(org.json.JSONObject("{}"), "selected").isEmpty())
+        assertTrue(
+            ControlServer.selectionPaths(
+                org.json.JSONObject("""{"selected":{"a":1}}"""), "selected").isEmpty())
+
+        val mixed = org.json.JSONObject("""{"selected":[null,"sample.nfo",12]}""")
+        assertEquals(listOf("sample.nfo", "12"), ControlServer.selectionPaths(mixed, "selected"))
+    }
+
     @Test fun parseCookieToken_returnsNullWhenAbsent() {
         assertNull(ControlServer.parseCookieToken("other=1"))
         assertNull(ControlServer.parseCookieToken(null))

@@ -526,6 +526,9 @@ class ControlServer(
                     // applies `files-unwanted` once transmission has the
                     // metadata. Same thin-adapter shape as the route above; auth
                     // is the route interceptor, there is no second check.
+                    // `selected` is the mirror image (mode NONE): the paths the
+                    // user CHECKED, complemented here against the same DB file
+                    // list by the handler. The two fields are XOR by contract.
                     post("api/transmission/add-selected") {
                         val handler = addHandler
                         if (handler == null) {
@@ -563,16 +566,32 @@ class ControlServer(
                                     ContentType.Application.Json,
                                     HttpStatusCode.BadRequest,
                                 )
+                            } else if (body.has("unselected") && body.has("selected")) {
+                                // The two fields are XOR by contract: `unselected`
+                                // is mode ALL's deselection, `selected` is mode
+                                // NONE's inclusion list. Both at once is ambiguous.
+                                call.respondText(
+                                    """{"ok":false,"error":"bad_request:body"}""",
+                                    ContentType.Application.Json,
+                                    HttpStatusCode.BadRequest,
+                                )
                             } else {
                                 val outcome = handler.addSelected(
                                     hashHex = call.request.queryParameters["hash"] ?: "",
-                                    // A missing/empty `unselected` array is passed
-                                    // through as an empty list: the handler's
-                                    // `BadSelection("empty")` is the one place
-                                    // that decides it.
-                                    unselectedPaths = selectionPaths(body),
+                                    // A missing/empty array is passed through as an
+                                    // empty list: the handler's `BadSelection("empty")`
+                                    // is the one place that decides it.
+                                    unselectedPaths = selectionPaths(body, "unselected"),
                                     timeoutMs = body.optLong(
                                         "timeoutMs", SELECTION_TIMEOUT_MS_DEFAULT),
+                                    // Absent (`null`) keeps the legacy deselection
+                                    // semantics exactly; a present-but-empty array
+                                    // reaches the handler's `empty` rejection.
+                                    selectedPaths = if (body.has("selected")) {
+                                        selectionPaths(body, "selected")
+                                    } else {
+                                        null
+                                    },
                                 )
                                 call.respondText(
                                     outcome.toJson(),
@@ -2827,15 +2846,15 @@ class ControlServer(
         internal const val MAX_SELECTION_BODY_BYTES = 4L * 1024L * 1024L
 
         /**
-         * The `unselected` field of an `add-selected` body as a list of paths.
-         * Absent, non-array or empty yields an empty list on purpose: the
-         * handler's `BadSelection("empty")` is the single place that rejects it,
-         * so the route never duplicates that rule. Non-string members are read
-         * as their `toString()` (a numeric path is nonsense either way, and the
-         * handler then fails it as `unknown_path:`).
+         * One of an `add-selected` body's path arrays (`field` is `unselected` or
+         * `selected`) as a list of paths. Absent, non-array or empty yields an
+         * empty list on purpose: the handler's `BadSelection("empty")` is the
+         * single place that rejects it, so the route never duplicates that rule.
+         * Non-string members are read as their `toString()` (a numeric path is
+         * nonsense either way, and the handler then fails it as `unknown_path:`).
          */
-        internal fun selectionPaths(body: org.json.JSONObject): List<String> {
-            val arr = body.optJSONArray("unselected") ?: return emptyList()
+        internal fun selectionPaths(body: org.json.JSONObject, field: String): List<String> {
+            val arr = body.optJSONArray(field) ?: return emptyList()
             val out = ArrayList<String>(arr.length())
             for (i in 0 until arr.length()) {
                 val v = arr.opt(i)
