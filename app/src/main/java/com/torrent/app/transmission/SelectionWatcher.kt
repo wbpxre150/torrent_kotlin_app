@@ -328,7 +328,20 @@ class SelectionWatcher internal constructor(
                 false
             }
             if (ok) return true
-            if (attempt < pauseAttempts) sleeper(pollMs)
+            if (attempt < pauseAttempts) {
+                // The retry sleep must never throw. This loop is also reached from runWatch's
+                // catch body (via finishAfterPause), and an exception thrown inside a catch
+                // block is not caught by it: an InterruptedException here would escape
+                // runWatch after the finally and be uncaught in a daemon thread, which kills
+                // the app process on Android. A tolerant sleep turns the interrupt into the
+                // ordinary "pause not confirmed" outcome instead.
+                try {
+                    sleeper(pollMs)
+                } catch (t: Throwable) {
+                    log("pause retry for ${entry.hashHex} was interrupted: ${t.message}")
+                    return false
+                }
+            }
         }
         log("could not pause ${entry.hashHex} after $pauseAttempts attempts")
         return false

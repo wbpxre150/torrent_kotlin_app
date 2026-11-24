@@ -135,6 +135,22 @@ class SelectionWatcherTest {
         throw AssertionError("the watcher never polled torrent-get")
     }
 
+    /**
+     * Runs [body] with a capturing default uncaught-exception handler installed, so anything a
+     * watch thread lets escape is observed instead of killing the test JVM silently.
+     */
+    private fun withUncaughtCapture(body: () -> Unit): List<Throwable> {
+        val captured = CopyOnWriteArrayList<Throwable>()
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { _, e -> captured.add(e) }
+        try {
+            body()
+        } finally {
+            Thread.setDefaultUncaughtExceptionHandler(previous)
+        }
+        return captured.toList()
+    }
+
     // ------------------------------------------------------------------ tests
 
     @Test fun applied_sendsThePlannerIndicesAndClearsTheIntent() {
@@ -346,6 +362,56 @@ class SelectionWatcherTest {
         assertTrue(rpc.pauseCalls.isEmpty())
         assertEquals(1, store.all().size)
         assertEquals(SelectionStatus.STATE_PENDING, w.status(hash).state)
+    }
+
+    @Test fun interruptInThePauseRetrySleep_isSwallowedWhileCurrent() {
+        // An already-expired deadline reaches pauseTorrent without any polling sleep, so the
+        // only sleeper call here is the pause retry. Before the tolerant sleep this interrupt
+        // escaped runWatch's catch body (an exception thrown inside a catch is not caught by
+        // it) and died uncaught on the daemon thread — a process kill on Android.
+        val rpc = FakeRpc()
+        rpc.pauseResult = false
+        val w = watcher(rpc, sleeper = { throw InterruptedException("pause retry interrupted") })
+
+        val uncaught = withUncaughtCapture {
+            w.register(hash, name, setOf("b.mkv"), 0L)
+
+            val status = awaitState(w, hash, SelectionStatus.STATE_ERROR)
+            assertTrue(status.detail.contains("pause was not confirmed"))
+            assertEquals(listOf(hash to true), rpc.pauseCalls.toList())
+            assertEquals(emptyList<PendingSelection>(), store.all())
+        }
+        assertEquals(emptyList<Throwable>(), uncaught)
+    }
+
+    @Test fun interruptInThePauseRetrySleepAfterStop_keepsThePersistedIntent() {
+        val rpc = FakeRpc() // metadata-less sticky snapshot: the loop parks in the sleeper
+        rpc.pauseResult = false
+        val sleepThreads = CopyOnWriteArrayList<Thread>()
+        val w = watcher(
+            rpc,
+            sleeper = {
+                sleepThreads.add(Thread.currentThread())
+                throw InterruptedException("interrupted")
+            },
+        )
+        // The single pause attempt runs while the watcher is still current and stops it; the
+        // retry sleep then fails with the watcher genuinely stopped, so the failed attempt must
+        // stay the only pause call and the intent must survive for resumePending().
+        rpc.onPause = { watcher!!.stop() }
+
+        val uncaught = withUncaughtCapture {
+            w.register(hash, name, setOf("b.mkv"), 600_000L)
+
+            val end = System.nanoTime() + 5_000L * 1_000_000
+            while (sleepThreads.size < 2 && System.nanoTime() < end) Thread.sleep(1)
+            sleepThreads.first().join(5_000L)
+
+            assertEquals(listOf(hash to true), rpc.pauseCalls.toList())
+            assertEquals(1, store.all().size)
+            assertEquals(SelectionStatus.STATE_PENDING, w.status(hash).state)
+        }
+        assertEquals(emptyList<Throwable>(), uncaught)
     }
 
     @Test fun start_reArmsTheWatcherAfterAGracefulStop() {
