@@ -370,6 +370,31 @@ class SelectionWatcherTest {
         assertEquals(SelectionStatus.NONE, status)
     }
 
+    @Test fun clearStatus_dropsTheDisplayButNeverThePersistedIntent() {
+        val rpc = FakeRpc()
+        rpc.sticky = snapshot("a.mkv", "b.mkv")
+        rpc.gate = CountDownLatch(1)
+        val w = watcher(rpc)
+
+        w.register(hash, name, setOf("b.mkv"), 600_000L)
+        awaitCall(rpc)
+
+        // The clear is a display-only operation: a persisted intent is not its business,
+        // and the parked loop is left to re-publish its own state.
+        w.clearStatus(hash)
+        assertEquals(SelectionStatus.STATE_NONE, w.status(hash).state)
+        assertEquals(1, store.all().size)
+
+        // The criterion-5 shape: once a subset add of this hash has reported `applied`, a
+        // whole-torrent re-add in the SAME session must be able to report `none` — the
+        // status map is never pruned on a timer, so this route call is the only clear.
+        rpc.gate?.countDown()
+        awaitState(w, hash, SelectionStatus.STATE_APPLIED)
+        w.clearStatus(hash)
+        assertEquals(SelectionStatus.NONE, w.status(hash))
+        assertEquals(emptyList<PendingSelection>(), store.all())
+    }
+
     @Test fun watcherServesAsTheAddHandlersSelectionRegistrar() {
         val rpc = FakeRpc()
         rpc.sticky = snapshot("a.mkv", "b.mkv")

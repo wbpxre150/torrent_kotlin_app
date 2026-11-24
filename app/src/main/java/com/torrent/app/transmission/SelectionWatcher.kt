@@ -166,6 +166,19 @@ class SelectionWatcher internal constructor(
     /** Current status; an unwatched hash reports [SelectionStatus.NONE]. */
     fun status(hashHex: String): SelectionStatus = statuses[hashHex] ?: SelectionStatus.NONE
 
+    /**
+     * Drops the in-memory status for [hashHex], so the dashboard reports `none` again.
+     *
+     * The single semantic clear point is a **whole-torrent** add of the same hash: that add
+     * supersedes any earlier subset-watch display, so a stale "File selection applied"
+     * banner cannot survive it (the status map is otherwise never pruned on a timer).
+     * Only [statuses] is touched — the persisted store is deliberately untouched, and a
+     * still-running loop is left alone (it re-publishes its own state). Unknown hash: no-op.
+     */
+    fun clearStatus(hashHex: String) {
+        statuses.remove(hashHex)
+    }
+
     /** Stops every watch loop; idempotent. A stopped watcher starts no new loops. */
     fun stop() {
         stopped = true

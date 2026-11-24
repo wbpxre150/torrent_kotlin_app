@@ -1,6 +1,7 @@
 package com.torrent.app
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -53,6 +54,20 @@ class ControlServerHelpersTest {
     }
     @Test fun parseCookieToken_findsControlToken() {
         assertEquals("xyz", ControlServer.parseCookieToken("control_token=xyz; other=1"))
+    }
+
+    @Test fun selectionBodyTooLarge_boundsTheAddSelectedBodyBeforeItIsRead() {
+        // The route refuses a declared body above 4 MiB without `receiveText()`, so the
+        // handler's 200 000-path cap is not the first bound. The worst legitimate body
+        // (27 598 paths) is ~1.4 MB, so the cap keeps headroom for every real request and
+        // a missing/unparseable header keeps the pre-guard behaviour (read, then parse).
+        assertFalse(ControlServer.selectionBodyTooLarge(null))
+        assertFalse(ControlServer.selectionBodyTooLarge(""))
+        assertFalse(ControlServer.selectionBodyTooLarge("not-a-number"))
+        assertFalse(ControlServer.selectionBodyTooLarge("1024"))
+        assertFalse(ControlServer.selectionBodyTooLarge("4194304"))
+        assertTrue(ControlServer.selectionBodyTooLarge("4194305"))
+        assertTrue(ControlServer.selectionBodyTooLarge("99999999999"))
     }
     @Test fun parseCookieToken_returnsNullWhenAbsent() {
         assertNull(ControlServer.parseCookieToken("other=1"))

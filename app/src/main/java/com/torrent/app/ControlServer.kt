@@ -495,7 +495,18 @@ class ControlServer(
                                 HttpStatusCode.ServiceUnavailable,
                             )
                         } else {
-                            val outcome = handler.add(call.request.queryParameters["hash"] ?: "")
+                            val hash = call.request.queryParameters["hash"] ?: ""
+                            val outcome = handler.add(hash)
+                            // A whole-torrent add of a hash supersedes any earlier subset
+                            // watch display for it: the status map is never pruned on a
+                            // timer, so without this a stale "File selection applied"
+                            // banner would outlive the re-add for the rest of the
+                            // process (criterion 5). Only `Added` clears — a refused add
+                            // leaves the hash's state alone — and the persisted intent is
+                            // not touched (a live watch re-publishes its own state).
+                            if (outcome is CrawlerAddOutcome.Added) {
+                                selectionWatcher.clearStatus(hash)
+                            }
                             call.respondText(
                                 outcome.toJson(),
                                 ContentType.Application.Json,
@@ -524,6 +535,20 @@ class ControlServer(
                                 HttpStatusCode.ServiceUnavailable,
                             )
                         } else {
+                            // Bounding the buffer before it is allocated: a body whose
+                            // declared length exceeds MAX_SELECTION_BODY_BYTES is refused
+                            // without `receiveText()`, so the handler's 200 000-path cap is
+                            // not the first bound to run. A missing/!numeric Content-Length
+                            // keeps the pre-guard behaviour (read, then parse).
+                            val declared = call.request.headers[HttpHeaders.ContentLength]
+                            if (selectionBodyTooLarge(declared)) {
+                                call.respondText(
+                                    """{"ok":false,"error":"bad_request:body"}""",
+                                    ContentType.Application.Json,
+                                    HttpStatusCode.BadRequest,
+                                )
+                                return@post
+                            }
                             // A blank or unparseable body is a request error, not
                             // an empty selection: it never reaches the handler.
                             val body: org.json.JSONObject? = try {
@@ -2794,6 +2819,14 @@ class ControlServer(
         internal const val SELECTION_TIMEOUT_MS_DEFAULT = 600_000L
 
         /**
+         * Upper bound on an `add-selected` request body, enforced against the declared
+         * `Content-Length` before the body is read. The worst legitimate body is the
+         * 27 598-path stress torrent (~1.4 MB), so 4 MiB keeps ~3x headroom while
+         * bounding the buffer far below `CrawlerAddHandler`'s 200 000-path cap.
+         */
+        internal const val MAX_SELECTION_BODY_BYTES = 4L * 1024L * 1024L
+
+        /**
          * The `unselected` field of an `add-selected` body as a list of paths.
          * Absent, non-array or empty yields an empty list on purpose: the
          * handler's `BadSelection("empty")` is the single place that rejects it,
@@ -2809,6 +2842,16 @@ class ControlServer(
                 if (v != null && v != org.json.JSONObject.NULL) out.add(v.toString())
             }
             return out
+        }
+
+        /**
+         * True when an `add-selected` body's declared `Content-Length` exceeds
+         * [MAX_SELECTION_BODY_BYTES]. A missing or non-numeric header reports false, so
+         * such a request keeps the pre-guard behaviour: read the body, then parse it.
+         */
+        internal fun selectionBodyTooLarge(contentLength: String?): Boolean {
+            val declared = contentLength?.toLongOrNull() ?: return false
+            return declared > MAX_SELECTION_BODY_BYTES
         }
 
         /**
