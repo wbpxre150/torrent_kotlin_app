@@ -172,6 +172,11 @@ class SafStorageGateway(
     override fun mkdirs(relPath: String): Boolean {
         val n = SafPaths.normalize(relPath)
         if (n.isEmpty()) return true
+        if (resolveOrCreateDir(n) != null) return true
+        // A create that came back deduped is deleted and rejected above. The same
+        // transient provider failure that produced it can also have hidden the real
+        // directory from the resolve walk, so retry the resolve once before reporting
+        // the error to the daemon — the second walk is a fresh children query.
         return resolveOrCreateDir(n) != null
     }
 
@@ -670,7 +675,32 @@ class SafStorageGateway(
             resolveUri(n)?.let { return it }
             val created = DocumentsContract.createDocument(
                 resolver, parentUri, DocumentsContract.Document.MIME_TYPE_DIR, leaf)
-            if (created != null) { cache[n] = created; result = created }
+                ?: return null
+            // Same provider-name contract as ensureDocument, and it matters more here: a
+            // transient miss in resolveUri (a failed children query yields null) reaches
+            // this create, and ExternalStorageProvider then answers a duplicate request
+            // with a " (1)" directory. Accepting it caches the phantom directory under the
+            // requested path, so every later write for the real one lands inside it:
+            // transmission "downloads" into it while FTP and the next process resolve the
+            // real one — silent, unrecoverable data loss (files present, nothing sees them).
+            // Transliteration is an alias; a dedup suffix is a collision: delete it and fail
+            // loudly so the caller retries instead of writing into the phantom.
+            val actualName = resolver.query(
+                created,
+                arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
+                null, null, null)?.use { c -> if (c.moveToFirst() && !c.isNull(0)) c.getString(0) else null }
+            if (actualName != null && actualName != leaf) {
+                if (SafNames.isAliasFor(leaf, actualName)) {
+                    Log.w(TAG, "mkdirs: '$leaf' stored as '$actualName' (FAT-illegal char transliterated; path '$n')")
+                } else {
+                    Log.e(TAG, "mkdirs: name collision; requested '$leaf' got '$actualName' (path '$n')")
+                    try { DocumentsContract.deleteDocument(resolver, created) } catch (_: Exception) {}
+                    cache.remove(n)
+                    return null
+                }
+            }
+            cache[n] = created
+            result = created
         } catch (e: Exception) { Log.e(TAG, "mkdir create: ${e.message}") }
         finally {
             lock.unlock()
