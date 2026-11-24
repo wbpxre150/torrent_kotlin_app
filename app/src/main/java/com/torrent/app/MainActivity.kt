@@ -52,8 +52,9 @@ class MainActivity : ComponentActivity() {
     // this needs no service. `by lazy` rather than a plain initialiser: property initialisers
     // run before the activity is attached, and ConfigStore needs the context. The first read
     // is the `collectAsState` inside `setContent`, i.e. after `onCreate`.
+    private val configStore by lazy { ConfigStore(this) }
     private val wizardCompleted by lazy {
-        MutableStateFlow(ConfigStore(this).load().wizardCompleted)
+        MutableStateFlow(configStore.load().wizardCompleted)
     }
     private val serviceState = MutableStateFlow<ServiceState>(ServiceState.Stopped)
     private var authToken = MutableStateFlow("")
@@ -154,6 +155,10 @@ class MainActivity : ComponentActivity() {
                         WizardFlow(
                             safStatus = safStatus.collectAsState().value,
                             boundService = boundService,
+                            // The in-progress form is persisted here on every change: a
+                            // reclaimed activity or a killed process resumes the wizard on the
+                            // same step instead of restarting it on step 1.
+                            draftStore = configStore,
                             onGrantUsb = { usbTreeLauncher.launch(null) },
                             onFinished = { wizardCompleted.value = true },
                         )

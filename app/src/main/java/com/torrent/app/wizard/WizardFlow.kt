@@ -23,6 +23,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -35,6 +36,7 @@ import com.torrent.app.config.ConfigValidator
 import com.torrent.app.config.CrawlerTaxonomy
 import com.torrent.app.config.FtpSettings
 import com.torrent.app.config.TransmissionSettings
+import com.torrent.app.config.WizardDraftStore
 import com.torrent.app.config.WizardSubmit
 import com.torrent.app.storage.SafStatus
 import com.torrent.app.ui.theme.TorrentPalette
@@ -44,10 +46,11 @@ import com.torrent.app.ui.theme.TorrentPalette
  * that step's form and a Back/Next/Skip row.
  *
  * The form state lives in the activity-scoped [WizardFormViewModel] (so a rotation keeps
- * every value) and the restore state in [WizardRestoreViewModel]. This file owns the
- * actions: Next validates and persists exactly one section, Skip leaves that section's
- * stored values untouched, "Start download" on the last step persists the restore inputs
- * and hands over to the dedicated [RestoreProgressScreen], and "Finish without
+ * every value, and the draft it writes to [draftStore] keeps them across an activity
+ * recreation or a process kill) and the restore state in [WizardRestoreViewModel]. This file
+ * owns the actions: Next validates and persists exactly one section, Skip leaves that
+ * section's stored values untouched, "Start download" on the last step persists the restore
+ * inputs and hands over to the dedicated [RestoreProgressScreen], and "Finish without
  * downloading" completes setup without a download.
  *
  * The wizard ends exactly once: [completeSetup] persists `wizardCompleted`, starts the
@@ -58,6 +61,7 @@ import com.torrent.app.ui.theme.TorrentPalette
 fun WizardFlow(
     safStatus: SafStatus?,
     boundService: DaemonService.LocalBinder?,
+    draftStore: WizardDraftStore,
     onGrantUsb: () -> Unit,
     onFinished: () -> Unit,
 ) {
@@ -66,9 +70,21 @@ fun WizardFlow(
     // reads `wizardCompleted` synchronously from the store, so a first-run wizard is on screen
     // from the very first frame. The effect below therefore seeds the form the moment a config
     // exists — once, and only into fields the user has not touched (WizardFormViewModel).
-    val form = viewModel<WizardFormViewModel> { WizardFormViewModel(boundService?.loadConfig()) }
+    val form = viewModel<WizardFormViewModel> {
+        WizardFormViewModel(boundService?.loadConfig(), draftStore)
+    }
     LaunchedEffect(boundService) { form.seedIfNeeded(boundService?.loadConfig()) }
     val restoreVm = viewModel<WizardRestoreViewModel>()
+
+    // Every edit goes to the draft store, so leaving the app mid-setup — to copy the R2
+    // credentials out of a password manager, or because the OS reclaimed this activity or the
+    // whole process while it was stopped — resumes on the same step with the same values
+    // instead of restarting on step 1 with an empty form. `snapshotFlow` observes exactly the
+    // state `draft()` reads, and the store writes with `apply()`, so this is one small batched
+    // prefs write per edit.
+    LaunchedEffect(form) {
+        snapshotFlow { form.draft() }.collect { form.persistDraft(it) }
+    }
 
     var screen by form.screen
     var restoreStatus by restoreVm.restoreStatus
@@ -90,12 +106,15 @@ fun WizardFlow(
      * Both exits land here — the download screen's auto-advance on SUCCESS and the explicit
      * "Finish without downloading" — so it must be ONCE-ONLY: starting the servers twice is
      * not idempotent. The guard lives in the activity-scoped ViewModel, so it survives a
-     * rotation but not a process death (where the wizard legitimately starts over).
+     * rotation but not a process death (where the wizard resumes from its draft).
      */
     fun completeSetup() {
         if (form.wizardFinished.value) return
         val svc = boundService ?: return
         form.wizardFinished.value = true
+        // The wizard is done: drop the draft (including any pasted R2 secret) before the main
+        // screen appears, so a later launch can never resume a finished setup.
+        form.clearDraft()
         svc.completeWizard()
         onFinished()
     }

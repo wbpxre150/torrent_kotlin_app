@@ -53,6 +53,26 @@ object WizardNav {
     fun stepIndicator(kind: WizardScreenKind): String = "Step ${stepNumber(kind)} of ${steps.size}"
 
     /**
+     * The screen as the wizard draft stores it: the 0-based step index, or [steps]`.size` for
+     * the restore progress screen. Pure and total, so a persisted draft round-trips without
+     * the store ever holding a wizard type.
+     */
+    fun screenIndex(kind: WizardScreenKind): Int = when (kind) {
+        WizardScreenKind.Progress -> steps.size
+        is WizardScreenKind.Step -> steps.indexOf(kind.step)
+    }
+
+    /**
+     * Inverse of [screenIndex]. An out-of-range token falls back to [first] instead of
+     * throwing: a draft written by a build with a different step list must not brick the
+     * wizard, it just resumes at the beginning.
+     */
+    fun screenFromIndex(index: Int): WizardScreenKind = when {
+        index == steps.size -> WizardScreenKind.Progress
+        else -> steps.getOrNull(index)?.kind ?: first
+    }
+
+    /**
      * Whether the current step may advance to the next one.
      *
      * Every step needs a clean validation state; the USB step additionally requires the

@@ -5,6 +5,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.ViewModel
 import com.torrent.app.config.AppConfig
 import com.torrent.app.config.ConfigDefaults
+import com.torrent.app.config.NoWizardDraftStore
+import com.torrent.app.config.WizardDraft
+import com.torrent.app.config.WizardDraftStore
 
 /** Fresh-install pre-check of the wizard's categories step: media only. */
 internal val WizardDefaultSaveCategories = listOf("movie", "tv", "anime", "music")
@@ -25,8 +28,12 @@ internal fun effectiveSecret(input: String, stored: String): String =
  * every value on a configuration change (rotation mid-setup wiped the form). Hoisting them
  * into an activity-scoped [ViewModel] gives the same contract as
  * [com.torrent.app.WizardRestoreViewModel]: values survive rotation via the activity's
- * `ViewModelStore` and die with the process — nothing here is persisted to disk, the steps
- * persist their own section when the user taps Next.
+ * `ViewModelStore` and die with the activity or the process. What dies with them is recovered
+ * from the [WizardDraft] the flow keeps in a [WizardDraftStore], so leaving the app mid-setup
+ * (to copy the R2 credentials out of a password manager, or because the OS reclaimed a stopped
+ * activity or the whole process) resumes on the same step with the same values instead of
+ * restarting on step 1 with an empty form. The steps still persist their own committed section
+ * when the user taps Next.
  *
  * The fields start at the same fallbacks the old `remember` initialisers used and are then
  * seeded from the stored config, which can arrive in either of two ways:
@@ -44,7 +51,10 @@ internal fun effectiveSecret(input: String, stored: String): String =
  * themselves so a composable can delegate (`var txUser by vm.txUser`) and keep writing
  * through to the same state.
  */
-class WizardFormViewModel(cfg: AppConfig? = null) : ViewModel() {
+class WizardFormViewModel(
+    cfg: AppConfig? = null,
+    private val draftStore: WizardDraftStore = NoWizardDraftStore,
+) : ViewModel() {
 
     /** The screen currently shown; the wizard starts on the USB step. */
     val screen = mutableStateOf(WizardNav.first)
@@ -100,12 +110,54 @@ class WizardFormViewModel(cfg: AppConfig? = null) : ViewModel() {
 
     // --- Seeding --------------------------------------------------------------------------
 
-    /** True once a config has been applied, so [seedIfNeeded] can only ever seed once. */
-    private var seeded: Boolean = cfg != null
+    /** True once a draft or a config has been applied, so [seedIfNeeded] seeds at most once. */
+    private var seeded: Boolean = false
 
     init {
-        // The binder was already connected: seed exactly as the old remember initialisers did.
-        cfg?.let { applySeed(it, onlyUntouched = false) }
+        // A restored draft WINS over the store: it is a complete snapshot of a form the user was
+        // already editing, so re-seeding it from the config would undo what they typed. Only when
+        // there is no draft do we seed exactly as the old remember initialisers did.
+        val restored = draftStore.loadWizardDraft()
+        when {
+            restored != null -> {
+                applyDraft(restored)
+                seeded = true
+            }
+            cfg != null -> {
+                applySeed(cfg, onlyUntouched = false)
+                seeded = true
+            }
+        }
+    }
+
+    /**
+     * Restores every field from [draft], including the step it was showing and the R2 secret the
+     * user had pasted but not yet committed by a Next tap.
+     */
+    private fun applyDraft(draft: WizardDraft) {
+        screen.value = WizardNav.screenFromIndex(draft.screenIndex)
+        txUser.value = draft.txUser
+        txPass.value = draft.txPass
+        peerPort.value = draft.peerPort
+        dlSubpath.value = draft.dlSubpath
+        ftpUser.value = draft.ftpUser
+        ftpPass.value = draft.ftpPass
+        ftpPort.value = draft.ftpPort
+        ftpWifiOnly.value = draft.ftpWifiOnly
+        crawlerEnabled.value = draft.crawlerEnabled
+        crawlerAdultDrop.value = draft.crawlerAdultDrop
+        saveCategories.value = draft.saveCategories
+        r2Endpoint.value = draft.r2Endpoint
+        r2Bucket.value = draft.r2Bucket
+        r2ObjectKey.value = draft.r2ObjectKey
+        r2AccessKeyId.value = draft.r2AccessKeyId
+        r2SecretAccessKey.value = draft.r2SecretAccessKey
+        uploadEnabled.value = draft.uploadEnabled
+        dbBackupEnabled.value = draft.dbBackupEnabled
+        r2DbBucket.value = draft.r2DbBucket
+        r2DbObjectPrefix.value = draft.r2DbObjectPrefix
+        bootstrapEnabled.value = draft.bootstrapEnabled
+        bootstrapUrl.value = draft.bootstrapUrl
     }
 
     /**
@@ -176,6 +228,44 @@ class WizardFormViewModel(cfg: AppConfig? = null) : ViewModel() {
         if (onlyUntouched && state.value != fallback) return
         state.value = stored
     }
+
+    // --- Draft persistence ----------------------------------------------------------------
+
+    /**
+     * The whole form as a [WizardDraft]. It reads every field, so the flow's
+     * `snapshotFlow { form.draft() }` observes exactly the values the draft has to keep.
+     */
+    fun draft(): WizardDraft = WizardDraft(
+        screenIndex = WizardNav.screenIndex(screen.value),
+        txUser = txUser.value,
+        txPass = txPass.value,
+        peerPort = peerPort.value,
+        dlSubpath = dlSubpath.value,
+        ftpUser = ftpUser.value,
+        ftpPass = ftpPass.value,
+        ftpPort = ftpPort.value,
+        ftpWifiOnly = ftpWifiOnly.value,
+        crawlerEnabled = crawlerEnabled.value,
+        crawlerAdultDrop = crawlerAdultDrop.value,
+        saveCategories = saveCategories.value,
+        r2Endpoint = r2Endpoint.value,
+        r2Bucket = r2Bucket.value,
+        r2ObjectKey = r2ObjectKey.value,
+        r2AccessKeyId = r2AccessKeyId.value,
+        r2SecretAccessKey = r2SecretAccessKey.value,
+        uploadEnabled = uploadEnabled.value,
+        dbBackupEnabled = dbBackupEnabled.value,
+        r2DbBucket = r2DbBucket.value,
+        r2DbObjectPrefix = r2DbObjectPrefix.value,
+        bootstrapEnabled = bootstrapEnabled.value,
+        bootstrapUrl = bootstrapUrl.value,
+    )
+
+    /** Writes [draft] to the store; the flow calls this on every change. */
+    fun persistDraft(draft: WizardDraft = draft()) { draftStore.saveWizardDraft(draft) }
+
+    /** Forgets the saved draft: the wizard is finished, so nothing is left to resume. */
+    fun clearDraft() { draftStore.clearWizardDraft() }
 
     // --- Validation ----------------------------------------------------------------------
 

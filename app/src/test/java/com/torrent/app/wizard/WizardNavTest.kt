@@ -122,4 +122,30 @@ class WizardNavTest {
         assertEquals(kind, WizardStep.USB.kind)
         assertEquals(WizardStep.USB, kind.stepOrNull)
     }
+
+    // --- Draft tokens: how a persisted wizard draft remembers the screen ------------------
+
+    @Test fun screenIndex_isTheZeroBasedStep_andTheStepCountForProgress() {
+        assertEquals(0, WizardNav.screenIndex(WizardStep.USB.kind))
+        assertEquals(4, WizardNav.screenIndex(WizardStep.DB_DOWNLOAD.kind))
+        assertEquals(WizardNav.steps.size, WizardNav.screenIndex(WizardScreenKind.Progress))
+    }
+
+    @Test fun screenIndex_roundTripsEveryScreen() {
+        WizardNav.steps.forEach { step ->
+            assertEquals(step.kind, WizardNav.screenFromIndex(WizardNav.screenIndex(step.kind)))
+        }
+        assertEquals(
+            WizardScreenKind.Progress,
+            WizardNav.screenFromIndex(WizardNav.screenIndex(WizardScreenKind.Progress)),
+        )
+    }
+
+    @Test fun screenFromIndex_fallsBackToTheFirstStepForAnUnknownToken() {
+        // A draft written by a build with a different step list must not brick the wizard: it
+        // just resumes at the beginning.
+        assertEquals(WizardNav.first, WizardNav.screenFromIndex(-1))
+        assertEquals(WizardNav.first, WizardNav.screenFromIndex(WizardNav.steps.size + 1))
+        assertEquals(WizardNav.first, WizardNav.screenFromIndex(Int.MAX_VALUE))
+    }
 }

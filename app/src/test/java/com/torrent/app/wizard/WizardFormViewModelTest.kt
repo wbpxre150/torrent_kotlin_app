@@ -6,6 +6,8 @@ import com.torrent.app.config.ConfigDefaults
 import com.torrent.app.config.CrawlerSettings
 import com.torrent.app.config.FtpSettings
 import com.torrent.app.config.TransmissionSettings
+import com.torrent.app.config.WizardDraft
+import com.torrent.app.config.WizardDraftStore
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -275,6 +277,134 @@ class WizardFormViewModelTest {
 
         assertEquals("wtest", vm.txUser.value)
     }
+
+    // --- Draft persistence: leaving the app mid-setup must not restart the wizard ---------
+
+    @Test fun draft_restoresEveryFieldAndTheStepItWasShowing() {
+        // The reported bug: switching to another app to copy the R2 credentials restarted the
+        // wizard on step 1 with an empty form, because the form lived only in the ViewModel and
+        // the activity/process was reclaimed while it was stopped.
+        val vm = WizardFormViewModel(draftStore = FakeDraftStore(draftWithEveryField))
+
+        assertEquals(WizardStep.DB_DOWNLOAD.kind, vm.screen.value)
+        assertEquals("draft-tx", vm.txUser.value)
+        assertEquals("draft-txpass", vm.txPass.value)
+        assertEquals("51000", vm.peerPort.value)
+        assertEquals("media", vm.dlSubpath.value)
+        assertEquals("draft-ftp", vm.ftpUser.value)
+        assertEquals("draft-ftppass", vm.ftpPass.value)
+        assertEquals("2323", vm.ftpPort.value)
+        assertTrue(vm.ftpWifiOnly.value)
+        assertTrue(vm.crawlerEnabled.value)
+        assertTrue(vm.crawlerAdultDrop.value)
+        assertEquals(setOf("anime"), vm.saveCategories.value)
+        assertEquals("https://r2.draft", vm.r2Endpoint.value)
+        assertEquals("draft-bucket", vm.r2Bucket.value)
+        assertEquals("draft-obj", vm.r2ObjectKey.value)
+        assertEquals("DRAFTKEY", vm.r2AccessKeyId.value)
+        // The pasted-but-not-yet-committed secret is the whole point of the draft.
+        assertEquals("draft-secret", vm.r2SecretAccessKey.value)
+        assertTrue(vm.uploadEnabled.value)
+        assertTrue(vm.dbBackupEnabled.value)
+        assertEquals("draft-db-bucket", vm.r2DbBucket.value)
+        assertEquals("draft-dbtest", vm.r2DbObjectPrefix.value)
+        assertTrue(vm.bootstrapEnabled.value)
+        assertEquals("https://draft/cache.gz", vm.bootstrapUrl.value)
+    }
+
+    @Test fun draft_winsOverTheStoredConfig() {
+        // The draft is a complete snapshot of a form the user was already editing: re-seeding it
+        // from the store would undo what they typed.
+        val vm = WizardFormViewModel(lateSeedConfig, FakeDraftStore(draftWithEveryField))
+
+        assertEquals("draft-tx", vm.txUser.value)
+        assertEquals("draft-secret", vm.r2SecretAccessKey.value)
+        assertEquals(WizardStep.DB_DOWNLOAD.kind, vm.screen.value)
+    }
+
+    @Test fun restoredDraft_marksTheFormSeeded_soALateSeedCannotClobberIt() {
+        val vm = WizardFormViewModel(draftStore = FakeDraftStore(draftWithEveryField))
+
+        assertFalse(vm.seedIfNeeded(lateSeedConfig))
+
+        assertEquals("draft-tx", vm.txUser.value)
+        assertEquals("draft-txpass", vm.txPass.value)
+    }
+
+    @Test fun draft_isTheWholeForm_andRoundTripsThroughTheStore() {
+        val store = FakeDraftStore()
+        val first = WizardFormViewModel(draftStore = store)
+        first.txUser.value = "typed-user"
+        first.r2SecretAccessKey.value = "typed-secret"
+        first.saveCategories.value = setOf("anime", "music")
+        first.screen.value = WizardNav.next(WizardStep.TRANSMISSION.kind)
+
+        first.persistDraft()
+
+        // A new ViewModel over the same store is exactly what an activity/process recreation
+        // produces.
+        val resumed = WizardFormViewModel(draftStore = store)
+        assertEquals(first.draft(), resumed.draft())
+        assertEquals(WizardStep.FTP.kind, resumed.screen.value)
+        assertEquals("typed-user", resumed.txUser.value)
+        assertEquals("typed-secret", resumed.r2SecretAccessKey.value)
+        assertEquals(setOf("anime", "music"), resumed.saveCategories.value)
+    }
+
+    @Test fun draft_keepsTheRestoreProgressScreen() {
+        val store = FakeDraftStore()
+        val vm = WizardFormViewModel(draftStore = store)
+        vm.screen.value = WizardScreenKind.Progress
+
+        vm.persistDraft()
+
+        assertEquals(WizardScreenKind.Progress, WizardFormViewModel(draftStore = store).screen.value)
+    }
+
+    @Test fun clearDraft_forgetsTheStoredForm() {
+        val store = FakeDraftStore(draftWithEveryField)
+        val vm = WizardFormViewModel(draftStore = store)
+
+        vm.clearDraft()
+
+        assertNull(store.loadWizardDraft())
+        // A later launch starts a fresh wizard instead of resuming a finished one.
+        assertEquals(WizardStep.USB.kind, WizardFormViewModel(draftStore = store).screen.value)
+    }
+
+    /** A store that keeps the draft in memory; the real one is [ConfigStore]'s prefs file. */
+    private class FakeDraftStore(private var draft: WizardDraft? = null) : WizardDraftStore {
+        override fun loadWizardDraft(): WizardDraft? = draft
+        override fun saveWizardDraft(draft: WizardDraft) { this.draft = draft }
+        override fun clearWizardDraft() { draft = null }
+    }
+
+    /** A draft that differs from every fallback and from [lateSeedConfig]. */
+    private val draftWithEveryField = WizardDraft(
+        screenIndex = WizardNav.screenIndex(WizardStep.DB_DOWNLOAD.kind),
+        txUser = "draft-tx",
+        txPass = "draft-txpass",
+        peerPort = "51000",
+        dlSubpath = "media",
+        ftpUser = "draft-ftp",
+        ftpPass = "draft-ftppass",
+        ftpPort = "2323",
+        ftpWifiOnly = true,
+        crawlerEnabled = true,
+        crawlerAdultDrop = true,
+        saveCategories = setOf("anime"),
+        r2Endpoint = "https://r2.draft",
+        r2Bucket = "draft-bucket",
+        r2ObjectKey = "draft-obj",
+        r2AccessKeyId = "DRAFTKEY",
+        r2SecretAccessKey = "draft-secret",
+        uploadEnabled = true,
+        dbBackupEnabled = true,
+        r2DbBucket = "draft-db-bucket",
+        r2DbObjectPrefix = "draft-dbtest",
+        bootstrapEnabled = true,
+        bootstrapUrl = "https://draft/cache.gz",
+    )
 
     /** A store whose every section differs from the fallbacks (used by the late-seed tests). */
     private val lateSeedConfig: AppConfig = ConfigDefaults.INITIAL.copy(

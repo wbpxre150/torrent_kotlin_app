@@ -3,9 +3,17 @@ package com.torrent.app.config
 import android.content.Context
 import android.content.SharedPreferences
 
-class ConfigStore(context: Context) {
+class ConfigStore(context: Context) : WizardDraftStore {
     private val prefs: SharedPreferences =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    /**
+     * The in-progress wizard draft lives in its OWN file: a finished setup clears it with one
+     * `clear()` (leaving no pasted secret behind in the config file), and an empty file means
+     * "no wizard in progress".
+     */
+    private val draftPrefs: SharedPreferences =
+        context.getSharedPreferences(DRAFT_PREFS, Context.MODE_PRIVATE)
 
     fun load(): AppConfig = AppConfig(
         wizardCompleted = prefs.getBoolean(KEY_WIZARD, false),
@@ -225,6 +233,77 @@ class ConfigStore(context: Context) {
 
     fun setWizardCompleted() { prefs.edit().putBoolean(KEY_WIZARD, true).apply() }
 
+    // --- In-progress wizard draft (see [WizardDraft]) --------------------------------------
+
+    /**
+     * The wizard form as it last stood, or null when no wizard is in progress.
+     *
+     * Every field is read with a default, so a draft that was only partially written (a process
+     * kill between two `apply()` calls) still restores the rest instead of dropping the lot.
+     */
+    override fun loadWizardDraft(): WizardDraft? {
+        if (draftPrefs.all.isEmpty()) return null
+        return WizardDraft(
+            screenIndex = draftPrefs.getInt(KEY_DRAFT_SCREEN, 0),
+            txUser = draftPrefs.getString(KEY_DRAFT_TX_USER, "") ?: "",
+            txPass = draftPrefs.getString(KEY_DRAFT_TX_PASS, "") ?: "",
+            peerPort = draftPrefs.getString(KEY_DRAFT_PEER_PORT, "") ?: "",
+            dlSubpath = draftPrefs.getString(KEY_DRAFT_DL_SUBPATH, "") ?: "",
+            ftpUser = draftPrefs.getString(KEY_DRAFT_FTP_USER, "") ?: "",
+            ftpPass = draftPrefs.getString(KEY_DRAFT_FTP_PASS, "") ?: "",
+            ftpPort = draftPrefs.getString(KEY_DRAFT_FTP_PORT, "") ?: "",
+            ftpWifiOnly = draftPrefs.getBoolean(KEY_DRAFT_FTP_WIFI_ONLY, false),
+            crawlerEnabled = draftPrefs.getBoolean(KEY_DRAFT_CRAWLER_ENABLED, false),
+            crawlerAdultDrop = draftPrefs.getBoolean(KEY_DRAFT_CRAWLER_ADULT_DROP, false),
+            // Copied: the set a SharedPreferences read returns belongs to the prefs instance.
+            saveCategories = draftPrefs.getStringSet(KEY_DRAFT_SAVE_CATEGORIES, emptySet())
+                .orEmpty().toSet(),
+            r2Endpoint = draftPrefs.getString(KEY_DRAFT_R2_ENDPOINT, "") ?: "",
+            r2Bucket = draftPrefs.getString(KEY_DRAFT_R2_BUCKET, "") ?: "",
+            r2ObjectKey = draftPrefs.getString(KEY_DRAFT_R2_OBJECT_KEY, "") ?: "",
+            r2AccessKeyId = draftPrefs.getString(KEY_DRAFT_R2_ACCESS_KEY_ID, "") ?: "",
+            r2SecretAccessKey = draftPrefs.getString(KEY_DRAFT_R2_SECRET, "") ?: "",
+            uploadEnabled = draftPrefs.getBoolean(KEY_DRAFT_UPLOAD_ENABLED, false),
+            dbBackupEnabled = draftPrefs.getBoolean(KEY_DRAFT_DB_ENABLED, false),
+            r2DbBucket = draftPrefs.getString(KEY_DRAFT_R2_DB_BUCKET, "") ?: "",
+            r2DbObjectPrefix = draftPrefs.getString(KEY_DRAFT_R2_DB_OBJECT_PREFIX, "") ?: "",
+            bootstrapEnabled = draftPrefs.getBoolean(KEY_DRAFT_BOOTSTRAP_ENABLED, false),
+            bootstrapUrl = draftPrefs.getString(KEY_DRAFT_BOOTSTRAP_URL, "") ?: "",
+        )
+    }
+
+    /** Replaces the draft. Written with `apply()`: the flow calls this on every change. */
+    override fun saveWizardDraft(draft: WizardDraft) {
+        draftPrefs.edit()
+            .putInt(KEY_DRAFT_SCREEN, draft.screenIndex)
+            .putString(KEY_DRAFT_TX_USER, draft.txUser)
+            .putString(KEY_DRAFT_TX_PASS, draft.txPass)
+            .putString(KEY_DRAFT_PEER_PORT, draft.peerPort)
+            .putString(KEY_DRAFT_DL_SUBPATH, draft.dlSubpath)
+            .putString(KEY_DRAFT_FTP_USER, draft.ftpUser)
+            .putString(KEY_DRAFT_FTP_PASS, draft.ftpPass)
+            .putString(KEY_DRAFT_FTP_PORT, draft.ftpPort)
+            .putBoolean(KEY_DRAFT_FTP_WIFI_ONLY, draft.ftpWifiOnly)
+            .putBoolean(KEY_DRAFT_CRAWLER_ENABLED, draft.crawlerEnabled)
+            .putBoolean(KEY_DRAFT_CRAWLER_ADULT_DROP, draft.crawlerAdultDrop)
+            .putStringSet(KEY_DRAFT_SAVE_CATEGORIES, draft.saveCategories)
+            .putString(KEY_DRAFT_R2_ENDPOINT, draft.r2Endpoint)
+            .putString(KEY_DRAFT_R2_BUCKET, draft.r2Bucket)
+            .putString(KEY_DRAFT_R2_OBJECT_KEY, draft.r2ObjectKey)
+            .putString(KEY_DRAFT_R2_ACCESS_KEY_ID, draft.r2AccessKeyId)
+            .putString(KEY_DRAFT_R2_SECRET, draft.r2SecretAccessKey)
+            .putBoolean(KEY_DRAFT_UPLOAD_ENABLED, draft.uploadEnabled)
+            .putBoolean(KEY_DRAFT_DB_ENABLED, draft.dbBackupEnabled)
+            .putString(KEY_DRAFT_R2_DB_BUCKET, draft.r2DbBucket)
+            .putString(KEY_DRAFT_R2_DB_OBJECT_PREFIX, draft.r2DbObjectPrefix)
+            .putBoolean(KEY_DRAFT_BOOTSTRAP_ENABLED, draft.bootstrapEnabled)
+            .putString(KEY_DRAFT_BOOTSTRAP_URL, draft.bootstrapUrl)
+            .apply()
+    }
+
+    /** Drops the whole draft file, including the pasted R2 secret. */
+    override fun clearWizardDraft() { draftPrefs.edit().clear().apply() }
+
     /** FTP password falls back to the built-in default + persists on first access;
      *  a random password is only generated when the default is blank (Stage 06 behavior). */
     fun ftpPassword(): String {
@@ -337,6 +416,31 @@ class ConfigStore(context: Context) {
     companion object {
         private const val PREFS = "app_config"
         private const val KEY_WIZARD = "wizard_completed"
+        /** Dedicated file for the in-progress wizard draft (see [WizardDraft]). */
+        private const val DRAFT_PREFS = "wizard_draft"
+        private const val KEY_DRAFT_SCREEN = "screen_index"
+        private const val KEY_DRAFT_TX_USER = "tx_username"
+        private const val KEY_DRAFT_TX_PASS = "tx_password"
+        private const val KEY_DRAFT_PEER_PORT = "tx_peer_port"
+        private const val KEY_DRAFT_DL_SUBPATH = "data_subpath"
+        private const val KEY_DRAFT_FTP_USER = "ftp_username"
+        private const val KEY_DRAFT_FTP_PASS = "ftp_password"
+        private const val KEY_DRAFT_FTP_PORT = "ftp_port"
+        private const val KEY_DRAFT_FTP_WIFI_ONLY = "ftp_wifi_only"
+        private const val KEY_DRAFT_CRAWLER_ENABLED = "crawler_enabled"
+        private const val KEY_DRAFT_CRAWLER_ADULT_DROP = "crawler_adult_drop"
+        private const val KEY_DRAFT_SAVE_CATEGORIES = "crawler_save_categories"
+        private const val KEY_DRAFT_R2_ENDPOINT = "backup_r2_endpoint"
+        private const val KEY_DRAFT_R2_BUCKET = "backup_r2_bucket"
+        private const val KEY_DRAFT_R2_OBJECT_KEY = "backup_r2_object_key"
+        private const val KEY_DRAFT_R2_ACCESS_KEY_ID = "backup_r2_access_key_id"
+        private const val KEY_DRAFT_R2_SECRET = "backup_r2_secret_access_key"
+        private const val KEY_DRAFT_UPLOAD_ENABLED = "backup_upload_enabled"
+        private const val KEY_DRAFT_DB_ENABLED = "backup_db_enabled"
+        private const val KEY_DRAFT_R2_DB_BUCKET = "backup_r2_db_bucket"
+        private const val KEY_DRAFT_R2_DB_OBJECT_PREFIX = "backup_r2_db_object_prefix"
+        private const val KEY_DRAFT_BOOTSTRAP_ENABLED = "backup_bootstrap_enabled"
+        private const val KEY_DRAFT_BOOTSTRAP_URL = "backup_bootstrap_url"
         private const val KEY_DATA_SUBPATH = "data_subpath"
         private const val KEY_TX_USER = "tx_username"
         private const val KEY_TX_PASS = "tx_password"

@@ -421,4 +421,74 @@ class ConfigStoreTest {
         assertEquals(777, c.ftp.maxDownloadKiBps)
         assertEquals("keep_me", c.dataSubpath)
     }
+
+    // --- In-progress wizard draft ---------------------------------------------------------
+
+    /** The draft lives in its own prefs file, independent of the config keys. */
+    private fun draftPrefs() =
+        ApplicationProvider.getApplicationContext<Context>()
+            .getSharedPreferences("wizard_draft", Context.MODE_PRIVATE)
+
+    @Test fun loadWizardDraft_isNullWhenNoWizardIsInProgress() {
+        draftPrefs().edit().clear().apply()
+        assertNull(store().loadWizardDraft())
+    }
+
+    @Test fun saveWizardDraft_roundTripsEveryField() {
+        val draft = WizardDraft(
+            screenIndex = 4,
+            txUser = "txuser",
+            txPass = "txpass123",
+            peerPort = "51515",
+            dlSubpath = "media",
+            ftpUser = "ftpuser",
+            ftpPass = "ftppass123",
+            ftpPort = "2323",
+            ftpWifiOnly = true,
+            crawlerEnabled = true,
+            crawlerAdultDrop = true,
+            saveCategories = setOf("anime", "music"),
+            r2Endpoint = "https://acme.r2.cloudflarestorage.com",
+            r2Bucket = "cache",
+            r2ObjectKey = "bep51/x.dat.gz",
+            r2AccessKeyId = "AKID",
+            r2SecretAccessKey = "pasted-secret",
+            uploadEnabled = true,
+            dbBackupEnabled = true,
+            r2DbBucket = "dht-backup",
+            r2DbObjectPrefix = "db",
+            bootstrapEnabled = true,
+            bootstrapUrl = "https://example.com/cache.dat.gz",
+        )
+
+        store().saveWizardDraft(draft)
+
+        // Read back through a NEW store: the point is that the values are on disk, so a
+        // recreated activity or a killed process finds them again.
+        assertEquals(draft, store().loadWizardDraft())
+    }
+
+    @Test fun saveWizardDraft_replacesThePreviousDraft() {
+        val s = store()
+        s.saveWizardDraft(WizardDraft(screenIndex = 2, txUser = "first"))
+        s.saveWizardDraft(WizardDraft(screenIndex = 3, txUser = "second"))
+
+        val loaded = s.loadWizardDraft()
+        assertNotNull(loaded)
+        assertEquals(3, loaded!!.screenIndex)
+        assertEquals("second", loaded.txUser)
+    }
+
+    @Test fun clearWizardDraft_dropsEveryValueIncludingThePastedSecret() {
+        val s = store()
+        s.saveWizardDraft(WizardDraft(r2SecretAccessKey = "pasted-secret"))
+        assertNotNull(s.loadWizardDraft())
+
+        s.clearWizardDraft()
+
+        assertNull(s.loadWizardDraft())
+        assertTrue(draftPrefs().all.isEmpty())
+        // The draft file is separate from the config file: nothing was ever committed.
+        assertEquals("", s.load().backup.r2SecretAccessKey)
+    }
 }
