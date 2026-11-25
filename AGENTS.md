@@ -210,9 +210,7 @@ every `movie_kind_clf_ver >= 9`, which is why it runs **exactly once**, app forc
 pass) and the pass then relabelled all 9,144 with `updated=9144 skipped=0 failed=0 thermal_pauses=0` in
 ~29 min; log corruption count 0. The backfill's 500-row `--dump-masks` dump was byte-identical to the
 pre-write gate-P dump.
-Carried forward, unchanged: the accepted G3 `none`-recall miss (**0.7368** vs the 0.85 bar — recorded
-upstream, not waived), `classify_backfill_mode` pinned `off`, the backfill daemon not started in
-production, and the movie-kind backfill reachable only as a force-stopped one-shot.
+Carried forward, unchanged: the accepted G3 `none`-recall miss (**0.7368** vs the 0.85 bar — recorded upstream, not waived).
 **Rollback history:** `models/v10` survives only in git as reinstall-rollback history — reinstalling the
 0.2.0 APK restages v10, and masks are bit-compatible so 13-labelled rows stay readable. The device's
 `files/crawler/models/` now holds only `v15` and `v13` (`v11` was swept at the v15 install).
@@ -335,7 +333,7 @@ line — `CRAM v15 (sha 834159b642d6): N predicted, 0 load failures` — rendere
 the body does not parse, carries no `classifier.cram` object, or reports `enabled` false (the card then
 keeps its previous line). It is cached in `refreshCrawlerStats` and
 pushed over the WS frame key `cramStatsLine`; the pinned-string test lives in `ControlServerHelpersTest`
-(39 tests green). Measured on the phone: server-rendered row
+(41 tests green). Measured on the phone: server-rendered row
 `<span class="k">Classifier</span>… data-field="cramStatsLine"`, updating live.
 
 **Measured on the clean install (device b93dac74, empty DB, live DHT ingest only, versionCode 4).** G2
