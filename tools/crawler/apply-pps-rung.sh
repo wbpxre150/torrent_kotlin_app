@@ -86,7 +86,7 @@ for k in "${TVK[@]}"; do [ -n "$k" ] && add saveTvKinds "$k"; done
 add languageFilterNonLatinThreshold "$(cfg language_filter_non_latin_threshold 33)"
 flag classifierEnabled "$(cfg classifier_enabled 1)"
 add adultMode "$(cfg adult_mode tag)"
-add adultHideThreshold "$(cfg adult_hide_threshold 0.545726)"
+add adultHideThreshold "$(cfg adult_hide_threshold 0.375)"
 add bloomCapacity "$(cfg bloom_capacity 30000000)"
 add failureBloomCapacity "$(cfg failure_bloom_capacity 30000000)"
 add bloomErrorRate "$(cfg bloom_error_rate 0.001)"
