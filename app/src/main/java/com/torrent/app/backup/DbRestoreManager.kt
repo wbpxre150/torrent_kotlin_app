@@ -95,9 +95,8 @@ data class DbRestoreStatus(
  * search indexes run in the crawler's OWN native one-shot
  * (`--rebuild-fts <temp db>`, bundled SQLite 3.49.1) on the TEMP DB.
  * Only when that exits 0 is the temp DB swapped over the live one
- * ([RestoreFileOps.swapIn]). The native dump-replay tool is never
- * executed by the app any more; it stays in the binary as a manual
- * recovery tool.
+ * ([RestoreFileOps.swapIn]). The native dump-replay tool no longer
+ * exists; the app replays the dump entirely in Kotlin.
  *
  * Two guards keep a multi-hour run safe on a shared volume (plan 3, Stage 11):
  * after every chunk's COMMIT and marker write the sink gets a
@@ -410,8 +409,8 @@ class DbRestoreManager(
                 entry.sizeBytes?.let { it + (entry.sidecarSizeBytes ?: 0L) }
             }
 
-            // The import target: a temp DB next to the live one (same name the
-            // native replay used), so the final swap is a rename in one dir.
+            // The import target: a temp DB next to the live one, so the final
+            // swap is a rename in one dir.
             val work = workDir()
             val tmpDb = tempDb(work)
             // Resume only when the marker, the temp DB and the freshly listed

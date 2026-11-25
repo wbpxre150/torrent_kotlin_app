@@ -82,9 +82,9 @@ object CrawlerDbSchema {
             "    movie_kind_mask INTEGER," +
             "    movie_kind_clf_ver INTEGER," +
             // Adult classifier generation (v11): the generation that produced
-            // adult/adult_p for this row, stamped by ingest and by the token-gated
-            // adult backfill. Additive and nullable — NULL means "not scored by the
-            // adult pass yet". No index: the candidate walk reuses idx_class_cat.
+            // adult/adult_p for this row, stamped by ingest. Additive and nullable —
+            // NULL means "not scored by the ingest pass yet". No index: the
+            // candidate walk reuses idx_class_cat.
             "    adult_clf_ver INTEGER" +
             ");",
         // classifier_meta

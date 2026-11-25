@@ -11,7 +11,7 @@ package com.torrent.app.config
  */
 object CrawlerKeys {
 
-    /** Every key the C crawler's `config_load_file` accepts. */
+    /** Every non-path key the C crawler's `config_load_file` accepts — the `bep51_cache_ca_file`/`bep51_cache_ca_dir` path keys live in `PATH_KEYS` only. */
     val KNOWN_KEYS: Set<String> = setOf(
         // DHT / database / logging / process
         "dht_port", "db_path", "log_level",

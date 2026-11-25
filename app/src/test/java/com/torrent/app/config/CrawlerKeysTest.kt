@@ -77,9 +77,15 @@ class CrawlerKeysTest {
     @Test fun knownKeys_carryTheCategorySelectionAndDroppedPornFilterKeys() {
         assertTrue("save_categories must be known", "save_categories" in CrawlerKeys.KNOWN_KEYS)
         assertTrue("save_tv_kinds must be known", "save_tv_kinds" in CrawlerKeys.KNOWN_KEYS)
-        // The crawler no longer parses these (remove-porn-filter patch): a key it
-        // would ignore must not be offered as known or overridable.
-        for (key in listOf("porn_filter_enabled", "porn_filter_keyword_file")) {
+        // The crawler no longer parses these (remove-porn-filter patch, and the
+        // 2026-11 dead-config-key sweep): a key it would ignore must not be
+        // offered as known or overridable.
+        for (key in listOf(
+            "porn_filter_enabled", "porn_filter_keyword_file",
+            "max_concurrent_connections", "tcp_connect_timeout_sec",
+            "connection_timeout_sec", "max_connection_lifetime_sec",
+            "use_thread_trees"
+        )) {
             assertFalse("$key must no longer be known", key in CrawlerKeys.KNOWN_KEYS)
             assertFalse("$key must not be path-managed", key in CrawlerKeys.PATH_KEYS)
             assertFalse("$key must not be form-managed", key in CrawlerKeys.FORM_MANAGED_KEYS)
