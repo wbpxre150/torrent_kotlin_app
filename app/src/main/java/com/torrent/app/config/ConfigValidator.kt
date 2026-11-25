@@ -65,7 +65,6 @@ object ConfigValidator {
         if (s.bloomCapacity <= 0) errors.add("bloom capacity must be > 0")
         if (s.failureBloomCapacity <= 0) errors.add("failure bloom capacity must be > 0")
         errors.addAll(validateAdultMode(s.adultMode).errors)
-        errors.addAll(validateClassifyBackfillMode(s.classifyBackfillMode).errors)
         errors.addAll(validateFraction("adult hide threshold", s.adultHideThreshold))
         errors.addAll(CrawlerKeys.parseAdvanced(s.advancedOverrides).errors)
 
@@ -81,20 +80,6 @@ object ConfigValidator {
         val v = raw.trim().lowercase()
         return if (v in CrawlerKeys.ADULT_MODES) ValidationResult(true, emptyList())
         else ValidationResult(false, listOf("adult mode must be one of ${CrawlerKeys.ADULT_MODES.joinToString(", ")}"))
-    }
-
-    /**
-     * `classify_backfill_mode` is `all`, `adult` or `off`. Like `adult_mode` the C
-     * crawler compares case-sensitively and keeps the previous value on a mismatch,
-     * so the input is normalised here and by the config writer.
-     */
-    fun validateClassifyBackfillMode(raw: String): ValidationResult {
-        val v = raw.trim().lowercase()
-        return if (v in CrawlerKeys.CLASSIFY_BACKFILL_MODES) ValidationResult(true, emptyList())
-        else ValidationResult(
-            false,
-            listOf("classify backfill mode must be one of ${CrawlerKeys.CLASSIFY_BACKFILL_MODES.joinToString(", ")}")
-        )
     }
 
     /**

@@ -120,9 +120,6 @@ class CrawlerConfig(
             // The C crawler compares adult_mode case-sensitively; normalise here.
             "adult_mode" to s.adultMode.trim().lowercase(),
             "adult_hide_threshold" to s.adultHideThreshold.toString(),
-            // classify_backfill_mode is normalised like adult_mode (the C side compares
-            // case-sensitively); PINNED_KEYS forces it to "off" for this release.
-            "classify_backfill_mode" to s.classifyBackfillMode.trim().lowercase(),
             "bloom_capacity" to s.bloomCapacity.toString(),
             "failure_bloom_capacity" to s.failureBloomCapacity.toString(),
             "bloom_error_rate" to s.bloomErrorRate.toString(),
@@ -244,9 +241,14 @@ class CrawlerConfig(
          * the drop-all-adult-tagged semantics (the crawler only reads
          * `adult_hide_threshold`), so an install upgraded from the old build must not
          * keep the line: the crawler ignores it today, but a submodule rollback could
-         * silently reactivate it.
+         * silently reactivate it. `classify_backfill_mode` and `movie_kind_thermal_backoff_c`
+         * went away with the backfill family the same way.
          */
-        val VESTIGIAL_KEYS = listOf("adult_drop_threshold")
+        val VESTIGIAL_KEYS = listOf(
+            "adult_drop_threshold",
+            "classify_backfill_mode",
+            "movie_kind_thermal_backoff_c",
+        )
 
         /**
          * Comma-joined, lowercased taxonomy selection for [config.ini], or null when
@@ -259,15 +261,9 @@ class CrawlerConfig(
 
         /**
          * Keys the config writer always forces to a fixed value: the backup flags
-         * (backups are off on Android), the app-owned path keys pointing at the
+         * (backups are off on Android) and the app-owned path keys pointing at the
          * assets the app itself stages (`classifier_model_dir`, `movie_kind_model_dir`,
-         * `hard_block_file`), and `classify_backfill_mode`.
-         *
-         * The mode is pinned to `off` for this release: nothing may auto-run a
-         * reclassify at launch (the pre-registered G3/D1 protocol needs a deliberate,
-         * measured write), so the pin wins over both the stored default and any
-         * advanced-override line. The adult pass runs only through the `adult-backfill`
-         * maintenance action.
+         * `hard_block_file`).
          */
         val PINNED_KEYS = linkedMapOf(
             "backup_enabled" to "0",
@@ -276,7 +272,6 @@ class CrawlerConfig(
             "classifier_model_dir" to MODELS_SUBDIR,
             "movie_kind_model_dir" to MOVIE_MODEL_SUBDIR,
             "hard_block_file" to HARD_BLOCK_FILE,
-            "classify_backfill_mode" to "off",
         )
 
         /**

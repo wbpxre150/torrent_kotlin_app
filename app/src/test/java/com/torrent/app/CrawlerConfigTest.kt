@@ -554,8 +554,6 @@ class CrawlerConfigTest {
             assertEquals(CrawlerConfig.MODELS_SUBDIR, ini["classifier_model_dir"])
             assertEquals("tag", ini["adult_mode"])
             assertEquals("0.375", ini["adult_hide_threshold"])
-            // Pinned for this release: nothing may auto-run a reclassify at launch.
-            assertEquals("off", ini["classify_backfill_mode"])
             assertNull(ini["adult_drop_threshold"])
             assertEquals(CrawlerConfig.HARD_BLOCK_FILE, ini["hard_block_file"])
         }

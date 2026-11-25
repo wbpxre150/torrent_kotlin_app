@@ -14,7 +14,7 @@ import com.torrent.app.config.CrawlerSettings
 import com.torrent.app.ControlServer.Companion.CrawlerSettingsFormResult
 import org.junit.Assert.assertFalse
 // Robolectric (not for Context here, but for org.json): the mockable
-// android.jar stubs org.json, so `crawlerBackfillLine` would see a JSONObject
+// android.jar stubs org.json, so `cramStatsLine` would see a JSONObject
 // that answers every opt* with its default. Same reason
 // TransmissionConfigTest / TransmissionRpcClientTest run under this runner.
 @RunWith(RobolectricTestRunner::class)
@@ -367,86 +367,13 @@ class ControlServerHelpersTest {
     }
 
     /**
-     * Stage 4: the crawler card's `classifier_backfill` line, formatted from the
-     * daemon's real /stats object (wire names `rows_processed` / `rows_total`,
-     * not the design doc's `rows_done`) with no thousands separators, matching
-     * the existing `%d` style of `crawlerStatsLine`. `last_error` is appended
-     * only while the backfill is failed, and a body without the object (or one
-     * that does not parse) yields no line at all.
-     */
-    @Test fun crawlerBackfillLine_formatsTheDaemonsBackfillObject() {
-        val running = """{"torrents_indexed":286705,"classifier_backfill":{
-            "state":"running","target_clf_ver":4,"rows_left":133634,
-            "rows_processed":51234,"rows_total":184868,"started_at":1761650000,
-            "finished_at":0,"last_error":""}}"""
-        assertEquals(
-            "Backfill: running 51234 / 184868 → v4",
-            ControlServer.crawlerBackfillLine(running),
-        )
-
-        val idle = """{"classifier_backfill":{"state":"idle","target_clf_ver":4,
-            "rows_left":0,"rows_processed":0,"rows_total":0,"started_at":0,
-            "finished_at":0,"last_error":""}}"""
-        assertEquals("Backfill: idle 0 / 0 → v4", ControlServer.crawlerBackfillLine(idle))
-
-        val failed = """{"classifier_backfill":{"state":"failed","target_clf_ver":4,
-            "rows_processed":12,"rows_total":184868,"last_error":"database disk image is malformed"}}"""
-        val failedLine = ControlServer.crawlerBackfillLine(failed)
-        assertNotNull("a failed backfill must still render its counters", failedLine)
-        assertTrue(failedLine!!, failedLine.startsWith("Backfill: failed 12 / 184868 → v4"))
-        assertTrue(
-            failedLine,
-            failedLine.endsWith("database disk image is malformed"),
-        )
-
-        // No classifier_backfill object (older daemon) and an unparseable body:
-        // no line, so the card keeps whatever it last showed.
-        assertNull(ControlServer.crawlerBackfillLine("""{"torrents_indexed":1}"""))
-        assertNull(ControlServer.crawlerBackfillLine("not json"))
-    }
-
-    /**
-     * The adult-backfill sibling of [crawlerBackfillLine]: same /stats body, the
-     * `adult_backfill` object's wire names (`rows_updated` / `rows_total` /
-     * `target_adult_clf_ver`), `last_error` appended only while failed, and no line
-     * at all when the object is absent or the body does not parse.
-     */
-    @Test fun crawlerAdultBackfillLine_formatsTheDaemonsAdultBackfillObject() {
-        val running = """{"torrents_indexed":286705,"adult_backfill":{
-            "state":"running","target_adult_clf_ver":11,"rows_total":12000,
-            "rows_gated_out":150000,"rows_scored":4000,"rows_updated":3900,
-            "rows_failed":0,"last_id":880,"started_at":1761650000,
-            "finished_at":0,"last_error":""}}"""
-        assertEquals(
-            "Adult backfill: running 3900 / 12000 → v11",
-            ControlServer.crawlerAdultBackfillLine(running),
-        )
-
-        // Mode `off` publishes idle with a resolved target of 0 and zero rows.
-        val idle = """{"adult_backfill":{"state":"idle","target_adult_clf_ver":0,
-            "rows_total":0,"rows_gated_out":0,"rows_scored":0,"rows_updated":0,
-            "rows_failed":0,"last_id":0,"started_at":0,"finished_at":0,"last_error":""}}"""
-        assertEquals("Adult backfill: idle 0 / 0 → v0", ControlServer.crawlerAdultBackfillLine(idle))
-
-        val failed = """{"adult_backfill":{"state":"failed","target_adult_clf_ver":11,
-            "rows_total":12000,"rows_updated":12,"last_error":"database disk image is malformed"}}"""
-        val failedLine = ControlServer.crawlerAdultBackfillLine(failed)
-        assertNotNull("a failed adult backfill must still render its counters", failedLine)
-        assertTrue(failedLine!!, failedLine.startsWith("Adult backfill: failed 12 / 12000 → v11"))
-        assertTrue(failedLine, failedLine.endsWith("database disk image is malformed"))
-
-        assertNull(ControlServer.crawlerAdultBackfillLine("""{"torrents_indexed":1}"""))
-        assertNull(ControlServer.crawlerAdultBackfillLine("not json"))
-    }
-
-    /**
      * Stage 3 of the CRAM v15 rollout: the dashboard's new CRAM line, formatted from
      * the daemon's real /stats object — `classifier.cram_sha256` for the container sha
      * (first 12 hex chars) and `classifier.cram` for the engine generation (the model
      * version 15, deliberately not the manifest container's `generation: 2`) plus its
      * prediction / load-failure counters. No line at all when the object is absent,
      * the engine is disabled, or the body does not parse, so the card keeps whatever
-     * it last showed — the same contract as [crawlerAdultBackfillLine].
+     * it last showed.
      */
     @Test fun cramStatsLine_formatsTheDaemonsCramEngine() {
         val stats = """{"torrents_indexed":286705,"classifier":{

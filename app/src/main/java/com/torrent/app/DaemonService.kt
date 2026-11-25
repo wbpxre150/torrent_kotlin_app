@@ -2039,9 +2039,8 @@ class DaemonService : Service() {
      * ANR, and FTP/transmission/the dashboard are unaffected. Starting the
      * crawler first would be worse than waiting — it loads its models only at
      * process start, so it would run the whole session with both engines inert
-     * and stamp `clf_ver` 0 on every ingested row, and with
-     * `classify_backfill_mode` pinned `off` nothing repairs those rows
-     * automatically.
+     * and stamp `clf_ver` 0 on every ingested row, and nothing repairs those
+     * rows automatically.
      *
      * Non-fatal by contract: a non-zero exit, a launch failure or the
      * [CrawlerModels.FETCH_TIMEOUT_MS] hang guard all leave the crawler starting

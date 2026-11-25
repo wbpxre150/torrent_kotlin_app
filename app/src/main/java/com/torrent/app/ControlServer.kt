@@ -151,8 +151,6 @@ class ControlServer(
     @Volatile private var cachedRpcSummary: com.torrent.app.transmission.TransmissionSummary? = null
     @Volatile private var cachedCrawlerStatsJson: String? = null
     @Volatile private var cachedCrawlerStatsLine: String? = null
-    @Volatile private var cachedCrawlerBackfillLine: String? = null
-    @Volatile private var cachedCrawlerAdultBackfillLine: String? = null
     /** CRAM classifier line (generation + container sha + counters), from the same /stats tick. */
     @Volatile private var cachedCramStatsLine: String? = null
     // One frame flow per feed: replay keeps the newest frame for a client that
@@ -950,8 +948,6 @@ class ControlServer(
         cachedCrawlerStatsJson = raw
         cachedCrawlerStatsLine = raw?.let { crawlerStatsLine(it) }
         cachedCramStatsLine = raw?.let { cramStatsLine(it) }
-        cachedCrawlerBackfillLine = raw?.let { crawlerBackfillLine(it) }
-        cachedCrawlerAdultBackfillLine = raw?.let { crawlerAdultBackfillLine(it) }
         statsFrames.emit(crawlerStatsJson(cachedCrawlerStatsJson, crawler?.state))
     }
 
@@ -1164,8 +1160,6 @@ class ControlServer(
             """<div class="row"><span class="k">Stats</span><span class="v" data-field="statsLine">${esc(cachedCrawlerStatsLine ?: "—")}</span></div>""",
             """<div class="row"><span class="k">Classifier</span><span class="v" data-field="cramStatsLine">${esc(cachedCramStatsLine ?: "—")}</span></div>""",
             """<div class="row"><span class="k">Models</span><span class="v" data-field="modelsLine">${esc(modelsLineText())}</span></div>""",
-            """<div class="row"><span class="k">Backfill</span><span class="v" data-field="backfillLine">${esc(cachedCrawlerBackfillLine ?: "—")}</span></div>""",
-            """<div class="row"><span class="k">Adult backfill</span><span class="v" data-field="adultBackfillLine">${esc(cachedCrawlerAdultBackfillLine ?: "—")}</span></div>""",
         )
     }
 
@@ -1307,8 +1301,6 @@ class ControlServer(
                         append(",\"statsLine\":").append(jsonStr(cachedCrawlerStatsLine))
                         append(",\"cramStatsLine\":").append(jsonStr(cachedCramStatsLine))
                         append(",\"modelsLine\":").append(jsonStr(modelsLineText()))
-                        append(",\"backfillLine\":").append(jsonStr(cachedCrawlerBackfillLine))
-                        append(",\"adultBackfillLine\":").append(jsonStr(cachedCrawlerAdultBackfillLine))
                     }
                     append("}")
                 }
@@ -2594,55 +2586,6 @@ class ControlServer(
             confirm == DB_RESET_CONFIRM_WORD
 
         /**
-         * The one-line `classifier_backfill` summary the dashboard card shows,
-         * derived from the same raw loopback /stats body as [crawlerStatsLine]:
-         * the backfill state, rows processed of the total, and the target
-         * classifier generation, with the daemon's `last_error` appended while
-         * the backfill is failed. Field names are the daemon's wire names
-         * (`rows_processed`/`rows_total`, not the design doc's `rows_done`).
-         * Null when the body does not parse or carries no backfill object, so
-         * the card keeps its previous line.
-         */
-        internal fun crawlerBackfillLine(raw: String): String? {
-            return try {
-                val b = JSONObject(raw).optJSONObject("classifier_backfill") ?: return null
-                val state = b.optString("state", "")
-                val target = b.optInt("target_clf_ver", 0)
-                val done = b.optLong("rows_processed", 0L)
-                val total = b.optLong("rows_total", 0L)
-                val err = b.optString("last_error", "")
-                val line = "Backfill: %s %d / %d → v%d".format(state, done, total, target)
-                if (state == "failed" && err.isNotBlank()) "$line — $err" else line
-            } catch (e: Exception) {
-                null
-            }
-        }
-
-        /**
-         * The one-line `adult_backfill` summary beside the `classifier_backfill` one,
-         * derived from the same raw loopback /stats body: the pass state, the rows it
-         * actually wrote of the gated-in total, and the target adult generation. Field
-         * names are the daemon's wire names (`rows_updated`/`rows_total`,
-         * `target_adult_clf_ver`); the daemon's `last_error` is appended while the pass
-         * is failed. Null when the body does not parse or carries no such object, so the
-         * card keeps its previous line.
-         */
-        internal fun crawlerAdultBackfillLine(raw: String): String? {
-            return try {
-                val b = JSONObject(raw).optJSONObject("adult_backfill") ?: return null
-                val state = b.optString("state", "")
-                val target = b.optInt("target_adult_clf_ver", 0)
-                val updated = b.optLong("rows_updated", 0L)
-                val total = b.optLong("rows_total", 0L)
-                val err = b.optString("last_error", "")
-                val line = "Adult backfill: %s %d / %d → v%d".format(state, updated, total, target)
-                if (state == "failed" && err.isNotBlank()) "$line — $err" else line
-            } catch (e: Exception) {
-                null
-            }
-        }
-
-        /**
          * The one-line CRAM classifier summary beside the crawler stats line, derived
          * from the same raw loopback /stats body: the engine generation, the `cram.bin`
          * container sha (first 12 hex chars — enough to identify the build without
@@ -2650,8 +2593,7 @@ class ControlServer(
          * `generation` is the model version the classifier stamps (15), not the
          * manifest container's internal `cram.generation`. Null when the body does not
          * parse, carries no `classifier.cram` object, or the engine reports `enabled`
-         * false — the card keeps its previous line, the same contract as
-         * [crawlerBackfillLine].
+         * false — the card keeps its previous line.
          */
         internal fun cramStatsLine(raw: String): String? {
             return try {
@@ -3428,8 +3370,6 @@ ${adultSelectionRow(adultSelection)}
                   patchText(fieldIn(section, 'statsLine'), d.statsLine);
                   patchText(fieldIn(section, 'cramStatsLine'), d.cramStatsLine);
                   patchText(fieldIn(section, 'modelsLine'), d.modelsLine);
-                  patchText(fieldIn(section, 'backfillLine'), d.backfillLine);
-                  patchText(fieldIn(section, 'adultBackfillLine'), d.adultBackfillLine);
                   // The paused badge is rendered on every crawler render and
                   // only its `hidden` attribute is flipped here, so a pause that
                   // starts after the page loaded appears within one tick. Only

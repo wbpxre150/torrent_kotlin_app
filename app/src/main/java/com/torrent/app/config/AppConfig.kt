@@ -57,14 +57,6 @@ data class CrawlerSettings(
      * `config.ini.default` must move together.
      */
     val adultHideThreshold: Double = 0.375,
-    /**
-     * `classify_backfill_mode`: `"all"` | `"adult"` | `"off"` — what the crawler's
-     * backfill daemon does on its own. Pinned to `"off"` by
-     * [com.torrent.app.CrawlerConfig.PINNED_KEYS] for this release (nothing may
-     * auto-run a reclassify; the adult pass is the deliberate `adult-backfill`
-     * maintenance action), so this value is belt-and-braces. No form field.
-     */
-    val classifyBackfillMode: String = "off",
     val bloomCapacity: Int = 30_000_000,
     val failureBloomCapacity: Int = 30_000_000,
     val bloomErrorRate: Double = 0.001,

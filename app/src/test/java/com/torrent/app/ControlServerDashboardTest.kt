@@ -206,34 +206,10 @@ class ControlServerDashboardTest {
 
     @Test fun crawlerCard_carriesItsExtraFields() {
         val crawler = card(html, DaemonService.CRAWLER_LABEL)
-        for (field in listOf("dbSize", "internalFree", "statsLine", "backfillLine")) {
+        for (field in listOf("dbSize", "internalFree", "statsLine")) {
             assertTrue("crawler card is missing data-field=$field", crawler.contains("data-field=\"$field\""))
         }
         assertTrue("crawler card must link the search page", crawler.contains("<a href=\"/search\">"))
-    }
-
-    /**
-     * Stage 4: `classifier_backfill` progress is one more row of the existing
-     * crawler card. The `@Volatile` cache behind it is written only by the
-     * ticker, so — exactly like `statsLine` — plain JUnit cannot seed it and a
-     * fresh render must show the placeholder instead of a missing row.
-     */
-    @Test fun crawlerCard_carriesTheBackfillRow() {
-        val crawler = card(html, DaemonService.CRAWLER_LABEL)
-        assertTrue(
-            "the crawler card must label the backfill row 'Backfill'",
-            crawler.contains("<span class=\"k\">Backfill</span>"),
-        )
-        assertTrue(
-            "the backfill row must carry its live-patch hook and placeholder",
-            crawler.contains("<span class=\"v\" data-field=\"backfillLine\">—</span>"),
-        )
-        for (label in LABELS - DaemonService.CRAWLER_LABEL) {
-            assertFalse(
-                "$label must not gain a backfillLine field",
-                card(html, label).contains("backfillLine"),
-            )
-        }
     }
 
     /** The search link is labelled "Search": the crawler card carries no room
