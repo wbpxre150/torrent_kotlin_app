@@ -53,10 +53,6 @@ class CrawlerMaintenanceTest {
             MaintenanceAction.CATEGORY_FILTER_UPDATE,
             MaintenanceAction.fromRoute("category-filter-update")
         )
-        assertEquals(
-            MaintenanceAction.MOVIE_KIND_BENCH,
-            MaintenanceAction.fromRoute("movie-kind-bench")
-        )
         assertNull(MaintenanceAction.fromRoute("porn-filter-update"))
     }
 
@@ -68,8 +64,8 @@ class CrawlerMaintenanceTest {
     }
 
     @Test fun maintenanceRouteAllowed_refusesTheTwoCliOnlyActions() {
-        // The enum keeps all eight members, so both CLI flags stay reachable…
-        assertEquals(8, MaintenanceAction.entries.size)
+        // The enum keeps all six members, so both CLI flags stay reachable…
+        assertEquals(6, MaintenanceAction.entries.size)
         assertEquals(
             listOf("compact", "category-filter-update"),
             MaintenanceAction.entries.filterNot { it.phoneSupported }.map { it.route }
@@ -96,8 +92,6 @@ class CrawlerMaintenanceTest {
         assertEquals("--rebuild-bloom-filter", MaintenanceAction.REBUILD_BLOOM_FILTER.flag)
         assertEquals("--clear-failure-filter", MaintenanceAction.CLEAR_FAILURE_FILTER.flag)
         assertEquals("--category-filter-update", MaintenanceAction.CATEGORY_FILTER_UPDATE.flag)
-        assertEquals("--movie-kind-bench", MaintenanceAction.MOVIE_KIND_BENCH.flag)
-        assertEquals("--adult-backfill", MaintenanceAction.ADULT_BACKFILL.flag)
     }
 
     @Test fun needsSpaceCheckOnlyForDbRewritingActions() {
@@ -109,42 +103,6 @@ class CrawlerMaintenanceTest {
         // The purge only deletes rows (+ WAL checkpoint) and no longer compacts
         // the database, so it is not space-gated.
         assertFalse(MaintenanceAction.CATEGORY_FILTER_UPDATE.needsSpaceCheck)
-        // The bench only reads the database and times the encoder.
-        assertFalse(MaintenanceAction.MOVIE_KIND_BENCH.needsSpaceCheck)
-        // The adult backfill rewrites torrent_class rows and grows the WAL.
-        assertTrue(MaintenanceAction.ADULT_BACKFILL.needsSpaceCheck)
-    }
-
-    @Test fun movieKindBench_commandLineCarriesTheDatabaseOperand() {
-        // The bench is the one action that takes an operand: the db path relative to
-        // workDir (`filesDir/crawler`), matching the crawler's `db_path`. The row
-        // count is the C side's default.
-        assertEquals(
-            listOf("--movie-kind-bench", "data/torrents.db"),
-            CrawlerMaintenance.argv(MaintenanceAction.MOVIE_KIND_BENCH)
-        )
-        for (a in MaintenanceAction.entries - MaintenanceAction.MOVIE_KIND_BENCH -
-            MaintenanceAction.ADULT_BACKFILL) {
-            assertEquals("$a must stay a bare flag", listOf(a.flag), CrawlerMaintenance.argv(a))
-        }
-    }
-
-    @Test fun adultBackfill_commandLineCarriesTheDatabaseOperandAndWrite() {
-        // The pass only commits anything with an explicit `--write`; without it the C
-        // side reports counts and writes nothing. This action is the only path that
-        // runs the pass in this release (`classify_backfill_mode` is pinned `off`).
-        assertEquals(
-            listOf("--adult-backfill", "data/torrents.db", "--write"),
-            CrawlerMaintenance.argv(MaintenanceAction.ADULT_BACKFILL)
-        )
-    }
-
-    @Test fun movieKindBench_skipsSpaceCheckEvenWithNoSpace() {
-        val ex = CapturingExecutor()
-        val m = newMaintenance(ex, dbSize = 1_000L, freeSpace = 0L)
-        val st = m.start(MaintenanceAction.MOVIE_KIND_BENCH)
-        assertTrue("movie-kind-bench must not be space-gated", st.running)
-        assertEquals(1, ex.submitted.get())
     }
 
     @Test fun compact_refusedWhenNotEnoughFreeSpace() {
@@ -231,38 +189,6 @@ class CrawlerMaintenanceTest {
         assertEquals(before.message, after.message)
         // The line's other k=v pairs are kept instead of dropped.
         assertEquals(mapOf("rc" to "0"), after.extras)
-    }
-
-    @Test fun withProgress_terminalLineFoldsAllFiveCountersIntoTheMessage() {
-        // The exact terminal line main.c emits for the adult backfill.
-        val line = "[MPROG] action=adult-backfill phase=done rc=0 total=946726 " +
-            "gated_out=944000 scored=2726 updated=2726 failed=0"
-        val parsed = parseMaintenanceProgress(line)!!
-        val st = MaintenanceStatus(action = MaintenanceAction.ADULT_BACKFILL, running = true)
-            .withProgress(parsed)
-
-        assertEquals("done", st.phase)
-        // Criterion 7 reads these counters from the status message, not the raw
-        // `lines` ring buffer: all five must be there.
-        for (counter in listOf(
-            "total=946726", "gated_out=944000", "scored=2726", "updated=2726", "failed=0"
-        )) {
-            assertTrue(st.message, st.message.contains(counter))
-        }
-        // …and they stay available structurally too.
-        assertEquals("2726", st.extras["scored"])
-        assertEquals("944000", st.extras["gated_out"])
-    }
-
-    @Test fun summaryCounters_keepsTheWireOrderAndSkipsWhatIsAbsent() {
-        assertEquals(
-            "total=6 gated_out=2 scored=4 updated=4 failed=0",
-            summaryCounters(
-                mapOf(
-                    "failed" to "0", "updated" to "4", "scored" to "4",
-                    "gated_out" to "2", "total" to "6", "rc" to "0")))
-        assertEquals("", summaryCounters(mapOf("rc" to "0")))
-        assertEquals("", summaryCounters(emptyMap()))
     }
 
     @Test fun withProgress_phaseOnlyLineLeavesTheDenominatorNull() {

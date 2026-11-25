@@ -34,16 +34,6 @@ enum class MaintenanceAction(
     CATEGORY_FILTER_UPDATE(
         "category-filter-update", "--category-filter-update", false, phoneSupported = false
     ),
-    // Read-only bench of the movie-kind encoder over the existing DB rows: it
-    // writes nothing, so it is not space-gated either. Unlike every other action
-    // it needs the db operand — see [CrawlerMaintenance.argv].
-    MOVIE_KIND_BENCH("movie-kind-bench", "--movie-kind-bench", false),
-    // Token-gated adult backfill (classifier generation 11): re-scores only the rows
-    // whose name fires an `__adult_*` token and writes `adult`/`adult_p`/
-    // `adult_clf_ver`. It rewrites DB rows and grows the WAL, so it is space-gated.
-    // This is the ONLY path that runs the pass in this release: `classify_backfill_mode`
-    // is pinned `off`, so the crawler's own backfill daemon never starts it.
-    ADULT_BACKFILL("adult-backfill", "--adult-backfill", true),
     ;
 
     companion object {
@@ -77,10 +67,7 @@ fun maintenanceRouteAllowed(route: String): Boolean =
  * the action has no denominator: phase-only is the honest state.
  *
  * [extras] keeps the `k=v` pairs of the last progress line that have no field of
- * their own (`rc`, `removed`, and the terminal counters of an action that
- * publishes them - the adult backfill's `total/gated_out/scored/updated/failed`).
- * On the terminal `phase=done` line those counters are also folded into
- * [message], which is what `GET /api/crawler/maintenance` returns.
+ * their own (`rc`, `removed`, …).
  */
 data class MaintenanceStatus(
     val action: MaintenanceAction? = null,
@@ -97,48 +84,16 @@ data class MaintenanceStatus(
     val extras: Map<String, String> = emptyMap(),
 )
 
-/** Counter keys an action may publish on its terminal `[MPROG]` line, in the
- *  order the status message shows them. The adult backfill publishes all five. */
-private val SUMMARY_COUNTER_KEYS = listOf("total", "gated_out", "scored", "updated", "failed")
-
-/**
- * The `k=v` counters of a terminal progress line folded into one readable tail
- * (`total=18 gated_out=6 scored=12 updated=12 failed=0`), or "" when the line
- * published none of them.
- *
- * [total] is passed separately because `total` is a progress field of its own, so
- * [MaintenanceProgress] lifts it out of [MaintenanceProgress.extras].
- *
- * Structured on purpose: the status message is what
- * `GET /api/crawler/maintenance` returns, so a caller reads the adult
- * backfill's counts from there instead of scraping the raw `lines` ring buffer.
- */
-internal fun summaryCounters(extras: Map<String, String>, total: Long? = null): String {
-    val values = LinkedHashMap(extras)
-    if (total != null) values["total"] = total.toString()
-    return SUMMARY_COUNTER_KEYS.mapNotNull { key -> values[key]?.let { "$key=$it" } }
-        .joinToString(" ")
-}
-
 /**
  * Merges one parsed [MaintenanceProgress] line into the status. The progress
  * fields change and [MaintenanceStatus.extras] keeps the line's remaining `k=v`
  * pairs; the raw line still goes to [MaintenanceStatus.lines] (the console keeps
  * every line verbatim).
- *
- * The terminal `phase=done` line is where an action's counters live, so its
- * extras are folded into [MaintenanceStatus.message]: that message is the
- * structured answer the maintenance API gives, and the counters must not exist
- * only in the raw console tail.
  */
-internal fun MaintenanceStatus.withProgress(p: MaintenanceProgress): MaintenanceStatus {
-    val merged = copy(
+internal fun MaintenanceStatus.withProgress(p: MaintenanceProgress): MaintenanceStatus =
+    copy(
         phase = p.phase, percent = p.percent, done = p.done, total = p.total,
         extras = p.extras)
-    if (p.phase != MaintenanceProgress.PHASE_DONE) return merged
-    val counters = summaryCounters(p.extras, p.total)
-    return if (counters.isEmpty()) merged else merged.copy(message = "${p.action} done ($counters)")
-}
 
 /**
  * Runs dht_crawler maintenance actions (plan 10 §4) one at a time. Each
@@ -232,14 +187,10 @@ class CrawlerMaintenance(
             val ok = exitCode == 0
             val outcome = if (ok) "${action.flag} succeeded"
             else "${action.flag} exited with code $exitCode"
-            // A terminal [MPROG] line's counters ride the message (see
-            // withProgress): keep them across the lifecycle wording so the
-            // counters survive into the final status the maintenance API returns.
-            val counters = summaryCounters(status.extras, status.total)
             status = status.copy(
                 running = false, exitCode = exitCode,
                 finishedAt = System.currentTimeMillis(),
-                message = if (counters.isEmpty()) outcome else "$outcome ($counters)")
+                message = outcome)
         } catch (e: Exception) {
             status = status.copy(
                 running = false, exitCode = -1,
@@ -264,24 +215,8 @@ class CrawlerMaintenance(
         /** Ring-buffer cap for the one-shot output tail. */
         internal const val MAX_LINES = 2000
 
-        /**
-         * The db operand the movie-kind bench and the adult backfill need: relative to
-         * [workDir] (`filesDir/crawler`), matching the crawler's `db_path`. The row count
-         * is the C side's default.
-         */
-        internal const val BENCH_DB_OPERAND = "data/torrents.db"
-
-        /**
-         * argv for [action]'s one-shot: a bare flag for most actions. The movie-kind
-         * bench also takes the database operand, and the adult backfill takes it plus
-         * `--write` (without that flag the C side only reports counts).
-         */
-        internal fun argv(action: MaintenanceAction): List<String> = when (action) {
-            MaintenanceAction.MOVIE_KIND_BENCH -> listOf(action.flag, BENCH_DB_OPERAND)
-            MaintenanceAction.ADULT_BACKFILL ->
-                listOf(action.flag, BENCH_DB_OPERAND, "--write")
-            else -> listOf(action.flag)
-        }
+        /** argv for [action]'s one-shot: a bare flag. */
+        internal fun argv(action: MaintenanceAction): List<String> = listOf(action.flag)
 
         /** Human-readable byte count for refusal messages. */
         internal fun formatBytes(b: Long): String = when {

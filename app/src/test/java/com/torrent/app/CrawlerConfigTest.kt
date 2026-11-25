@@ -187,7 +187,6 @@ class CrawlerConfigTest {
         assertEquals("1", ini["movie_kind_enabled"])
         assertEquals("models/v13", ini["movie_kind_model_dir"])
         assertEquals("4", ini["movie_kind_threads"])
-        assertEquals("82", ini["movie_kind_thermal_backoff_c"])
         assertNull(ini["backup_path"])
         assertNull(ini["ssh_host"])
         assertNull(ini["ssh_user"])

@@ -2056,8 +2056,6 @@ class ControlServer(
         MaintenanceAction.REBUILD_BLOOM_FILTER -> "Rebuild bloom filter"
         MaintenanceAction.CLEAR_FAILURE_FILTER -> "Clear failure filter"
         MaintenanceAction.CATEGORY_FILTER_UPDATE -> "Category filter update"
-        MaintenanceAction.MOVIE_KIND_BENCH -> "Movie-kind bench"
-        MaintenanceAction.ADULT_BACKFILL -> "Adult backfill"
     }
 
     /** What a maintenance action does, phrased for its confirmation prompt. */
@@ -2070,11 +2068,6 @@ class ControlServer(
         MaintenanceAction.CATEGORY_FILTER_UPDATE ->
             "Delete all torrents in unchecked categories and adult-tagged torrents " +
                 "from the database"
-        MaintenanceAction.MOVIE_KIND_BENCH ->
-            "Bench the movie-kind encoder over the database rows (read-only)"
-        MaintenanceAction.ADULT_BACKFILL ->
-            "Re-score the token-gated rows with the CRAM adult classifier (v15) and write " +
-                "adult, adult_p and adult_clf_ver"
     }
 
     /**

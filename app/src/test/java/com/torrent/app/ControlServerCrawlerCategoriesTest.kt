@@ -158,10 +158,26 @@ class ControlServerCrawlerCategoriesTest {
             html.contains("Delete all torrents in unchecked categories"))
         assertFalse("the compact button must be gone", html.contains(">Compact database</button>"))
         assertFalse("the compact tooltip must be gone", html.contains("title=\"--compact\""))
-        // The five surviving actions keep one button each, with the flag as its tooltip.
+        // The two backfill actions are gone entirely — no button, label or tooltip.
+        assertFalse(
+            "the adult-backfill button must be gone",
+            html.contains("action=\"/crawler/maintenance/adult-backfill\""))
+        assertFalse("the adult-backfill label must be gone", html.contains(">Adult backfill</button>"))
+        assertFalse("the adult-backfill tooltip must be gone", html.contains("title=\"--adult-backfill\""))
+        assertFalse(
+            "the movie-kind-bench button must be gone",
+            html.contains("action=\"/crawler/maintenance/movie-kind-bench\""))
+        assertFalse("the movie-kind-bench label must be gone", html.contains(">Movie-kind bench</button>"))
+        assertFalse("the movie-kind-bench tooltip must be gone", html.contains("title=\"--movie-kind-bench\""))
+        // Exactly the four phone-supported actions keep one button each, with the flag as its tooltip.
+        val maintSection = Regex("id=\"maint-btns\"[\\s\\S]*?</div>").find(html)?.value ?: ""
+        assertEquals(
+            "exactly four phone-supported maintenance buttons",
+            4,
+            Regex("<button").findAll(maintSection).count())
         for (flag in listOf(
             "--check-database", "--recover-database", "--rebuild-bloom-filter",
-            "--clear-failure-filter", "--movie-kind-bench"
+            "--clear-failure-filter"
         )) {
             assertTrue("missing a button for $flag", html.contains("title=\"$flag\""))
         }
