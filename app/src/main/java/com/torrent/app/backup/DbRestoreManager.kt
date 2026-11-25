@@ -663,7 +663,7 @@ class DbRestoreManager(
     /** The database the crawler serves from: `<workDir>/data/torrents.db`. */
     private fun liveDb(workDir: File): File = File(File(workDir, "data"), "torrents.db")
 
-    /** The import target, mirroring the native path (`restore-database.patch:45`). */
+    /** The import target: `torrents.db.restore.tmp` beside the live DB, renamed over it after the replay. */
     private fun tempDb(workDir: File): File =
         File(File(workDir, "data"), "torrents.db.restore.tmp")
 

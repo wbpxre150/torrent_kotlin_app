@@ -22,8 +22,7 @@ import java.nio.charset.StandardCharsets
  * - every other character (including raw `\n` / `\r`, which occur verbatim
  *   inside dumped text — see [renderSqlLiteral] — and inside the trigger
  *   bodies) is ordinary statement content. Line-based splitting is therefore
- *   unsafe, which the native restore code agrees on
- *   (`patches/restore-database.patch`).
+ *   unsafe.
  *
  * Blob literals (`x'0a0b'`) contain no quotes of their own, so they pass
  * through untouched. Statements are emitted **without** the terminating `;`
@@ -38,8 +37,8 @@ import java.nio.charset.StandardCharsets
  * text literal truncates the statement there and SQLite sees an unterminated
  * literal (`unrecognized token`). The real dump contains such bytes — GBK
  * text emitted verbatim, e.g. `VALUES(107059, '\xcd\xbc\xc6\xac\xd2\xbb\x00')`
- * — and the native `--restore-database` replay passes the dump to the same C
- * API, so dropping the NUL matches exactly what that path would have stored.
+ * — and any restore path that hands statements to SQLite as C strings sees
+ * the same truncation, so dropping the NUL is the only correct replay behaviour.
  * Stripping happens before the state machine looks at the character: U+0000 is
  * never `'` or `;`, so quote tracking and boundary detection are unchanged,
  * and the 8 MB runaway guard is unaffected (stripping only shrinks a

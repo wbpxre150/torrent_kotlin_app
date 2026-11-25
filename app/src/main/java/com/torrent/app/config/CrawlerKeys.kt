@@ -31,9 +31,6 @@ object CrawlerKeys {
         "ssh_bookmark_path",
         // rclone incremental backup
         "rclone_backup_enabled", "rclone_remote", "rclone_dest_path", "rclone_bookmark_path",
-        // Metadata fetcher
-        "max_concurrent_connections", "tcp_connect_timeout_sec", "connection_timeout_sec",
-        "max_connection_lifetime_sec",
         // Ingest-time classifier + adult handling (Stage 5/6)
         "classifier_enabled", "classifier_model_dir",
         "adult_mode", "adult_hide_threshold", "hard_block_file",
@@ -46,7 +43,7 @@ object CrawlerKeys {
         // Language filter
         "language_filter_non_latin_threshold", "porn_filter_non_latin_threshold",
         // Thread trees
-        "num_trees", "use_thread_trees",
+        "num_trees",
         "use_keyspace_partitioning", "dead_partition_threshold", "max_trees_per_partition",
         "tree_find_node_workers", "tree_bep51_workers", "tree_infohash_queue_capacity",
         "tree_bep51_query_interval_ms", "tree_get_peers_workers", "tree_peers_queue_capacity",

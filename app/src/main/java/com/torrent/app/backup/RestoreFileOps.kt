@@ -57,8 +57,7 @@ object RestoreFileOps {
     }
 
     /**
-     * Replaces [targetDb] with [tmpDb] the way the native tool does
-     * (`restore-database.patch:73-92`): remove the target's stale `-wal`/`-shm`
+     * Replaces [targetDb] with [tmpDb] atomically: remove the target's stale `-wal`/`-shm`
      * first (they belong to the DB being replaced), rename the temp DB
      * straight over the target — an atomic POSIX replace, so the target path
      * holds either the old DB or the new one and never nothing — then delete

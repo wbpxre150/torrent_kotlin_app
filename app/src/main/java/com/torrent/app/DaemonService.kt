@@ -1942,9 +1942,9 @@ class DaemonService : Service() {
      * crash-looping the service.
      * Scope: SharedPreferences only — `classifier_model_version` (the sentinel) and the two
      * threshold keys — plus the `config.ini` re-render above. It must NEVER write the crawler DB
-     * (`classifier_meta` / `torrent_class`) and must never delete or recreate that database: the
-     * native backfill detects its outstanding work from `classifier_meta.clf_ver` still being the
-     * old generation, so wiping or bumping that column would silently skip the reclassification.
+     * (`classifier_meta` / `torrent_class`) and must never delete or recreate that database: no
+     * pass repairs a wiped generation — only freshly ingested rows are stamped — so a wiped or
+     * bumped `clf_ver` would leave every pre-existing row mislabelled with nothing to detect it.
      *
      * @return true when the thresholds were migrated (the sentinel did not match),
      *   false when it already matched this build's model generation.

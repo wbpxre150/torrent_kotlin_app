@@ -12,8 +12,8 @@ package com.torrent.app.config
  *
  * It reaches app settings only: the sentinel, the two threshold keys, and the `config.ini`
  * re-render the caller performs when this returns `true`. It must never write the crawler DB
- * (`classifier_meta`/`torrent_class`) — the native backfill detects its work from
- * `classifier_meta.clf_ver` still being the old generation.
+ * (`classifier_meta`/`torrent_class`) — no pass repairs a wiped generation; only freshly
+ * ingested rows are stamped.
  *
  * Pure: all state access is injected, so the decision is unit-testable without Android.
  */

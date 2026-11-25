@@ -13,14 +13,12 @@ class CrawlerKeysTest {
                 "batch_size = 750\n" +
                 "; another comment\n" +
                 "\n" +
-                "use_thread_trees=1\n" +
                 "bep51_node_cooldown_sec=5\n"
         )
         assertTrue(r.ok)
         assertEquals(
             mapOf(
                 "batch_size" to "750",
-                "use_thread_trees" to "1",
                 "bep51_node_cooldown_sec" to "5",
             ),
             r.entries
@@ -317,7 +315,6 @@ class CrawlerKeysTest {
         val excluded = CrawlerKeys.PATH_KEYS + CrawlerKeys.BACKUP_KEYS + CrawlerKeys.FORM_MANAGED_KEYS
         assertTrue(excluded.none { it in CrawlerKeys.ALLOWED_ADVANCED_KEYS })
         assertTrue("batch_size" in CrawlerKeys.ALLOWED_ADVANCED_KEYS)
-        assertTrue("use_thread_trees" in CrawlerKeys.ALLOWED_ADVANCED_KEYS)
         assertEquals(
             CrawlerKeys.KNOWN_KEYS - CrawlerKeys.PATH_KEYS - CrawlerKeys.BACKUP_KEYS - CrawlerKeys.FORM_MANAGED_KEYS,
             CrawlerKeys.ALLOWED_ADVANCED_KEYS
