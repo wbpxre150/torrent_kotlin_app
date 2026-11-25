@@ -82,18 +82,16 @@ adult_hide_threshold=0.375
 # Always-on name-substring block list (app-managed path key).
 hard_block_file=hard_block.txt
 
-# ==== Movie-Kind Classifier & Backfill ====
+# ==== Movie-Kind Classifier ====
 # Movie-kind JEVH classifier (models/v13): a llama.cpp Q4_0 backbone plus a linear
 # head, gated by models/v13/manifest.json (which pins both binaries' byte size and
 # sha256). The app stages the model dir and pins movie_kind_model_dir; the other
-# keys are settable from the advanced textarea. movie_kind_enabled = 0 stops new
-# backfill passes and leaves the database valid (its columns are additive).
+# keys are settable from the advanced textarea. movie_kind_enabled = 0 stops
+# inline movie-kind classification at ingest; existing rows stay valid.
 movie_kind_enabled = 1
 movie_kind_model_dir = models/v13
 # Encoder threads (clamped 1..8 by the crawler).
 movie_kind_threads = 4
-# Pause the backfill between batches at or above this CPU temperature (Celsius).
-movie_kind_thermal_backoff_c = 82
 
 # ==== Language Filter ====
 # Filter torrents where non-Latin characters exceed this percentage
