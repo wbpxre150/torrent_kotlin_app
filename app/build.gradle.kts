@@ -17,6 +17,12 @@ android {
         applicationId = "com.torrent.app"
         minSdk = 26
         targetSdk = 35
+        // The four daemons are cross-compiled for arm64-v8a only. Without this the APK still
+        // advertises armeabi-v7a/x86/x86_64 (androidx's graphics-path helper ships those), so a
+        // 32-bit or emulator install *succeeds* and then fails at daemon start.
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
         versionCode = 6
         versionName = "1.0"
     }
@@ -442,6 +448,17 @@ tasks.register("fetchSqlite") {
 // the tarball is pinned by sha256 -- unlike the existence-only fetches above, a mismatched
 // download is deleted and re-fetched rather than used (a tree of unclear provenance would
 // silently produce a binary the 153 MB model was not fitted to).
+
+// ---- Hermetic-build knobs (F-Droid) -------------------------------------------------------
+// Unset on a developer build: every fetch task below downloads and sha256-verifies its own
+// inputs, exactly as before. A builder that stages the sources itself (an fdroiddata
+// `prebuild` copying srclib checkouts into app/build/native/src/) sets these and owns the pins.
+val prebuiltNativeSrc = providers.gradleProperty("prebuiltNativeSrc").isPresent
+// GOTOOLCHAIN for the cloudflared build. cloudflared's go.mod requires go1.27.4, so the default
+// makes a first build download that toolchain; -PgoToolchain=local pins to the host's Go.
+val goToolchain = providers.gradleProperty("goToolchain").orNull ?: "go1.27.4"
+// -PgoVendor builds the tunnel with -mod=vendor and GOPROXY=off: no module downloads at all.
+val goVendor = providers.gradleProperty("goVendor").isPresent
 tasks.register("fetchLlamaCpp") {
     description = "Download the pinned llama.cpp sources (18ab62a8) for the movie-kind dep"
 
@@ -471,6 +488,16 @@ tasks.register("fetchLlamaCpp") {
     }
 
     doLast {
+        // Hermetic builder (F-Droid): the tree was staged from a pinned checkout by a prebuild
+        // step, so there is no tarball to hash and nothing to download.
+        if (prebuiltNativeSrc) {
+            if (!file("$srcDir/CMakeLists.txt").exists()) {
+                error("prebuiltNativeSrc is set but $srcDir has no CMakeLists.txt — stage the " +
+                    "pinned llama.cpp checkout (18ab62a8) there")
+            }
+            stamp.writeText("prebuilt\n")
+            return@doLast
+        }
         // 1. Fetch the tarball, discarding a cached copy whose bytes are not the pin
         if (tarball.exists() && sha256Of(tarball) != sha256) {
             logger.warn("llama.cpp tarball sha256 mismatch, re-downloading $url")
@@ -797,6 +824,16 @@ tasks.register("fetchCloudflaredSrc") {
     }
 
     doLast {
+        // Hermetic builder (F-Droid): the tree was staged from a pinned checkout by a prebuild
+        // step, so there is no tarball to hash and nothing to download.
+        if (prebuiltNativeSrc) {
+            if (!file("$srcDir/go.mod").exists()) {
+                error("prebuiltNativeSrc is set but $srcDir has no go.mod — stage the pinned " +
+                    "cloudflared checkout (2026.11.0) there")
+            }
+            stamp.writeText("prebuilt\n")
+            return@doLast
+        }
         // 1. Fetch the tarball, discarding a cached copy whose bytes are not the pin
         if (tarball.exists() && sha256Of(tarball) != sha256) {
             logger.warn("cloudflared tarball sha256 mismatch, re-downloading $url")
@@ -862,7 +899,10 @@ tasks.register("buildCloudflared") {
         } catch (e: Exception) {
             goOk = false
         }
-        if (!goOk) error("Go toolchain not found - install Go and set GOTOOLCHAIN=go1.27.4")
+        if (!goOk) error(
+            "Go toolchain not found — install Go, or set -PgoToolchain to the version " +
+                "cloudflared's go.mod requires (default $goToolchain)"
+        )
         buildDir.mkdirs()
         // 1. Cross-compile: android/arm64, cgo against the NDK's bionic (stock Go's pure resolver
         //    is broken on Android), PIE because Android refuses ET_EXEC children.
@@ -873,7 +913,16 @@ tasks.register("buildCloudflared") {
             environment("CGO_ENABLED", "1")
             environment("CC", cc.absolutePath)
             environment("CXX", cxx.absolutePath)
-            environment("GOTOOLCHAIN", "go1.27.4")
+            environment("GOTOOLCHAIN", goToolchain)
+            if (goVendor) {
+                // Hermetic: every module comes from the staged vendor/ tree, nothing is fetched.
+                if (!file("$srcDir/vendor").exists()) {
+                    error("goVendor is set but $srcDir/vendor does not exist — run " +
+                        "`go mod vendor` in that tree first")
+                }
+                environment("GOFLAGS", "-mod=vendor")
+                environment("GOPROXY", "off")
+            }
             commandLine(
                 "go", "build",
                 "-trimpath",

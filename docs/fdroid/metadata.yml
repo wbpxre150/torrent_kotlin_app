@@ -1,11 +1,14 @@
 # Draft fdroiddata recipe for com.torrent.app — UNTESTED against `fdroid build`.
 # Target path in the fdroiddata MR: metadata/com.torrent.app.yml
 #
-# Read docs/fdroid/BLOCKERS.md before filing. The build is not hermetic yet: the Gradle
-# script downloads seven source tarballs itself (mbedtls, curl, transmission, libuv, sqlite,
-# llama.cpp, cloudflared) and the recipe below is the sketch of how to feed it pre-fetched
-# sources instead. Until those downloads are replaced by real srclibs handling, `fdroid build`
-# on the F-Droid buildserver will attempt network fetches during the Gradle run.
+# The Gradle build fetches its seven native dependencies itself, so this recipe stages them from
+# srclibs into app/build/native/src/ and passes -PprebuiltNativeSrc, which makes the two
+# sha256-pinned fetches (llama.cpp, cloudflared) accept the staged tree instead of downloading a
+# tarball to hash. The five existence-checked fetches skip their download once the tree is there.
+#
+# Remaining network dependency: the Go toolchain for cloudflared (its go.mod requires go1.27.4).
+# See docs/fdroid/BLOCKERS.md item 2 — either let the buildserver fetch it, or ship Go >= 1.27.4
+# and add -PgoToolchain=local (plus -PgoVendor with a staged vendor/ tree to kill module fetches).
 
 Categories:
   - Internet
@@ -22,9 +25,9 @@ AutoName: Torrent App
 RepoType: git
 Repo: https://github.com/wbpxre150/torrent_kotlin_app.git
 
-# The four native daemons are cross-compiled for arm64-v8a only; see BLOCKERS.md item 6.
-# No AntiFeatures are declared. Decide on NonFreeNet before filing if the classifier weights
-# (downloaded at runtime from a network URL) are not published under a free license.
+# No AntiFeatures. The ~500 MB of classifier weights are downloaded at first run from
+# https://unjumble.au/bep51/models (sha256-pinned manifests inside the crawler binary) and are
+# MIT licensed, same as the app — see the LICENSE in the classifier-model repo.
 
 Builds:
   - versionName: '1.0'
@@ -34,8 +37,9 @@ Builds:
     # patches are in-tree and applied by prepareDhtCrawlerSrc, so nothing extra is needed.
     submodules: true
     ndk: r27
+    # -PprebuiltNativeSrc: trust the staged trees below instead of downloading tarballs.
     gradle:
-      - yes
+      - -PprebuiltNativeSrc
     output: app/build/outputs/apk/release/app-release.apk
     sudo:
       - apt-get update || apt-get update
@@ -48,12 +52,9 @@ Builds:
       - sqlite@version-3.49.1
       - llama.cpp@18ab62a8ec5144ae5d2f65e78374ba69652d75dd
       - cloudflared@2026.11.0
-    # Five of the seven tasks skip their download when the extracted tree already exists at the
-    # path below (tarball check first, then source dir), so staging the srclibs there is enough
-    # for them. The two sha256-pinned ones — llama.cpp and cloudflared — hash the tarball
-    # unconditionally and will curl it even when the tree is present; they need the escape hatch
-    # described in BLOCKERS.md item 1 before this recipe can build offline. Also note app/build/
-    # is gitignored and a `gradle clean` wipes it, so these copies must follow any clean step.
+    # app/build/ is gitignored and a `gradle clean` wipes it, so this must run after any clean
+    # step. The transmission tarball ships vendored third-party sources, so its srclib checkout
+    # needs --recurse-submodules if the git repo does not carry them.
     prebuild:
       - mkdir -p app/build/native/src
       - cp -a $$mbedtls$$ app/build/native/src/mbedtls-3.6.6
