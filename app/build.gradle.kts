@@ -23,8 +23,8 @@ android {
         ndk {
             abiFilters += "arm64-v8a"
         }
-        versionCode = 7
-        versionName = "1.0.1"
+        versionCode = 8
+        versionName = "1.0.2"
     }
 
     // Release signing comes from keystore.properties at the repo root, which is gitignored. A

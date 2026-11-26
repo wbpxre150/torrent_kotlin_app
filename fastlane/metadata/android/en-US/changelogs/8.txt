@@ -1,0 +1,8 @@
+No functional changes — a packaging release so a fresh clone builds.
+
+- gradle-wrapper.jar is tracked again, so ./gradlew works straight after a
+  clone instead of failing with "Could not find or load main class
+  org.gradle.wrapper.GradleWrapperMain".
+- F-Droid recipe updated: the source scan is clean (it previously found 1312
+  upstream test-fixture binaries), the native source trees are staged outside
+  the checkout, and the source tarball is 25 MB instead of 100 MB.
