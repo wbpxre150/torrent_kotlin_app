@@ -21,6 +21,17 @@ export ANDROID_NDK_HOME="$HOME/Android/Sdk/ndk/android-ndk-r27"
 ./gradlew installDebug          # tests: ./gradlew :app:testDebugUnitTest
 ```
 
+**Release builds** sign from `keystore.properties` at the repo root (gitignored: it holds the
+store/key passwords and points at the `.key` file). Without that file the release build type
+stays unsigned instead of failing, which is what F-Droid's buildserver and CI need — so never
+make it required. `./gradlew :app:assembleRelease` produces
+`app/build/outputs/apk/release/app-release.apk` (~35 MB; a debug build is ~55 MB). `versionCode`
+must strictly increase for an APK to install over the previous one.
+
+Publishing is `git tag -a vX.Y` + `gh release create` with that APK attached; F-Droid packaging
+status lives in [`docs/fdroid/`](docs/fdroid/) and the listing text/screenshots in
+`fastlane/metadata/android/en-US/` (F-Droid reads them from the tagged commit).
+
 ## Layout
 
 ```text
