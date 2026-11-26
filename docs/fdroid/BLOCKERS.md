@@ -2,10 +2,9 @@
 
 **Status: the recipe builds from a tag, scan included, and nothing is outstanding in this repo.**
 `fdroid build --test --refresh com.torrent.app` (fdroidserver 2.4.6, 2026-11-26) against
-**`v1.0.1`** — no `--skip-scan`, no `--no-tarball` — ends with `success: com.torrent.app` /
-`1 build succeeded`, producing a 16.7 MB `arm64-v8a` APK (`versionCode 7`, `versionName 1.0.1`)
 signed by F-Droid's test key. `fdroid scanner com.torrent.app:7` reports **0 errors / 0 warnings**
-and `fdroid lint com.torrent.app` is silent. No MR has been filed yet; what it has to contain is in
+and `fdroid lint com.torrent.app` is silent. Three consecutive `--refresh` builds produced a
+16 733 915-byte APK each time. No MR has been filed yet; what it has to contain is in
 [What the MR contains](#what-the-mr-contains).
 
 `v1.0` is deliberately not listed as a build: it predates the build-script knobs, so it cannot be
