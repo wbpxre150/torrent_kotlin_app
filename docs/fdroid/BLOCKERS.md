@@ -2,9 +2,11 @@
 
 **Status: the recipe builds from a tag, scan included, and nothing is outstanding in this repo.**
 `fdroid build --test --refresh com.torrent.app` (fdroidserver 2.4.6, 2026-11-26) against
-signed by F-Droid's test key. `fdroid scanner com.torrent.app:7` reports **0 errors / 0 warnings**
-and `fdroid lint com.torrent.app` is silent. Three consecutive `--refresh` builds produced a
-16 733 915-byte APK each time. No MR has been filed yet; what it has to contain is in
+**`v1.0.1`** — no `--skip-scan`, no `--no-tarball` — ends with `success: com.torrent.app` /
+`1 build succeeded`, producing a 16.7 MB `arm64-v8a` APK (`versionCode 7`, `versionName 1.0.1`,
+16 733 671 bytes) signed by F-Droid's test key. `fdroid scanner com.torrent.app:7` reports
+**0 errors / 0 warnings**, `fdroid lint com.torrent.app` is silent, and the source tarball is
+25.5 MB. No MR has been filed yet; what it has to contain is in
 [What the MR contains](#what-the-mr-contains).
 
 `v1.0` is deliberately not listed as a build: it predates the build-script knobs, so it cannot be
@@ -20,24 +22,27 @@ None of this was visible from reading the docs — each one only showed up when 
 | Symptom | Cause | Fix |
 |---|---|---|
 | Staged srclibs sat unused; tarballs appeared next to them | The five "existence-checked" fetches skipped only the *extract*; the `curl` was unconditional | `stageOrFetch()` — every tarball fetch returns early when a tree is staged, and fails loudly if `-PprebuiltNativeSrc` is set without one |
-| Everything re-downloaded after staging | fdroid runs `gradle clean` *between* `prebuild` and the build, and clean deletes `app/build/` — where the staging went | `-PnativeRoot=app/native-root`, outside `build/` |
+| Everything re-downloaded after staging | fdroid runs `gradle clean` *between* `prebuild` and the build, and clean deletes `app/build/` — where the staging went | `-PnativeRoot`, pointed outside `build/` and (later) outside the checkout entirely |
 | `assemble-PprebuiltNativeSrcRelease` | `gradle:` entries are flavour names, not flags | properties moved to `gradleprops:` |
 | mbedtls configure: "run `git submodule update --init`" | mbedtls keeps `framework/` in a submodule; the release tarball vendors it | `git -C $$mbedtls$$ submodule update --init --recursive` |
 | same for transmission | `third-party/` is a submodule set | same, for `$$transmission$$` |
 | curl: `./configure` cannot be started | curl's git tree ships `configure.ac`, and there is no `buildconf` script | `(cd $$curl$$ && autoreconf -fi)` + autoconf/automake/libtool |
 | `No apks match .../app-release.apk` | without `keystore.properties` the build type is unsigned, so AGP names it `app-release-unsigned.apk` | `output:` points at the unsigned name; F-Droid signs it |
-| `Can't build due to 1312 errors while scanning` | the scan runs **after** `prebuild` (`common.prepare_source` → `gradle clean` → `scanner.scan_source`), so it sees the staged trees. 1299 of the 1312 are under `app/native-root/src` (transmission's libpsl/libdeflate fuzz corpora, mbedtls `framework/data_files` + `programs/fuzz`, libuv's `Index.zip`, transmission's `macosx/Sparkle.framework`); the other 13 are in the vendored `dht_crawler` submodule (libbloom collision tables, civetweb/duktape test archives, cJSON/uthash `package.json`, the CRAM parser fixtures) | `scanignore:` — see below. Nothing in that set is compiled or shipped: the APK holds four executables and dex/resources only |
+| `Can't build due to 1312 errors while scanning` | the scan runs **after** `prebuild` (`common.prepare_source` → `gradle clean` → `scanner.scan_source`), so with the staging inside the checkout it saw the staged trees. 1299 of the 1312 were under `app/native-root/src` (transmission's libpsl/libdeflate fuzz corpora, mbedtls `framework/data_files` + `programs/fuzz`, libuv's `Index.zip`, transmission's `macosx/Sparkle.framework`); the other 13 are in the vendored `dht_crawler` submodule (libbloom collision tables, civetweb/duktape test archives, cJSON/uthash `package.json`, the CRAM parser fixtures) | staged the trees outside the checkout (which also shrank the source tarball from 99.9 MB to 25.5 MB), and six narrow `scanignore` entries for the crawler submodule — see below. Nothing in that set is compiled or shipped: the APK holds four executables and dex/resources only |
 | `Categories 'Internet' is not valid` (and every category, if the repo has no `config/`) | fdroiddata moved to a granular taxonomy in `config/categories.yml`; `fdroid lint` loads it from the *repository* it is run in, so a bare test repo with no `config/` fails every category check | `Categories: Download` + `File Transfer` (what LibreTorrent and BiglyBT use), and the local test repo needs `config/categories.yml` |
 
-### The `scanignore` block, and why it is that broad
+### The `scanignore` block, and why those six entries
 
-`app/native-root` is one entry on purpose. It holds nothing but fdroid's own srclib checkouts,
-copied there by `prebuild` — the same material fdroid keeps in `build/srclib/`, which it never
-scans. Enumerating the seven offending subtrees instead would mean a transmission or mbedtls bump
-can break the build again the moment upstream adds a test fixture. The six `dht_crawler` entries are
-narrow, because that tree is the app's own source: they name the third-party data directories and
-the parser fixtures exactly, and each one is load-bearing (the scanner counts an unused
-`scanignore` path as an error, so the block cannot silently rot).
+The staged trees need no entry at all: `prebuild` now copies them to `<fdroid build root>/native-root`,
+next to the checkout rather than inside it, so the scanner never walks them. That is the same
+relationship fdroid has with `build/srclib/`, which it also never scans. Putting them inside the
+checkout and ignoring `app/native-root` also worked, but it cost a 99.9 MB source tarball, because
+`tarfile.add(build_dir)` tars whatever is in the checkout.
+
+The six remaining entries are the vendored `dht_crawler` submodule — the app's own source, so they
+name the third-party data directories and the parser fixtures exactly instead of ignoring the tree.
+Each one is load-bearing: the scanner counts an unused `scanignore` path as an error (and a path that
+matches nothing at all as an exception), so the block cannot silently rot.
 
 ## Accepted costs
 
@@ -48,12 +53,16 @@ the parser fixtures exactly, and each one is load-bearing (the scanner counts an
 2. **Go toolchain for cloudflared.** `go.mod` requires go1.27.4, so the buildserver downloads that
    toolchain and the module graph. Decided: accept it. `-PgoToolchain=<ver|local>` and
    `-PgoVendor` exist if that ever needs to be hermetic.
-3. **The source tarball is 99.9 MB** (`com.torrent.app_7_src.tar.gz`, measured). It is
-   `tarfile.add(build_dir)`, so it necessarily contains the 1.8 GB of staged trees that `prebuild`
-   put inside the checkout — gzip turns that into ~100 MB. Keeping it out would mean staging
-   outside the checkout (`-PnativeRoot=../../native-root`), which moves 1.6 GB into fdroid's build
-   directory parent and needs a `rm -rf` in `prebuild` to stay idempotent; not worth the risk
-   against the buildserver's directory assumptions for a tarball fdroid compresses anyway.
+3. **The APK is not byte-reproducible across build roots.** Two builds from the same staging path
+   produced byte-identical APKs, but moving the staging from `app/native-root` to `<build
+   root>/native-root` changed the APK from 16 733 915 to 16 733 671 bytes: the daemons embed their
+   absolute source paths (`__FILE__` — 192 such strings in libdhtcrawler, 56 in libtransmissiond),
+   so a shorter path means a smaller binary. No `-ffile-prefix-map` is passed. F-Droid does not
+   require reproducibility for inclusion; if it is ever wanted (binary transparency), that is a
+   build-script change and therefore a new tag, not a recipe change.
+4. **The source tarball is 25.5 MB** (`com.torrent.app_7_src.tar.gz`, measured; it was 99.9 MB
+   while the staged trees lived in the checkout). Most of it is the dht_crawler submodule's history
+   and test fixtures. Accepted.
 
 ## What the MR contains
 

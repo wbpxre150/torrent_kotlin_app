@@ -56,13 +56,17 @@ Builds:
     # go in gradleprops, which are passed as -P<key>[=<value>].
     #   prebuiltNativeSrc — trust the staged trees below instead of downloading tarballs.
     #   nativeRoot        — stage outside app/build/, because fdroid runs `gradle clean` between
-    #                       prebuild and the build, and clean deletes build/. Path is relative to
-    #                       the app module dir, so app/native-root.
+    #                       prebuild and the build, and clean deletes build/. It is also outside the
+    #                       *checkout*: fdroid tars the whole checkout for the source tarball, and
+    #                       the staged trees are 1.8 GB (99.9 MB compressed). gradleprops are
+    #                       resolved against the app module dir, so this is app/../../native-root,
+    #                       i.e. `<fdroid build root>/native-root` — the same directory prebuild
+    #                       reaches as ../native-root from the checkout root.
     gradle:
       - yes
     gradleprops:
       - prebuiltNativeSrc
-      - nativeRoot=native-root
+      - nativeRoot=../../native-root
     # No keystore.properties in a fresh clone, so the release build type stays unsigned and the
     # output is app-release-unsigned.apk. F-Droid signs it afterwards.
     output: app/build/outputs/apk/release/app-release-unsigned.apk
@@ -77,18 +81,12 @@ Builds:
       - llama.cpp@18ab62a8ec5144ae5d2f65e78374ba69652d75dd
       - cloudflared@2026.11.0
     # The scanner runs after prebuild (`common.prepare_source` runs prebuild, then build.py does
-    # `gradle clean`, then `scanner.scan_source`), so it sees the staged trees. Measured on the
-    # v1.0.1 checkout: without this block `fdroid scanner com.torrent.app:7` reports 1312 errors,
-    # 1299 of them under app/native-root/src and 13 under app/src/main/cpp/dht_crawler. Every one
-    # is upstream third-party test/fuzz data, a package.json of vendored JS test tooling, a macOS
-    # framework, or the crawler's own CRAM parser fixtures — none of it is compiled into, or
-    # shipped in, the APK.
-    #   app/native-root — fdroid's own srclib checkouts, copied here by prebuild. fdroid never
-    #                     scans build/srclib; this is the same material in a different place.
-    #   dht_crawler/…   — vendored submodule third-party data (libpsl-style fuzz corpora, duktape
-    #                     and civetweb test archives, libbloom collision tables) plus tests/fixtures.
+    # `gradle clean`, then `scanner.scan_source`). The staged trees are outside the checkout now, so
+    # they are not scanned at all and need no entry here; what is left is the vendored `dht_crawler`
+    # submodule. Measured before the staging move: 13 errors there, all upstream third-party data
+    # or the crawler's own CRAM parser fixtures — none of it compiled into, or shipped in, the APK.
     scanignore:
-      - app/native-root
+      # dht_crawler third-party test data, and the CRAM parser fixtures under tests/fixtures.
       - app/src/main/cpp/dht_crawler/lib/libbloom/misc
       - app/src/main/cpp/dht_crawler/lib/civetweb/src/third_party
       - app/src/main/cpp/dht_crawler/lib/civetweb/test
@@ -102,16 +100,19 @@ Builds:
     # sqlite is deliberately absent: its amalgamation is a generated release artifact (tclsh),
     # not something the git tree contains, so fetchSqlite still downloads the official zip.
     prebuild:
-      - mkdir -p app/native-root/src
+      # ../native-root is `<fdroid build root>/native-root`, the directory the nativeRoot gradle
+      # property points at (see above). rm -rf first: prebuild runs on every build, including
+      # rebuilds where the checkout is reused, and `cp -a` into an existing directory would nest.
+      - rm -rf ../native-root && mkdir -p ../native-root/src
       - (cd $$curl$$ && autoreconf -fi)
       - git -C $$mbedtls$$ submodule update --init --recursive
       - git -C $$transmission$$ submodule update --init --recursive
-      - cp -a $$mbedtls$$ app/native-root/src/mbedtls-3.6.6
-      - cp -a $$curl$$ app/native-root/src/curl-8.20.0
-      - cp -a $$transmission$$ app/native-root/src/transmission-4.1.4
-      - cp -a $$libuv$$ app/native-root/src/libuv-v1.48.0
-      - cp -a $$llama.cpp$$ app/native-root/src/llama-18ab62a8
-      - cp -a $$cloudflared$$ app/native-root/src/cloudflared-2026.11.0
+      - cp -a $$mbedtls$$ ../native-root/src/mbedtls-3.6.6
+      - cp -a $$curl$$ ../native-root/src/curl-8.20.0
+      - cp -a $$transmission$$ ../native-root/src/transmission-4.1.4
+      - cp -a $$libuv$$ ../native-root/src/libuv-v1.48.0
+      - cp -a $$llama.cpp$$ ../native-root/src/llama-18ab62a8
+      - cp -a $$cloudflared$$ ../native-root/src/cloudflared-2026.11.0
 
 AutoUpdateMode: Version
 UpdateCheckMode: Tags
