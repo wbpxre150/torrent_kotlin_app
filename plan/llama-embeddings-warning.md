@@ -1,8 +1,10 @@
 # The llama.cpp "embeddings required … -> overriding" log flood
 
-**Status: fixed** — 2026-11-26, dht_crawler commit `4057a72` ("crawler: mark every movie-kind token
-as an output instead of letting the allocr override"), fix 1 below. Originally recorded 2026-11-26 from
-the live dashboard on `b078fce` (versionCode 5 / 0.4.1) as a code reading plus one observation.
+**Status: fixed** — 2026-11-26, dht_crawler commits `4057a72` ("crawler: mark every movie-kind token
+as an output instead of letting the allocr override", fix 1 below) and `7da3204` ("crawler: hold all
+of llama.cpp's log at DEBUG, not just its DEBUG lines", see *Log levels* below). Originally recorded
+2026-11-26 from the live dashboard on `b078fce` (versionCode 5 / 0.4.1) as a code reading plus one
+observation.
 
 ## Symptom
 
@@ -97,6 +99,42 @@ Build/test evidence: `make tests-movie-kind tests-movie-kind-render tests-movie-
 warning-clean under `-Wall -Wextra` in the real `MK_ENABLED` arm64 target
 (`./gradlew :app:buildDhtCrawler`).
 
+## Log levels: the rest of the noise (`7da3204`)
+
+Fix 1 removed the per-item line, but the log tail was still dominated by llama.cpp: one model load
+emitted ~500 `llama_graph_n_input_tensors` lines (llama.cpp *DEBUG*) plus the GGUF metadata dump,
+`print_info`, `load_tensors` and `llama_context`/`llama_kv_cache` blocks (llama.cpp *INFO*) — ~230
+more. None had a timestamp or a level, because llama.cpp's default callback
+(`src/llama-impl.cpp:84` at the pin) **ignores the `ggml_log_level` it is handed**:
+
+```c
+void llama_log_callback_default(ggml_log_level level, const char * text, void * user_data) {
+    (void) level; (void) user_data;
+    fputs(text, stderr);
+    fflush(stderr);
+}
+```
+
+So llama.cpp's own level never applied to the crawler's — the `log_level` setting had no effect on it
+at all.
+
+`movie_kind.c` now installs `llama_log_set(mk_llama_log, NULL)` before the first model load (i.e.
+before `llama_init_from_model`, where the graph dump happens) and maps the levels onto the crawler's:
+**DEBUG and INFO → `LOG_DEBUG`**, WARN → `LOG_WARN`, ERROR → `LOG_ERROR`, `NONE` dropped, `CONT`
+reusing the previous message's level.
+
+llama.cpp's INFO is load diagnostics, and the crawler already prints the one load line worth reading
+at INFO — `MovieKind: model loaded (generation 13, 16 genres, 4 threads)`. So the whole of
+llama.cpp's output sits at DEBUG, and its WARN/ERROR (a failed encode, an unsupported op) still
+surface at the shipped `log_level = INFO`.
+
+This is candidate 2 below done the other way round: it demotes llama.cpp's output by level rather
+than filtering one message string, so no warning is hidden.
+
+Measured on `b078fce` at `log_level = INFO`: 1783 lines with 511 graph lines → **22 lines, 0
+llama.cpp lines**. The same build at `log_level = DEBUG` produced 446k lines, every one prefixed
+`[DEBUG]` — demoted, not deleted.
+
 ## Candidate fixes, cheapest first
 
 1. **Silence it at the source of truth** — build the batch explicitly instead of using
@@ -104,13 +142,18 @@ warning-clean under `-Wall -Wextra` in the real `MK_ENABLED` arm64 target
    `llama_batch_free`. No warning, and the intent ("all tokens are outputs") is stated rather than
    inferred. **Applied — see above.**
 2. **Install a log callback** (`llama_log_set`) that drops this specific message. Cheap, but hides
-   the signal for every other llama.cpp warning too — only worth it as a stop-gap.
+   the signal for every other llama.cpp warning too — only worth it as a stop-gap. **Superseded:**
+   `7da3204` installs a callback that maps levels instead (see *Log levels* above), so nothing is
+   dropped by message text and WARN/ERROR still surface.
 3. **Upstream it**: the override is correct, so the warning arguably belongs at debug level when
    `output_all` is set. That helps everyone but does not fix this device until the pin moves.
 
 ## How to verify a fix
 
 - `files/logs/dht_crawler.log` contains **0** occurrences of `were not marked as outputs`.
+- It also contains **0** `llama_*`/`print_info`/`load_tensors`/`sched_reserve` lines at
+`log_level = INFO`, and the same dump prefixed `[DEBUG]` at `log_level = DEBUG` (that is the level
+mapping working, not a deletion).
 - `movie_kind` rows still increase (`/stats movie_kind.rows_predicted`) and `thermal_pauses` stays
   0, so classification is still running.
 - Re-run the Gate P mask-parity spot check against the pre-change `--dump-masks` output; it must be
