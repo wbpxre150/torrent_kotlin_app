@@ -1,8 +1,8 @@
 # The llama.cpp "embeddings required … -> overriding" log flood
 
-**Status: open, cosmetic, unfixed.** Recorded 2026-11-26 from the live dashboard on `b078fce`
-(versionCode 5 / 0.4.1). Nothing here was diagnosed on-device; it is a code reading plus one
-observation.
+**Status: fixed** — 2026-11-26, dht_crawler commit `4057a72` ("crawler: mark every movie-kind token
+as an output instead of letting the allocr override"), fix 1 below. Originally recorded 2026-11-26 from
+the live dashboard on `b078fce` (versionCode 5 / 0.4.1) as a code reading plus one observation.
 
 ## Symptom
 
@@ -53,14 +53,56 @@ volume rather than to anything going wrong.
 
 **Not verified:** that the override is bit-identical to flagging every token as an output
 explicitly. That is what the upstream code does, but the mask-parity style check (Gate P) was not
-re-run for this specific change of batch construction.
+re-run for this specific change of batch construction. (The fix above settles it at the code level —
+the override *is* `std::fill(output, 1)`; an on-device `--dump-masks` diff against pre-change output
+is still the empirical check.)
+
+## Fix applied (candidate 1)
+
+`dht_crawler/src/movie_kind.c` (`mk_llama_embed`) no longer uses `llama_batch_get_one`. It builds
+the batch explicitly and states the intent:
+
+```c
+struct llama_batch batch = llama_batch_init(n_tokens, 0, 1);
+memcpy(batch.token, tokens, (size_t)n_tokens * sizeof(llama_token));
+batch.n_tokens = n_tokens;
+for (int32_t i = 0; i < n_tokens; i++) {
+    batch.pos[i]       = i;
+    batch.n_seq_id[i]  = 1;
+    batch.seq_id[i][0] = 0;
+    batch.logits[i]    = 1;
+}
+...
+free(tokens);
+llama_batch_free(batch);
+```
+
+Why this is equivalent rather than merely quieter, at the pin `18ab62a8`:
+
+- `llama_batch_compat::init` (`src/llama-batch.cpp:1472`) reads a NULL `logits` array as
+  `t.output = (i == n_tokens - 1)` — *only the last token is an output*. That is what made
+  `output_all` warn.
+- The override it then performs is `std::fill(output.begin(), output.end(), 1)` — *every* token an
+  output, which is exactly what the loop above requests. Same `output` vector, same graph.
+- The hand-written `pos`/`n_seq_id`/`seq_id` values are the ones the automatic paths produce: the
+  compat layer auto-generates `pos` from `llama_memory_seq_pos_max(mem, s) + 1`, and the decode
+  branch clears the memory immediately before `llama_decode`, so both sequences start at 0.
+
+`llama_batch_init` mallocs `pos`/`n_seq_id`/`seq_id`/`logits` uninitialised, so they must be written
+here — passing the mallocs through untouched would feed garbage positions to the backend.
+`llama_batch_free` frees the copied token array, hence the separate `free(tokens)`.
+
+Build/test evidence: `make tests-movie-kind tests-movie-kind-render tests-movie-kind-filter` pass
+(the host build has no `MK_ENABLED`, so it never compiles this block), and the change is
+warning-clean under `-Wall -Wextra` in the real `MK_ENABLED` arm64 target
+(`./gradlew :app:buildDhtCrawler`).
 
 ## Candidate fixes, cheapest first
 
 1. **Silence it at the source of truth** — build the batch explicitly instead of using
    `llama_batch_get_one`: `llama_batch_init(n_tokens, 0, 1)` with every `batch.logits[i] = 1`, then
    `llama_batch_free`. No warning, and the intent ("all tokens are outputs") is stated rather than
-   inferred.
+   inferred. **Applied — see above.**
 2. **Install a log callback** (`llama_log_set`) that drops this specific message. Cheap, but hides
    the signal for every other llama.cpp warning too — only worth it as a stop-gap.
 3. **Upstream it**: the override is correct, so the warning arguably belongs at debug level when
