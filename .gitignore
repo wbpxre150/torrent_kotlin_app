@@ -25,6 +25,14 @@ app/src/main/jniLibs/arm64-v8a/libcloudflared.so
 .externalNativeBuild/
 .cxx/
 
+# Classifier weights (CRAM v15 + movie-kind v13 GGUF). Downloaded on-device by
+# `dht_crawler --fetch-models` and sha256-verified, never bundled in the APK and
+# never committed — a single generation is ~500 MB, far past GitHub's file limit.
+app/src/main/cpp/dht_crawler-android/models/
+*.gguf
+*.ftz
+*.cram
+
 # Android capture/test artifacts
 captures/
 *.apk
