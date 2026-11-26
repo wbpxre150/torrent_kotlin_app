@@ -128,6 +128,23 @@ val prebuiltNativeSrc = providers.gradleProperty("prebuiltNativeSrc").isPresent
 val goToolchain = providers.gradleProperty("goToolchain").orNull ?: "go1.27.4"
 
 // -PgoVendor builds the tunnel with -mod=vendor and GOPROXY=off: no module downloads at all.
+
+// Fetch a pinned source archive, unless a hermetic builder (F-Droid) staged the tree itself.
+// Deliberately not silent: if the builder claims a staged tree that is not there, fail loudly
+// rather than downloading and producing a build whose inputs came from somewhere else.
+fun stageOrFetch(srcDir: File, archive: File, url: String) {
+    if (prebuiltNativeSrc) {
+        if (!srcDir.exists()) {
+            error("prebuiltNativeSrc is set but $srcDir is missing — stage ${srcDir.name} there")
+        }
+        return
+    }
+    if (archive.exists()) return
+    archive.parentFile.mkdirs()
+    project.exec {
+        commandLine("curl", "-L", "--fail", "-o", archive.absolutePath, url)
+    }
+}
 val goVendor = providers.gradleProperty("goVendor").isPresent
 
 tasks.register("buildMbedtls") {
@@ -152,13 +169,8 @@ tasks.register("buildMbedtls") {
     outputs.dir(installDir)
 
     doLast {
-        // 1. Fetch tarball if missing
-        if (!tarball.exists()) {
-            tarball.parentFile.mkdirs()
-            project.exec {
-                commandLine("curl", "-L", "--fail", "-o", tarball.absolutePath, url)
-            }
-        }
+        // 1. Fetch the tarball, unless a hermetic builder staged the tree (step 2 then no-ops).
+        stageOrFetch(srcDir, tarball, url)
         // 2. Extract if missing
         if (!srcDir.exists()) {
             project.exec {
@@ -213,13 +225,8 @@ tasks.register("buildCurl") {
     outputs.dir(installDir)
 
     doLast {
-        // 1. Fetch tarball if missing
-        if (!tarball.exists()) {
-            tarball.parentFile.mkdirs()
-            project.exec {
-                commandLine("curl", "-L", "--fail", "-o", tarball.absolutePath, curlUrl)
-            }
-        }
+        // 1. Fetch the tarball, unless a hermetic builder staged the tree (step 2 then no-ops).
+        stageOrFetch(srcDir, tarball, curlUrl)
         // 2. Extract if missing
         if (!srcDir.exists()) {
             project.exec {
@@ -306,13 +313,8 @@ tasks.register("buildTransmission") {
     inputs.property("transmissionVersion", txVersion)
 
     doLast {
-        // 1. Fetch tarball if missing
-        if (!tarball.exists()) {
-            tarball.parentFile.mkdirs()
-            project.exec {
-                commandLine("curl", "-L", "--fail", "-o", tarball.absolutePath, url)
-            }
-        }
+        // 1. Fetch the tarball, unless a hermetic builder staged the tree (step 2 then no-ops).
+        stageOrFetch(srcDir, tarball, url)
         // 2. Extract if missing
         if (!srcDir.exists()) {
             project.exec {
@@ -403,13 +405,8 @@ tasks.register("buildLibuv") {
     outputs.dir(installDir)
 
     doLast {
-        // 1. Fetch tarball if missing
-        if (!tarball.exists()) {
-            tarball.parentFile.mkdirs()
-            project.exec {
-                commandLine("curl", "-L", "--fail", "-o", tarball.absolutePath, url)
-            }
-        }
+        // 1. Fetch the tarball, unless a hermetic builder staged the tree (step 2 then no-ops).
+        stageOrFetch(srcDir, tarball, url)
         // 2. Extract if missing
         if (!srcDir.exists()) {
             project.exec {
@@ -448,7 +445,9 @@ tasks.register("fetchSqlite") {
     outputs.dir(srcDir)
 
     doLast {
-        // 1. Fetch zip if missing
+        // 1. Fetch zip if missing. Not routed through stageOrFetch: the amalgamation is a
+        // generated release artifact, not something sqlite's git tree contains (it needs tclsh),
+        // so a staged srclib checkout cannot replace this download.
         if (!zipFile.exists()) {
             zipFile.parentFile.mkdirs()
             project.exec {
