@@ -6,9 +6,9 @@
 # sha256-pinned fetches (llama.cpp, cloudflared) accept the staged tree instead of downloading a
 # tarball to hash. The five existence-checked fetches skip their download once the tree is there.
 #
-# Remaining network dependency: the Go toolchain for cloudflared (its go.mod requires go1.27.4).
-# See docs/fdroid/BLOCKERS.md item 2 — either let the buildserver fetch it, or ship Go >= 1.27.4
-# and add -PgoToolchain=local (plus -PgoVendor with a staged vendor/ tree to kill module fetches).
+# One remaining network dependency: the Go toolchain for cloudflared (its go.mod requires
+# go1.27.4). Decided: the buildserver fetches it, which is why no -PgoToolchain/-PgoVendor is
+# passed below. See docs/fdroid/BLOCKERS.md item 2 for the knobs and the reasoning.
 
 Categories:
   - Internet

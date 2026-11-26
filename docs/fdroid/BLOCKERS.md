@@ -30,21 +30,19 @@ unchanged: download, verify, extract.
 Staging still lands under `app/build/`, which is gitignored and wiped by `gradle clean`, so the
 `prebuild` step must run after any clean.
 
-## 2. Go toolchain for cloudflared — knob added, decision still open
+## 2. Go toolchain for cloudflared — decided: the buildserver fetches it
 
-cloudflared's `go.mod` requires **go1.27.4**. `buildCloudflared` therefore sets
-`GOTOOLCHAIN=go1.27.4` by default, which makes the host's Go download that toolchain (and the
-module graph) on first build. Two knobs now exist:
+cloudflared's `go.mod` requires **go1.27.4**, so `buildCloudflared` sets `GOTOOLCHAIN=go1.27.4`
+and the host's Go downloads that toolchain (and the module graph) on first build.
 
-- `-PgoToolchain=<version|local>` — override the toolchain. `local` pins to the host's Go, which
-  needs Go >= 1.27.4 installed; anything older fails immediately with a clear message instead of
-  silently downloading.
-- `-PgoVendor` — builds with `-mod=vendor` and `GOPROXY=off`, so no module is fetched. Requires a
-  `vendor/` directory in the staged tree (`go mod vendor`), which cannot be produced without
-  network, so a buildserver would have to stage it.
+**Decision: keep the default and let F-Droid's buildserver fetch it.** That is a build-time
+network dependency, accepted deliberately — the alternative (vendor the modules and require Go
+>= 1.27.4 on the buildserver) has more moving parts and cannot be tested here, since this host
+ships Go 1.27.3, older than cloudflared's own requirement.
 
-**Decision needed:** let the buildserver download the toolchain (simplest, network-dependent), or
-ship Go >= 1.27.4 and set `-PgoToolchain=local -PgoVendor` with a vendored tree.
+Both knobs still exist if that changes: `-PgoToolchain=<version|local>` overrides the toolchain
+(`local` fails fast with a clear message rather than downloading), and `-PgoVendor` builds with
+`-mod=vendor` and `GOPROXY=off` against a staged `vendor/` tree.
 
 ## 3. The dht_crawler submodule
 
@@ -102,11 +100,12 @@ GitHub release to F-Droid has to uninstall first.
 
 ## What is left before filing
 
-1. Decide item 2 (Go toolchain): allow the download, or ship Go >= 1.27.4 with a vendored tree.
-2. Run `fdroid build --test com.torrent.app` locally against the draft recipe — the
+1. Run `fdroid build --test com.torrent.app` locally against the draft recipe — the
    `prebuild`/`srclibs` block is untested, and `srclib` versions must be checked to exist as tags
    (e.g. `transmission@4.1.4`, `libuv@v1.48.0`, `sqlite@version-3.49.1`).
-3. Confirm the transmission srclib checkout carries its vendored third-party sources, or add
+2. Confirm the transmission srclib checkout carries its vendored third-party sources, or add
    `--recurse-submodules` to it.
-4. Re-cut the release APK for the ABI-filter change: the published v1.0 asset was built before
-   `abiFilters` existed, so it still contains the stray v7a/x86/x86_64 entries.
+3. File the MR.
+
+The v1.0 release asset was replaced in place with the ABI-filtered build (same tag, same
+versionCode 6, new APK sha256), so the published APK matches this tree.
