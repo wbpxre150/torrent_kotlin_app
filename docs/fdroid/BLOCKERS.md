@@ -2,9 +2,9 @@
 
 **Status: the recipe builds from a tag, scan included, and nothing is outstanding in this repo.**
 `fdroid build --test --refresh com.torrent.app` (fdroidserver 2.4.6, 2026-11-26) against
-**`v1.0.1`** — no `--skip-scan`, no `--no-tarball` — ends with `success: com.torrent.app` /
-`1 build succeeded`, producing a 16.7 MB `arm64-v8a` APK (`versionCode 7`, `versionName 1.0.1`,
-16 733 671 bytes) signed by F-Droid's test key. `fdroid scanner com.torrent.app:7` reports
+**`v1.0.2`** — no `--skip-scan`, no `--no-tarball` — ends with `success: com.torrent.app` /
+`1 build succeeded`, producing a 16.7 MB `arm64-v8a` APK (`versionCode 8`, `versionName 1.0.2`,
+16 733 667 bytes) signed by F-Droid's test key. `fdroid scanner com.torrent.app:8` reports
 **0 errors / 0 warnings**, `fdroid lint com.torrent.app` is silent, and the source tarball is
 25.5 MB. No MR has been filed yet; what it has to contain is in
 [What the MR contains](#what-the-mr-contains).
@@ -53,16 +53,17 @@ matches nothing at all as an exception), so the block cannot silently rot.
 2. **Go toolchain for cloudflared.** `go.mod` requires go1.27.4, so the buildserver downloads that
    toolchain and the module graph. Decided: accept it. `-PgoToolchain=<ver|local>` and
    `-PgoVendor` exist if that ever needs to be hermetic.
-3. **The APK is not byte-reproducible across build roots.** Two builds from the same staging path
-   produced byte-identical APKs, but moving the staging from `app/native-root` to `<build
-   root>/native-root` changed the APK from 16 733 915 to 16 733 671 bytes: the daemons embed their
-   absolute source paths (`__FILE__` — 192 such strings in libdhtcrawler, 56 in libtransmissiond),
-   so a shorter path means a smaller binary. No `-ffile-prefix-map` is passed. F-Droid does not
-   require reproducibility for inclusion; if it is ever wanted (binary transparency), that is a
-   build-script change and therefore a new tag, not a recipe change.
-4. **The source tarball is 25.5 MB** (`com.torrent.app_7_src.tar.gz`, measured; it was 99.9 MB
-   while the staged trees lived in the checkout). Most of it is the dht_crawler submodule's history
-   and test fixtures. Accepted.
+3. **The APK is not byte-reproducible across build roots.** Repeated builds from the same staging
+   path produced byte-identical APKs, but moving the staging from `app/native-root` to
+   `<build root>/native-root` changed the v1.0.1 APK from 16 733 915 to 16 733 671 bytes (v1.0.2,
+   same staging, measures 16 733 667 — the 4 bytes are the versionCode/versionName resources): the
+   daemons embed their absolute source paths (`__FILE__` — 192 such strings in libdhtcrawler, 56 in
+   libtransmissiond), so a shorter path means a smaller binary. No `-ffile-prefix-map` is passed.
+   F-Droid does not require reproducibility for inclusion; if it is ever wanted (binary
+   transparency), that is a build-script change and therefore a new tag, not a recipe change.
+4. **The source tarball is 25.5 MB** (`com.torrent.app_8_src.tar.gz`, 25 488 950 bytes measured;
+   it was 99.9 MB while the staged trees lived in the checkout). Most of it is the dht_crawler
+   submodule's history and test fixtures. Accepted.
 
 ## What the MR contains
 
@@ -88,7 +89,9 @@ Resolved along the way (kept here so nobody re-litigates them):
 
 - ~~Point the recipe at a tag that contains the build-script knobs.~~ **Done.** `v1.0.1`
   (versionCode 7) is the first tag carrying `-PnativeRoot`/`-PprebuiltNativeSrc`, so
-  `UpdateCheckMode: Tags` / `AutoUpdateMode: Version` track it normally.
+  `UpdateCheckMode: Tags` / `AutoUpdateMode: Version` track it normally. The MR ships **`v1.0.2`**
+  (versionCode 8) instead, the first tag that also carries the tracked gradle wrapper and the
+  finished recipe; 1.0.2 has no functional change over 1.0.1.
 - ~~Consider `scanignore`.~~ **Done, and it was needed.** See the table above.
 - ~~The published APK is not stripped.~~ **Fixed.** The daemons were shipping ~90 MB of
   `debug_info` each because AGP's `stripReleaseDebugSymbols` reports UP-TO-DATE and emits
@@ -101,6 +104,9 @@ Resolved along the way (kept here so nobody re-litigates them):
   (`sha256 7d3a4ac4…`) to the jar in `gradle/gradle` `v8.14.3`, matching
   `distributionUrl=gradle-8.14.3-bin.zip` — so `./gradlew` works in a fresh clone. F-Droid was
   never affected; it brings its own Gradle.
+  Note that fdroid's scanner *deletes* the tracked jar from its own checkout before building
+  (`INFO: Removing gradle-wrapper.jar at gradle/wrapper/gradle-wrapper.jar`) — it always supplies
+  its own Gradle, so tracking it changes nothing for F-Droid.
 
 ## Reviewer notes (not blockers)
 

@@ -43,11 +43,13 @@ AntiFeatures:
 
 
 Builds:
-  - versionName: '1.0.1'
-    versionCode: 7
+  - versionName: '1.0.2'
+    versionCode: 8
     # v1.0 predates the build-script knobs (-PnativeRoot, -PprebuiltNativeSrc) and cannot be
-    # built by this recipe; v1.0.1 is the first tag that carries them.
-    commit: v1.0.1
+    # built by this recipe; v1.0.1 is the first tag that carries them, and v1.0.2 is the one that
+    # also carries the tracked gradle wrapper and the finished recipe. 1.0.2 has no functional
+    # change over 1.0.1 — if a reviewer prefers fewer builds, this single entry is the one to keep.
+    commit: v1.0.2
     # dht_crawler is a git submodule pointing at a public repo; its three lib/ patches are
     # in-tree and applied by prepareDhtCrawlerSrc, so nothing extra is needed.
     submodules: true
@@ -116,5 +118,5 @@ Builds:
 
 AutoUpdateMode: Version
 UpdateCheckMode: Tags
-CurrentVersion: '1.0.1'
-CurrentVersionCode: 7
+CurrentVersion: '1.0.2'
+CurrentVersionCode: 8
