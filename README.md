@@ -7,9 +7,10 @@ USB drive through Android's Storage Access Framework.
 
 ![Torrent App control dashboard](docs/screenshots/web-dashboard.png)
 
-<sub>Live dashboard on a phone that has crawled 1.64 M torrents: the DHT crawler card with its
-classifier and language-filter lines, transmission with its torrent list, the cloudflared tunnel,
-the FTP server and USB storage.</sub>
+<sub>Live dashboard on a phone that has crawled 1,647,543 torrents into an 11.6 GB database: the
+DHT crawler card with its classifier, language-filter and models lines, transmission with its
+torrent list, the cloudflared tunnel, the FTP server and USB storage. The log tail is each
+daemon's real output, streamed over a WebSocket.</sub>
 
 ## What it does
 
@@ -25,6 +26,15 @@ the FTP server and USB storage.</sub>
 
 The app is a foreground service that supervises the four native daemons, restarting them with
 backoff and shutting them down gracefully.
+
+### Searching the index
+
+![Search page](docs/screenshots/web-search.png)
+
+Search runs over the crawled index on the phone, best matches first, with category, TV-kind and
+adult filters. Each hit carries its size, peers, age and the classifier's confidence, plus genre
+pills for movies and one-tap **Add** to transmission or **Search IMDb**. The `ebook 30%` result in
+that shot is the classifier being honest about a name it is not sure of.
 
 ## Requirements
 
