@@ -59,3 +59,10 @@ graphify-out/
 .playwright-cli/
 __pycache__/
 *.pyc
+
+# Release signing material — never commit, never publish. keystore.properties holds the
+# store/key passwords in clear text and points at the .key file itself.
+keystore.properties
+*.jks
+*.keystore
+*.key

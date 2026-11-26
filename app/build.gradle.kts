@@ -1,5 +1,7 @@
 // Needed by fetchLlamaCpp's tarball pin check (`java` alone is the Gradle Java extension here).
 import java.security.MessageDigest
+// `java.util.Properties` cannot be spelled inline below: `java` is the Gradle Java extension.
+import java.util.Properties
 
 plugins {
     id("com.android.application")
@@ -15,14 +17,35 @@ android {
         applicationId = "com.torrent.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 5
-        versionName = "0.4.1"
+        versionCode = 6
+        versionName = "1.0"
+    }
+
+    // Release signing comes from keystore.properties at the repo root, which is gitignored. A
+    // builder without that file (F-Droid's buildserver, CI, anyone cloning this repo) must still
+    // get a working build, so the file is optional: without it the release build type simply
+    // stays unsigned and gets signed by whoever is building.
+    val keystoreFile = rootProject.file("keystore.properties")
+    val keystoreProps = Properties().apply {
+        if (keystoreFile.exists()) keystoreFile.inputStream().use { load(it) }
+    }
+    signingConfigs {
+        if (keystoreFile.exists()) {
+            create("release") {
+                storeFile = file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+            // null when keystore.properties is absent (F-Droid / CI): unsigned, not broken.
+            signingConfig = signingConfigs.findByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -871,18 +894,31 @@ tasks.register("buildCloudflared") {
 
 // Ensure buildTransmission runs before jniLibs are merged into the APK
 afterEvaluate {
-    // Ensure native libs and generated crawler assets are ready before packaging
-    tasks.named("mergeDebugJniLibFolders").configure {
-        dependsOn("buildTransmission")
-        dependsOn("buildDhtCrawler")
-        dependsOn("buildFtpServer")
-        dependsOn("buildCloudflared")
+    // Ensure native libs are ready before they are merged into the APK. Both variants are wired:
+    // only mergeDebugJniLibFolders used to be, so a release build packaged whatever stale .so
+    // files happened to be sitting in jniLibs/ from an earlier debug build (or none at all).
+    listOf("mergeDebugJniLibFolders", "mergeReleaseJniLibFolders").forEach { taskName ->
+        tasks.named(taskName).configure {
+            dependsOn("buildTransmission")
+            dependsOn("buildDhtCrawler")
+            dependsOn("buildFtpServer")
+            dependsOn("buildCloudflared")
+        }
     }
+    // Generated crawler assets (keyword files) are variant-independent, so both are wired.
     tasks.named("mergeDebugAssets").configure {
         dependsOn("copyDhtCrawlerAssets")
     }
     tasks.named("mergeReleaseAssets").configure {
         dependsOn("copyDhtCrawlerAssets")
+    }
+    // Release-only lint reads the generated asset dir without declaring that dependency. Gradle 8
+    // treats an undeclared producer/consumer pair as a hard error, and debug builds never run
+    // lintVital, so this only ever bites on the release path.
+    listOf("lintVitalAnalyzeRelease", "generateReleaseLintVitalReportModel").forEach { taskName ->
+        tasks.matching { it.name == taskName }.configureEach {
+            dependsOn("copyDhtCrawlerAssets")
+        }
     }
 }
 }
