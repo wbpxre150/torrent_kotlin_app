@@ -42,6 +42,16 @@ that shot is the classifier being honest about a name it is not sure of.
 - A USB drive the phone can mount (used for downloads and the FTP root)
 - Several GB of internal storage for the crawler database (it grows with the index — 11.6 GB at 1.6 M torrents on ours) plus ~500 MB for the models
 
+## Download
+
+The signed arm64-v8a APK is attached to the [latest release](https://github.com/wbpxre150/torrent_kotlin_app/releases/latest).
+It is arm64-only: all four daemons are cross-compiled for that ABI, so other architectures
+install but cannot run them.
+
+F-Droid packaging is prepared but not submitted yet — [`docs/fdroid/BLOCKERS.md`](docs/fdroid/BLOCKERS.md)
+lists what is still missing and [`docs/fdroid/metadata.yml`](docs/fdroid/metadata.yml) holds the
+recipe draft.
+
 ## Build and install
 
 The build needs **JDK 21** — the system JDK 26 is not supported by Android Gradle Plugin 8.8.2.
@@ -56,8 +66,8 @@ export ANDROID_NDK_HOME="$HOME/Android/Sdk/ndk/android-ndk-r27"
 The first build cross-compiles four native binaries (transmission, dht_crawler, the FTP server and
 cloudflared) and takes a while; later builds reuse them.
 
-The APK is ~55 MB. The classifier weights (~490 MB) are **not** in it — the crawler downloads them
-on first start.
+The release APK is ~35 MB (R8 + resource shrinking); a debug build is ~55 MB. The classifier
+weights (~490 MB) are **not** in it — the crawler downloads them on first start.
 
 ## First run
 

@@ -1,0 +1,70 @@
+# Draft fdroiddata recipe for com.torrent.app — UNTESTED against `fdroid build`.
+# Target path in the fdroiddata MR: metadata/com.torrent.app.yml
+#
+# Read docs/fdroid/BLOCKERS.md before filing. The build is not hermetic yet: the Gradle
+# script downloads seven source tarballs itself (mbedtls, curl, transmission, libuv, sqlite,
+# llama.cpp, cloudflared) and the recipe below is the sketch of how to feed it pre-fetched
+# sources instead. Until those downloads are replaced by real srclibs handling, `fdroid build`
+# on the F-Droid buildserver will attempt network fetches during the Gradle run.
+
+Categories:
+  - Internet
+License: MIT
+AuthorName: Adam Bullock
+AuthorEmail: wbpxre150@outlook.com
+WebSite: https://github.com/wbpxre150/torrent_kotlin_app
+SourceCode: https://github.com/wbpxre150/torrent_kotlin_app
+IssueTracker: https://github.com/wbpxre150/torrent_kotlin_app/issues
+Changelog: https://github.com/wbpxre150/torrent_kotlin_app/releases
+
+AutoName: Torrent App
+
+RepoType: git
+Repo: https://github.com/wbpxre150/torrent_kotlin_app.git
+
+# The four native daemons are cross-compiled for arm64-v8a only; see BLOCKERS.md item 6.
+# No AntiFeatures are declared. Decide on NonFreeNet before filing if the classifier weights
+# (downloaded at runtime from a network URL) are not published under a free license.
+
+Builds:
+  - versionName: '1.0'
+    versionCode: 6
+    commit: v1.0
+    # dht_crawler is a git submodule pointing at a public repo; its three lib/ submodule
+    # patches are in-tree and applied by prepareDhtCrawlerSrc, so nothing extra is needed.
+    submodules: true
+    ndk: r27
+    gradle:
+      - yes
+    output: app/build/outputs/apk/release/app-release.apk
+    sudo:
+      - apt-get update || apt-get update
+      - apt-get install -y cmake ninja-build
+    srclibs:
+      - mbedtls@mbedtls-3.6.6
+      - curl@curl-8_20_0
+      - transmission@4.1.4
+      - libuv@v1.48.0
+      - sqlite@version-3.49.1
+      - llama.cpp@18ab62a8ec5144ae5d2f65e78374ba69652d75dd
+      - cloudflared@2026.11.0
+    # Five of the seven tasks skip their download when the extracted tree already exists at the
+    # path below (tarball check first, then source dir), so staging the srclibs there is enough
+    # for them. The two sha256-pinned ones — llama.cpp and cloudflared — hash the tarball
+    # unconditionally and will curl it even when the tree is present; they need the escape hatch
+    # described in BLOCKERS.md item 1 before this recipe can build offline. Also note app/build/
+    # is gitignored and a `gradle clean` wipes it, so these copies must follow any clean step.
+    prebuild:
+      - mkdir -p app/build/native/src
+      - cp -a $$mbedtls$$ app/build/native/src/mbedtls-3.6.6
+      - cp -a $$curl$$ app/build/native/src/curl-8.20.0
+      - cp -a $$transmission$$ app/build/native/src/transmission-4.1.4
+      - cp -a $$libuv$$ app/build/native/src/libuv-v1.48.0
+      - cp -a $$sqlite$$ app/build/native/src/sqlite-amalgamation
+      - cp -a $$llama.cpp$$ app/build/native/src/llama-18ab62a8
+      - cp -a $$cloudflared$$ app/build/native/src/cloudflared-2026.11.0
+
+AutoUpdateMode: Version
+UpdateCheckMode: Tags
+CurrentVersion: '1.0'
+CurrentVersionCode: 6

@@ -1,0 +1,10 @@
+First public release.
+
+- One APK that runs a DHT crawler, transmission-daemon, an FTP server and a
+  cloudflared tunnel on the phone, supervised by a foreground service.
+- On-device classifiers: CRAM v15 (category, TV kind and adult in one forward
+  pass) and a llama.cpp movie-genre head, both downloaded and sha256-verified
+  on first run instead of being bundled.
+- Web dashboard with live logs, per-daemon control, search over the crawled
+  index and one-tap add to transmission.
+- All storage on a USB drive through the Storage Access Framework.

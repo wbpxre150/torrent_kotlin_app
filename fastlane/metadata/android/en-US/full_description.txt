@@ -1,0 +1,30 @@
+Torrent App turns an Android phone into a self-contained torrent box: it indexes the BitTorrent DHT itself, downloads what you pick, serves the result to your media players over FTP, and gives you a web dashboard — with every byte stored on a USB drive through Android's Storage Access Framework.
+
+Everything runs on the device. No account, no cloud service, no companion app.
+
+CRAWL
+A forked dht_crawler walks the BitTorrent DHT, fetches metadata for the infohashes it finds, and stores names, file lists and categories in SQLite, with a full-text index over torrent names and file paths. On the reference phone the index reached 1.6 million torrents (11.6 GB) after a few days of crawling.
+
+CLASSIFY
+Two on-device models label every row as it is ingested: a CRAM linear model that predicts category, TV kind and adult in a single forward pass, and a llama.cpp movie-genre classifier. Both are downloaded and sha256-verified on first run — they are never bundled in the APK.
+
+SEARCH
+The dashboard's search page filters by category, adult state and text, ranks by peers and recency, and turns a result into a download with one tap.
+
+DOWNLOAD
+A forked transmission-daemon does the transfer. Its disk I/O is routed through the Storage Access Framework, so downloads land on the USB drive without a rooted device or broad storage permissions.
+
+SERVE
+A small C FTP server publishes the download directory on your LAN, so a TV, a Kodi box or a console can stream straight from the phone.
+
+CONTROL
+A web dashboard on port 8090 shows every daemon's state and live log, with per-daemon start, stop and restart, settings for transmission, FTP, storage and the crawler, and a WebSocket log stream. Access is protected by a token; the app shows the dashboard URL and a QR code.
+
+REQUIREMENTS
+- Android 8.0 or newer, arm64-v8a
+- A USB drive the phone can mount
+- Several GB of storage for the index, plus about 500 MB for the classifier models
+
+This build is arm64-v8a only. All four daemons are cross-compiled for that ABI, so other ABIs will install but cannot run them.
+
+Torrent App is free software under the MIT license. The bundled transmission-daemon is GPLv2; its source is in this project's repository.
