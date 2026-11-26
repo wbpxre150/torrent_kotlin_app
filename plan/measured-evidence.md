@@ -421,6 +421,7 @@ with 170.6 GB free.
 
 Four daemons running: DHT Crawler, Transmission, cloudflared, FTP Server.
 
-Observed on that dashboard render, unexplained: the DHT Crawler log tail is saturated with repeated
-llama.cpp lines `init: embeddings required but some input tokens were not marked as outputs ->
-overriding`. Recorded as an observation, not diagnosed.
+Observed on that dashboard render, unexplained at the time: the DHT Crawler log tail is saturated
+with repeated llama.cpp lines `init: embeddings required but some input tokens were not marked as
+outputs -> overriding`. Written up separately in
+[`llama-embeddings-warning.md`](llama-embeddings-warning.md).
