@@ -43,10 +43,13 @@ None of this was visible from reading the docs — each one only showed up when 
 3. **Consider `scanignore`.** The staged sources land under `app/native-root/`, outside the repo,
    so the scanner should not see them — but if it complains about vendored third-party sources in
    the transmission checkout, add them there.
-4. **The published APK is not stripped.** The v1.0 release asset is ~36 MB because AGP's strip step
-   did not run on that incremental build (the daemons carry debug_info); the same tree built clean
-   by fdroid is 16.7 MB with stripped daemons. Not a correctness problem, but a clean rebuild
-   halves the download.
+4. **The published APK is not stripped.** The v1.0 release asset is ~36 MB and its daemons carry
+   `debug_info`; the same tree built clean by fdroid is 16.7 MB with stripped daemons (running
+   `llvm-strip --strip-unneeded` by hand reproduces fdroid's sizes exactly, e.g. libftpserver
+   168 880 → 42 272 bytes). Locally `:app:stripReleaseDebugSymbols` reports UP-TO-DATE and emits
+   unstripped output with no warning, so AGP is not stripping this project's `lib*.so` — cause not
+   established (they are PIE executables, not shared objects, which may be what it filters on).
+   Cosmetic: the binary works either way, it is just twice the download.
 
 ## Reviewer notes (not blockers)
 
