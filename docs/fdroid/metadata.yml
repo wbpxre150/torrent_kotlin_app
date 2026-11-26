@@ -25,12 +25,11 @@ Repo: https://github.com/wbpxre150/torrent_kotlin_app.git
 # MIT licensed, same as the app — see the LICENSE in the classifier-model repo.
 
 Builds:
-  - versionName: '1.0'
-    versionCode: 6
-    # Must be a tag or commit that contains the build-script knobs (-PnativeRoot,
-    # -PprebuiltNativeSrc). The v1.0 tag predates them; use the next release tag, or the commit
-    # below until one exists.
-    commit: 8bc4d5bf8728a1ac0c3d31a69fbb9efebefbd70d
+  - versionName: '1.0.1'
+    versionCode: 7
+    # v1.0 predates the build-script knobs (-PnativeRoot, -PprebuiltNativeSrc) and cannot be
+    # built by this recipe; v1.0.1 is the first tag that carries them.
+    commit: v1.0.1
     # dht_crawler is a git submodule pointing at a public repo; its three lib/ patches are
     # in-tree and applied by prepareDhtCrawlerSrc, so nothing extra is needed.
     submodules: true
@@ -79,5 +78,5 @@ Builds:
 
 AutoUpdateMode: Version
 UpdateCheckMode: Tags
-CurrentVersion: '1.0'
-CurrentVersionCode: 6
+CurrentVersion: '1.0.1'
+CurrentVersionCode: 7

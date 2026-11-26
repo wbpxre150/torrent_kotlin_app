@@ -33,9 +33,10 @@ None of this was visible from reading the docs — each one only showed up when 
 
 ## Before filing
 
-1. **Point the recipe at a tag that contains the build-script knobs.** `v1.0` predates
-   `-PnativeRoot`/`-PprebuiltNativeSrc`; the recipe currently carries a raw commit SHA. Either cut
-   the next release tag and use it, or keep the SHA.
+1. ~~**Point the recipe at a tag that contains the build-script knobs.**~~ **Done.** `v1.0.1`
+   (versionCode 7) is the first tag carrying `-PnativeRoot`/`-PprebuiltNativeSrc`, and the recipe
+   now builds from it, so `UpdateCheckMode: Tags` / `AutoUpdateMode: Version` track it normally.
+   `v1.0` cannot be built by this recipe — do not add it as a second `Builds:` entry.
 2. **Add the srclibs to fdroiddata.** Some may already exist upstream (`mbedtls`, `curl`,
    `transmission`, `libuv`, `sqlite`); `llama.cpp` and `cloudflared` likely need adding from
    [`srclibs/`](srclibs/). Verify the tags resolve: `mbedtls-3.6.6`, `curl-8_20_0`, `4.1.4`,

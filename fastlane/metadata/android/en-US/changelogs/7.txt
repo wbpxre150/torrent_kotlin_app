@@ -1,0 +1,7 @@
+Maintenance release — same features as 1.0, packaged properly.
+
+- arm64-v8a only: the APK no longer advertises 32-bit and x86 support it cannot
+  deliver, so unsupported devices can no longer install it.
+- Stripped daemons: the four native binaries shipped with debug symbols, which
+  made the download 35 MB instead of 16 MB.
+- Build fixes so the app can be built reproducibly from source by F-Droid.
