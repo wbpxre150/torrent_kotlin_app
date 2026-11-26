@@ -466,7 +466,7 @@ fixes that patch third-party submodules** — `bencode-cap-fix.patch` → `benco
 (their own `make` applies the same three, guarded and idempotent; the Gradle list exists only because the
 Android build compiles the copied tree with CMake/NDK and never runs that Makefile). New submodule fixes
 go LAST, as the 4th slot; every other crawler change is a normal commit in the crawler repo.
-The crawler's own `make tests` (11 binaries) is hermetic — no Android checkout needed: the CRAM v15
+The crawler's own `make tests` (12 targets, 13 binaries) is hermetic — no Android checkout needed: the CRAM v15
 container is vendored at `tests/fixtures/cram/models/v15` (override `CRAM_MODEL_DIR`) and utf8proc
 2.12.0 at `vendor/utf8proc`. `CLF_ANDROID_DIR` is gone; `tparse/` (80 KB) is vendored so the classifier
 flavours build standalone.
@@ -531,7 +531,7 @@ all-or-nothing degraded path, `adult_clf_ver` 15 in `classifier_write_meta()`), 
 + `src/http_api.c` `/stats` shape (`cram_sha256`/`cram_vocab_sha256` + the `cram` sub-object), and the
 compiled-in `classifier_model_dir` default in `src/config.c`).
 
-See the vendored repo's `CLAUDE.md` for its architecture (thread trees, bloom filters, schema) and its
+See the vendored repo's `AGENTS.md` for its architecture (thread trees, bloom filters, schema) and its
 `CONFIG_INI.md` for the get_peers/metadata config keys and the last-interval / peer-fail / BEP51 `/stats`
 blocks.
 
