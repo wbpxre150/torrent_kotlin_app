@@ -1,8 +1,12 @@
 # F-Droid readiness
 
-**Status: the recipe builds.** `fdroid build --test com.torrent.app` (fdroidserver 2.4.6,
-2026-11-26) ends with `success: com.torrent.app` / `1 build succeeded` and produces a 16.7 MB
-`arm64-v8a` APK signed by F-Droid's test key. No MR has been filed.
+**Status: the recipe builds from a tag.** `fdroid build --test com.torrent.app` (fdroidserver
+2.4.6, 2026-11-26) against **`v1.0.1`** ends with `success: com.torrent.app` / `1 build succeeded`
+and produces a 16.7 MB `arm64-v8a` APK (`versionCode 7`, `versionName 1.0.1`) signed by F-Droid's
+test key. No MR has been filed.
+
+`v1.0` is deliberately not listed as a build: it predates the build-script knobs, so it cannot be
+built by this recipe.
 
 The recipe is [`metadata.yml`](metadata.yml) (target path in the MR:
 `metadata/com.torrent.app.yml`); the srclib definitions it needs are in [`srclibs/`](srclibs/).
