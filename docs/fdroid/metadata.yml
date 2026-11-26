@@ -1,15 +1,8 @@
-# fdroiddata recipe for com.torrent.app — verified with `fdroid build --test` (fdroidserver 2.4.6,
-# 2026-11-26): "1 build succeeded", 16.7 MB arm64-v8a APK, and `fdroid scanner` now reports 0
-# errors / 0 warnings (see the scanignore block below).
-# Target path in the fdroiddata MR: metadata/com.torrent.app.yml
-#
-# Everything below that looks fussy was found by running the build, not by reading docs. The
-# findings, and what is still a network dependency, are in docs/fdroid/BLOCKERS.md.
-
-# fdroiddata's granular taxonomy (config/categories.yml). "Download" is the torrent-client
-# category (LibreTorrent and BiglyBT use it); the app also serves files over FTP and p2p, hence
-# "File Transfer". The legacy "Internet" umbrella still exists but is no longer what comparable
-# apps use.
+AntiFeatures:
+  TetheredNet:
+    en-US: Downloads its classifier models (~500 MB) and the BEP51 cache bootstrap
+      from a single host operated by the author (unjumble.au). The app stays usable
+      without them, but those two features cannot be pointed at another server.
 Categories:
   - Download
   - File Transfer
@@ -26,55 +19,17 @@ AutoName: Torrent App
 RepoType: git
 Repo: https://github.com/wbpxre150/torrent_kotlin_app.git
 
-# TetheredNet: the app fetches its two optional data sets from one author-operated host and has
-# no mirror list — ~500 MB of MIT-licensed classifier weights from
-# https://unjumble.au/bep51/models (sha256-pinned manifests compiled into the crawler) and the
-# BEP51 cache bootstrap from https://unjumble.au/bep51/bep51_cache.dat. Both are defaults in
-# model_fetch.h / config.c and both are skippable: without them the daemons run, the classifiers
-# report clf_ver 0 and the dashboard says the models are missing. Core torrenting, the FTP server
-# and the dashboard do not touch the network service at all. Declared rather than argued — a
-# reviewer should not have to discover the host from the binary.
-AntiFeatures:
-  TetheredNet:
-    en-US: >-
-      Downloads its classifier models (~500 MB) and the BEP51 cache bootstrap from a single
-      host operated by the author (unjumble.au). The app stays usable without them, but those
-      two features cannot be pointed at another server.
-
-
 Builds:
-  - versionName: '1.0.2'
+  - versionName: 1.0.2
     versionCode: 8
-    # v1.0 predates the build-script knobs (-PnativeRoot, -PprebuiltNativeSrc) and cannot be
-    # built by this recipe; v1.0.1 is the first tag that carries them, and v1.0.2 is the one that
-    # also carries the tracked gradle wrapper and the finished recipe. 1.0.2 has no functional
-    # change over 1.0.1 — if a reviewer prefers fewer builds, this single entry is the one to keep.
-    commit: v1.0.2
-    # dht_crawler is a git submodule pointing at a public repo; its three lib/ patches are
-    # in-tree and applied by prepareDhtCrawlerSrc, so nothing extra is needed.
+    commit: 726a04b8ca65bc97b93b4d00bb8ccec08239b860
     submodules: true
-    ndk: r27
-    # gradle: entries are *flavour names* (fdroid builds assemble<Flavour>Release), so properties
-    # go in gradleprops, which are passed as -P<key>[=<value>].
-    #   prebuiltNativeSrc — trust the staged trees below instead of downloading tarballs.
-    #   nativeRoot        — stage outside app/build/, because fdroid runs `gradle clean` between
-    #                       prebuild and the build, and clean deletes build/. It is also outside the
-    #                       *checkout*: fdroid tars the whole checkout for the source tarball, and
-    #                       the staged trees are 1.8 GB (99.9 MB compressed). gradleprops are
-    #                       resolved against the app module dir, so this is app/../../native-root,
-    #                       i.e. `<fdroid build root>/native-root` — the same directory prebuild
-    #                       reaches as ../native-root from the checkout root.
-    gradle:
-      - yes
-    gradleprops:
-      - prebuiltNativeSrc
-      - nativeRoot=../../native-root
-    # No keystore.properties in a fresh clone, so the release build type stays unsigned and the
-    # output is app-release-unsigned.apk. F-Droid signs it afterwards.
-    output: app/build/outputs/apk/release/app-release-unsigned.apk
     sudo:
       - apt-get update || apt-get update
       - apt-get install -y cmake ninja-build autoconf automake libtool
+    gradle:
+      - yes
+    output: app/build/outputs/apk/release/app-release-unsigned.apk
     srclibs:
       - mbedtls@mbedtls-3.6.6
       - curl@curl-8_20_0
@@ -82,29 +37,7 @@ Builds:
       - libuv@v1.48.0
       - llama.cpp@18ab62a8ec5144ae5d2f65e78374ba69652d75dd
       - cloudflared@2026.11.0
-    # The scanner runs after prebuild (`common.prepare_source` runs prebuild, then build.py does
-    # `gradle clean`, then `scanner.scan_source`). The staged trees are outside the checkout now, so
-    # they are not scanned at all and need no entry here; what is left is the vendored `dht_crawler`
-    # submodule. Measured before the staging move: 13 errors there, all upstream third-party data
-    # or the crawler's own CRAM parser fixtures — none of it compiled into, or shipped in, the APK.
-    scanignore:
-      # dht_crawler third-party test data, and the CRAM parser fixtures under tests/fixtures.
-      - app/src/main/cpp/dht_crawler/lib/libbloom/misc
-      - app/src/main/cpp/dht_crawler/lib/civetweb/src/third_party
-      - app/src/main/cpp/dht_crawler/lib/civetweb/test
-      - app/src/main/cpp/dht_crawler/lib/cJSON/tests
-      - app/src/main/cpp/dht_crawler/lib/uthash/package.json
-      - app/src/main/cpp/dht_crawler/tests/fixtures
-    # The release tarballs vendor sources that the git trees keep in submodules or generate:
-    #   mbedtls      — framework/ submodule
-    #   transmission — third-party/ submodules
-    #   curl         — configure is generated from configure.ac (there is no buildconf script)
-    # sqlite is deliberately absent: its amalgamation is a generated release artifact (tclsh),
-    # not something the git tree contains, so fetchSqlite still downloads the official zip.
     prebuild:
-      # ../native-root is `<fdroid build root>/native-root`, the directory the nativeRoot gradle
-      # property points at (see above). rm -rf first: prebuild runs on every build, including
-      # rebuilds where the checkout is reused, and `cp -a` into an existing directory would nest.
       - rm -rf ../native-root && mkdir -p ../native-root/src
       - (cd $$curl$$ && autoreconf -fi)
       - git -C $$mbedtls$$ submodule update --init --recursive
@@ -115,8 +48,19 @@ Builds:
       - cp -a $$libuv$$ ../native-root/src/libuv-v1.48.0
       - cp -a $$llama.cpp$$ ../native-root/src/llama-18ab62a8
       - cp -a $$cloudflared$$ ../native-root/src/cloudflared-2026.11.0
+    scanignore:
+      - app/src/main/cpp/dht_crawler/lib/libbloom/misc
+      - app/src/main/cpp/dht_crawler/lib/civetweb/src/third_party
+      - app/src/main/cpp/dht_crawler/lib/civetweb/test
+      - app/src/main/cpp/dht_crawler/lib/cJSON/tests
+      - app/src/main/cpp/dht_crawler/lib/uthash/package.json
+      - app/src/main/cpp/dht_crawler/tests/fixtures
+    ndk: r27
+    gradleprops:
+      - prebuiltNativeSrc
+      - nativeRoot=../../native-root
 
 AutoUpdateMode: Version
 UpdateCheckMode: Tags
-CurrentVersion: '1.0.2'
+CurrentVersion: 1.0.2
 CurrentVersionCode: 8

@@ -4,9 +4,10 @@
 `fdroid build --test --refresh com.torrent.app` (fdroidserver 2.4.6, 2026-11-26) against
 **`v1.0.2`** — no `--skip-scan`, no `--no-tarball` — ends with `success: com.torrent.app` /
 `1 build succeeded`, producing a 16.7 MB `arm64-v8a` APK (`versionCode 8`, `versionName 1.0.2`,
-16 733 667 bytes) signed by F-Droid's test key. `fdroid scanner com.torrent.app:8` reports
-**0 errors / 0 warnings**, `fdroid lint com.torrent.app` is silent, and the source tarball is
-25.5 MB. No MR has been filed yet; what it has to contain is in
+25.5 MB. [`metadata.yml`](metadata.yml) is `fdroid rewritemeta` output — fdroiddata's CI job fails
+on anything else, so it carries no comments; every decision behind it is explained in this file —
+and `commit:` is the full hash, which the MR template requires. No MR has been filed yet; the steps
+are in [Filing the MR](#filing-the-mr) and [What the MR contains](#what-the-mr-contains).
 [What the MR contains](#what-the-mr-contains).
 
 `v1.0` is deliberately not listed as a build: it predates the build-script knobs, so it cannot be
@@ -64,6 +65,36 @@ matches nothing at all as an exception), so the block cannot silently rot.
 4. **The source tarball is 25.5 MB** (`com.torrent.app_8_src.tar.gz`, 25 488 950 bytes measured;
    it was 99.9 MB while the staged trees lived in the checkout). Most of it is the dht_crawler
    submodule's history and test fixtures. Accepted.
+
+## Filing the MR
+
+1. Fork <https://gitlab.com/fdroid/fdroiddata> (the fork must be public and its branch
+   unprotected), branch off `master`, and add two things only:
+   - `metadata/com.torrent.app.yml` ← [`metadata.yml`](metadata.yml) verbatim
+   - `srclibs/transmission.yml`, `srclibs/libuv.yml`, `srclibs/llama.cpp.yml`,
+     `srclibs/cloudflared.yml` ← the same-named files in [`srclibs/`](srclibs/)
+     (`mbedtls.yml` and `curl.yml` already exist upstream — do not add them).
+2. Commit, push the branch, open the MR using the repo's `Default.md` template with the title
+   **`New app: Torrent App`**. `gitlab.com/fdroid/rfp` has no issue for this app, so drop the
+   `Closes rfp#…` line.
+3. Four checklist items need a sentence rather than a tick, and they are all already answered
+   somewhere in this file:
+   - *srclibs instead of submodules.* The native build fetches upstream release tarballs by design
+     (see `AGENTS.md`); srclibs keep the fdroiddata build hermetic without vendoring ~1.8 GB into
+     the app repo. The trees are staged outside the checkout, so they are never scanned — unlike a
+     submodule, which is why the six `scanignore` entries for `dht_crawler` exist.
+   - *Reproducible builds.* Not enabled: the daemons embed `__FILE__` paths and no
+     `-ffile-prefix-map` is passed, so the APK differs across build roots (measured: 16 733 915 vs
+     16 733 671 bytes). Fixing it is a build-script change, i.e. a new tag — see Accepted cost 3.
+   - *AntiFeature `TetheredNet`* — declared, with the reason in the metadata's `en-US` text.
+   - *License mix* — MIT app + GPLv2 transmission-daemon + Apache-2.0 mbedTLS/cloudflared + curl
+     license + MIT llama.cpp, all sources published.
+4. Expect the pipeline to run `fdroid lint`, `fdroid rewritemeta` and the scanner; then a reviewer
+   builds it on the buildserver (`fdroid build --server`). Anything that fails there fails for a
+   reason this host could not see, so keep the local test environment around.
+5. Nothing else is needed from this repo. Do not push a new tag for the MR: it builds the commit
+   `726a04b8…`, which is the `v1.0.2` tag, and `UpdateCheckMode: Tags` picks up later releases on
+   its own.
 
 ## What the MR contains
 
@@ -145,12 +176,14 @@ git init -q && git add -A && git commit -qm recipe   # fdroid reads SOURCE_DATE_
 JAVA_HOME=/usr/lib/jvm/java-21-openjdk fdroid build --test --refresh com.torrent.app
 ```
 
-Cheap iterations, both of which catch the two failure modes that used to be invisible:
+Cheap iterations — these three catch the failures that used to be invisible, and all three are
+fdroiddata CI jobs (`fdroid lint`, `fdroid rewritemeta`, scanner):
 
 ```bash
 fdroid lint com.torrent.app      # categories, AntiFeatures, field validity
-fdroid scanner --json com.torrent.app:7 | python3 -c 'import json,sys; d=json.load(sys.stdin)["com.torrent.app"]["7"]; print({k: len(v) for k, v in d.items()})'
+fdroid scanner --json com.torrent.app:8 | python3 -c 'import json,sys; d=json.load(sys.stdin)["com.torrent.app"]["8"]; print({k: len(v) for k, v in d.items()})'
 # expect {'infos': N, 'warnings': 0, 'errors': 0} — "Unused scanignore path" lands in errors
+fdroid rewritemeta com.torrent.app && git diff --exit-code -- metadata/   # must be a no-op
 ```
 
 Two traps in that setup: `fdroid init` crashes with `ModuleNotFoundError: pkg_resources` on
