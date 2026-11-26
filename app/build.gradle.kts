@@ -129,6 +129,24 @@ val goToolchain = providers.gradleProperty("goToolchain").orNull ?: "go1.27.4"
 
 // -PgoVendor builds the tunnel with -mod=vendor and GOPROXY=off: no module downloads at all.
 
+// Strip a just-built daemon before it is copied into jniLibs. AGP's own
+// stripReleaseDebugSymbols leaves these files alone (they are PIE executables, not shared
+// objects) and ships ~90 MB of debug_info per daemon in the APK — a clean fdroid build of the
+// same tree is 16.7 MB against our 36 MB. Stripping here, inside the producing task, keeps the
+// declared output identical to what gets packaged: no "build writes 94 MB, strip shrinks it"
+// churn that would make the native tasks permanently out of date.
+fun stripDaemon(binary: File, ndkDir: File) {
+    if (!binary.exists()) return
+    val strip = File(ndkDir, "toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip")
+    if (!strip.exists()) {
+        logger.warn("llvm-strip not found under $ndkDir — ${binary.name} stays unstripped")
+        return
+    }
+    project.exec {
+        commandLine(strip.absolutePath, "--strip-unneeded", binary.absolutePath)
+    }
+}
+
 // Fetch a pinned source archive, unless a hermetic builder (F-Droid) staged the tree itself.
 // Deliberately not silent: if the builder claims a staged tree that is not there, fail loudly
 // rather than downloading and producing a build whose inputs came from somewhere else.
@@ -374,7 +392,8 @@ tasks.register("buildTransmission") {
         project.exec {
             commandLine("cmake", "--build", buildDir.absolutePath, "--target", "transmission-daemon", "-j8")
         }
-        // 5. Copy + rename to jniLibs (lib*.so name required for packaging)
+        // 5. Strip + copy + rename to jniLibs (lib*.so name required for packaging)
+        stripDaemon(daemonOut, ndkDir)
         copy {
             from(daemonOut)
             into(jniLibsArm64)
@@ -750,7 +769,8 @@ tasks.register("buildDhtCrawler") {
         project.exec {
             commandLine("cmake", "--build", buildDir.absolutePath, "--target", "dhtcrawler", "-j8")
         }
-        // 3. Copy + rename to jniLibs (lib*.so name required for packaging)
+        // 3. Strip + copy + rename to jniLibs (lib*.so name required for packaging)
+        stripDaemon(crawlerOut, ndkDir)
         copy {
             from(crawlerOut)
             into(jniLibsArm64)
@@ -797,7 +817,8 @@ tasks.register("buildFtpServer") {
         project.exec {
             commandLine("cmake", "--build", buildDir.absolutePath, "--target", "ftpserver", "-j8")
         }
-        // 3. Copy + rename to jniLibs (lib*.so name required for packaging)
+        // 3. Strip + copy + rename to jniLibs (lib*.so name required for packaging)
+        stripDaemon(serverOut, ndkDir)
         copy {
             from(serverOut)
             into(jniLibsArm64)
@@ -943,7 +964,8 @@ tasks.register("buildCloudflared") {
                 "./cmd/cloudflared"
             )
         }
-        // 2. Copy + rename to jniLibs (lib*.so name required for packaging)
+        // 2. Strip + copy + rename to jniLibs (lib*.so name required for packaging)
+        stripDaemon(binaryOut, ndkDir)
         copy {
             from(binaryOut)
             into(jniLibsArm64)
