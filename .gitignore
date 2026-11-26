@@ -48,8 +48,10 @@ captures/
 .DS_Store
 Thumbs.db
 
-# Maven / Gradle wrapper binaries (keep wrapper scripts, ignore binary JAR)
-gradle/wrapper/gradle-wrapper.jar
+# The Gradle wrapper JAR *is* tracked: a fresh clone cannot run ./gradlew without it, and
+# F-Droid reviewers expect the wrapper to work. It is the jar from gradle/gradle v8.14.3
+# (sha256 7d3a4ac4de1c32b59bc6a4eb8ecb8e612ccd0cf1ae1e99f66902da64df296172), matching
+# distributionUrl=gradle-8.14.3-bin.zip in gradle-wrapper.properties.
 
 # graphify knowledge graph artifacts (regenerable via `graphify update .`)
 graphify-out/

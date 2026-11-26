@@ -1,2 +1,5 @@
+# NOT in fdroiddata yet — this file is an addition in the com.torrent.app MR.
+# Tag used by the recipe: 2026.11.0 -> 71319b1dd12a2dae1a34f344aa747170145a9b1f (verified 2026-11-26).
+# Building it still needs the Go toolchain (go.mod wants go1.27.4) — accepted, see BLOCKERS.md.
 RepoType: git
 Repo: https://github.com/cloudflare/cloudflared.git

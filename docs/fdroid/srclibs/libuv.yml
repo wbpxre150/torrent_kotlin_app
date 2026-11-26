@@ -1,2 +1,4 @@
+# NOT in fdroiddata yet — this file is an addition in the com.torrent.app MR.
+# Tag used by the recipe: v1.48.0 -> 2afed16f6d377e22d1b1bbc6d209ee63a35eb3e0 (verified 2026-11-26).
 RepoType: git
 Repo: https://github.com/libuv/libuv.git

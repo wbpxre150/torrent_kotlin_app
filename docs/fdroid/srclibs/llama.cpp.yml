@@ -1,2 +1,5 @@
+# NOT in fdroiddata yet — this file is an addition in the com.torrent.app MR.
+# The recipe pins a commit rather than a tag (llama.cpp tags rarely, and the crawler's movie-kind
+# head is built against this exact tree): 18ab62a8ec5144ae5d2f65e78374ba69652d75dd (2026-11-06).
 RepoType: git
 Repo: https://github.com/ggml-org/llama.cpp.git

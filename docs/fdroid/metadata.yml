@@ -1,12 +1,18 @@
 # fdroiddata recipe for com.torrent.app — verified with `fdroid build --test` (fdroidserver 2.4.6,
-# 2026-11-26): "1 build succeeded", 16.7 MB arm64-v8a APK.
+# 2026-11-26): "1 build succeeded", 16.7 MB arm64-v8a APK, and `fdroid scanner` now reports 0
+# errors / 0 warnings (see the scanignore block below).
 # Target path in the fdroiddata MR: metadata/com.torrent.app.yml
 #
 # Everything below that looks fussy was found by running the build, not by reading docs. The
 # findings, and what is still a network dependency, are in docs/fdroid/BLOCKERS.md.
 
+# fdroiddata's granular taxonomy (config/categories.yml). "Download" is the torrent-client
+# category (LibreTorrent and BiglyBT use it); the app also serves files over FTP and p2p, hence
+# "File Transfer". The legacy "Internet" umbrella still exists but is no longer what comparable
+# apps use.
 Categories:
-  - Internet
+  - Download
+  - File Transfer
 License: MIT
 AuthorName: Adam Bullock
 AuthorEmail: wbpxre150@outlook.com
@@ -20,9 +26,21 @@ AutoName: Torrent App
 RepoType: git
 Repo: https://github.com/wbpxre150/torrent_kotlin_app.git
 
-# No AntiFeatures. The ~500 MB of classifier weights are downloaded at first run from
-# https://unjumble.au/bep51/models (sha256-pinned manifests inside the crawler binary) and are
-# MIT licensed, same as the app — see the LICENSE in the classifier-model repo.
+# TetheredNet: the app fetches its two optional data sets from one author-operated host and has
+# no mirror list — ~500 MB of MIT-licensed classifier weights from
+# https://unjumble.au/bep51/models (sha256-pinned manifests compiled into the crawler) and the
+# BEP51 cache bootstrap from https://unjumble.au/bep51/bep51_cache.dat. Both are defaults in
+# model_fetch.h / config.c and both are skippable: without them the daemons run, the classifiers
+# report clf_ver 0 and the dashboard says the models are missing. Core torrenting, the FTP server
+# and the dashboard do not touch the network service at all. Declared rather than argued — a
+# reviewer should not have to discover the host from the binary.
+AntiFeatures:
+  TetheredNet:
+    en-US: >-
+      Downloads its classifier models (~500 MB) and the BEP51 cache bootstrap from a single
+      host operated by the author (unjumble.au). The app stays usable without them, but those
+      two features cannot be pointed at another server.
+
 
 Builds:
   - versionName: '1.0.1'
@@ -58,6 +76,25 @@ Builds:
       - libuv@v1.48.0
       - llama.cpp@18ab62a8ec5144ae5d2f65e78374ba69652d75dd
       - cloudflared@2026.11.0
+    # The scanner runs after prebuild (`common.prepare_source` runs prebuild, then build.py does
+    # `gradle clean`, then `scanner.scan_source`), so it sees the staged trees. Measured on the
+    # v1.0.1 checkout: without this block `fdroid scanner com.torrent.app:7` reports 1312 errors,
+    # 1299 of them under app/native-root/src and 13 under app/src/main/cpp/dht_crawler. Every one
+    # is upstream third-party test/fuzz data, a package.json of vendored JS test tooling, a macOS
+    # framework, or the crawler's own CRAM parser fixtures — none of it is compiled into, or
+    # shipped in, the APK.
+    #   app/native-root — fdroid's own srclib checkouts, copied here by prebuild. fdroid never
+    #                     scans build/srclib; this is the same material in a different place.
+    #   dht_crawler/…   — vendored submodule third-party data (libpsl-style fuzz corpora, duktape
+    #                     and civetweb test archives, libbloom collision tables) plus tests/fixtures.
+    scanignore:
+      - app/native-root
+      - app/src/main/cpp/dht_crawler/lib/libbloom/misc
+      - app/src/main/cpp/dht_crawler/lib/civetweb/src/third_party
+      - app/src/main/cpp/dht_crawler/lib/civetweb/test
+      - app/src/main/cpp/dht_crawler/lib/cJSON/tests
+      - app/src/main/cpp/dht_crawler/lib/uthash/package.json
+      - app/src/main/cpp/dht_crawler/tests/fixtures
     # The release tarballs vendor sources that the git trees keep in submodules or generate:
     #   mbedtls      — framework/ submodule
     #   transmission — third-party/ submodules

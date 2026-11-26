@@ -1,2 +1,8 @@
+# NOT in fdroiddata yet — this file is an addition in the com.torrent.app MR.
+# Tag used by the recipe: 4.1.4 -> a6d907d9ea2313143af714d7830feb6c1b60b84c (verified 2026-11-26).
+# transmission's build needs third-party/ (libpsl, libdeflate, libbencode, libutp, rapidjson,
+# dht), which the release tarball vendors but the git tree keeps in submodules. The recipe inits
+# them in `prebuild` rather than with a srclib `Prepare:` because it needs --recursive and the
+# same line has to run for mbedtls.
 RepoType: git
 Repo: https://github.com/transmission/transmission.git

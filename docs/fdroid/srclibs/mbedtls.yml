@@ -1,2 +1,8 @@
+# ALREADY in fdroiddata as srclibs/mbedtls.yml — kept here only so the local test environment in
+# BLOCKERS.md is self-contained, and copied from upstream verbatim (including `Prepare:`).
+# Do not add it in the MR.
+# Tag used by the recipe: mbedtls-3.6.6 -> 5b64a9fdb979c8971561ec78221b528e3cc4e00a (verified 2026-11-26).
 RepoType: git
 Repo: https://github.com/Mbed-TLS/mbedtls.git
+
+Prepare: git submodule update --init

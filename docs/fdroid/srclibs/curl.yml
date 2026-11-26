@@ -1,2 +1,6 @@
+# ALREADY in fdroiddata as srclibs/curl.yml — kept here only so the local test environment in
+# BLOCKERS.md is self-contained, and copied from upstream verbatim (no `.git` suffix upstream).
+# Do not add it in the MR.
+# Tag used by the recipe: curl-8_20_0 -> 6e3f8dc1f173b47de9a68516ce4b95bf25598c2f (verified 2026-11-26).
 RepoType: git
-Repo: https://github.com/curl/curl.git
+Repo: https://github.com/curl/curl
