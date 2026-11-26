@@ -107,6 +107,29 @@ android {
         }
     }
 
+// ---- Native build knobs (F-Droid / hermetic builds) ----------------------------------------
+// All unset on a developer build, where every fetch task downloads and sha256-verifies its own
+// inputs into app/build/native, exactly as before.
+
+// -PnativeRoot=<dir>: where the native source trees and their build/install dirs live. Default
+// app/build/native. F-Droid runs `gradle clean` *after* `prebuild`, and clean deletes build/, so
+// a srclib tree staged under it would be wiped before the build even starts — the fdroiddata
+// recipe points this at app/native-root instead, which clean leaves alone.
+val nativeRoot = providers.gradleProperty("nativeRoot").orNull?.let { file(it) }
+    ?: file("build/native")
+
+// -PprebuiltNativeSrc: fetchLlamaCpp and fetchCloudflaredSrc accept a pre-staged tree and skip
+// their tarball entirely (they are the only two fetches that hash the archive unconditionally).
+// The caller that staged the tree owns the pin.
+val prebuiltNativeSrc = providers.gradleProperty("prebuiltNativeSrc").isPresent
+
+// GOTOOLCHAIN for the cloudflared build. cloudflared's go.mod requires go1.27.4, so the default
+// makes a first build download that toolchain; -PgoToolchain=local pins to the host's Go.
+val goToolchain = providers.gradleProperty("goToolchain").orNull ?: "go1.27.4"
+
+// -PgoVendor builds the tunnel with -mod=vendor and GOPROXY=off: no module downloads at all.
+val goVendor = providers.gradleProperty("goVendor").isPresent
+
 tasks.register("buildMbedtls") {
     description = "Cross-compile mbedTLS 3.6.6 static libs for arm64 (Stage 04 dep)"
 
@@ -119,7 +142,7 @@ tasks.register("buildMbedtls") {
     val ndkDir = file(ndk.get())
     val toolchainFile = file("$ndkDir/build/cmake/android.toolchain.cmake")
 
-    val nativeDir = file("build/native")
+    val nativeDir = nativeRoot
     val srcDir = file("$nativeDir/src/mbedtls-3.6.6")
     val buildDir = file("$nativeDir/build-mbedtls")
     val installDir = file("$nativeDir/mbedtls-install")
@@ -180,7 +203,7 @@ tasks.register("buildCurl") {
     val ar = file("$toolchainBin/llvm-ar")
     val ranlib = file("$toolchainBin/llvm-ranlib")
 
-    val nativeDir = file("build/native")
+    val nativeDir = nativeRoot
     val srcDir = file("$nativeDir/src/curl-8.20.0")
     val mbedtlsInstall = file("$nativeDir/mbedtls-install")
     val installDir = file("$nativeDir/curl-install")
@@ -254,7 +277,7 @@ tasks.register("buildTransmission") {
     val ndkDir = file(ndk.get())
     val toolchainFile = file("$ndkDir/build/cmake/android.toolchain.cmake")
 
-    val nativeDir = file("build/native")
+    val nativeDir = nativeRoot
     val srcDir = file("$nativeDir/src/transmission-$txVersion")
     val curlInstall = file("$nativeDir/curl-install")
     val mbedtlsInstall = file("$nativeDir/mbedtls-install")
@@ -370,7 +393,7 @@ tasks.register("buildLibuv") {
     val ndkDir = file(ndk.get())
     val toolchainFile = file("$ndkDir/build/cmake/android.toolchain.cmake")
 
-    val nativeDir = file("build/native")
+    val nativeDir = nativeRoot
     val srcDir = file("$nativeDir/src/libuv-v1.48.0")
     val buildDir = file("$nativeDir/build-libuv")
     val installDir = file("$nativeDir/libuv-install")
@@ -417,7 +440,7 @@ tasks.register("buildLibuv") {
 tasks.register("fetchSqlite") {
     description = "Download the SQLite 3.49.1 amalgamation sources (Stage 09 dep)"
 
-    val nativeDir = file("build/native")
+    val nativeDir = nativeRoot
     val srcDir = file("$nativeDir/src/sqlite-amalgamation")
     val zipFile = file("$nativeDir/src/sqlite-amalgamation-3490100.zip")
     val url = "https://www.sqlite.org/2025/sqlite-amalgamation-3490100.zip"
@@ -448,21 +471,10 @@ tasks.register("fetchSqlite") {
 // the tarball is pinned by sha256 -- unlike the existence-only fetches above, a mismatched
 // download is deleted and re-fetched rather than used (a tree of unclear provenance would
 // silently produce a binary the 153 MB model was not fitted to).
-
-// ---- Hermetic-build knobs (F-Droid) -------------------------------------------------------
-// Unset on a developer build: every fetch task below downloads and sha256-verifies its own
-// inputs, exactly as before. A builder that stages the sources itself (an fdroiddata
-// `prebuild` copying srclib checkouts into app/build/native/src/) sets these and owns the pins.
-val prebuiltNativeSrc = providers.gradleProperty("prebuiltNativeSrc").isPresent
-// GOTOOLCHAIN for the cloudflared build. cloudflared's go.mod requires go1.27.4, so the default
-// makes a first build download that toolchain; -PgoToolchain=local pins to the host's Go.
-val goToolchain = providers.gradleProperty("goToolchain").orNull ?: "go1.27.4"
-// -PgoVendor builds the tunnel with -mod=vendor and GOPROXY=off: no module downloads at all.
-val goVendor = providers.gradleProperty("goVendor").isPresent
 tasks.register("fetchLlamaCpp") {
     description = "Download the pinned llama.cpp sources (18ab62a8) for the movie-kind dep"
 
-    val nativeDir = file("build/native")
+    val nativeDir = nativeRoot
     val srcDir = file("$nativeDir/src/llama-18ab62a8")
     val tarball = file("$nativeDir/src/llama-18ab62a8.tar.gz")
     val stamp = file("$srcDir/.sha")
@@ -544,7 +556,7 @@ tasks.register("buildLlama") {
     val ndkDir = file(ndk.get())
     val toolchainFile = file("$ndkDir/build/cmake/android.toolchain.cmake")
 
-    val nativeDir = file("build/native")
+    val nativeDir = nativeRoot
     val srcDir = file("$nativeDir/src/llama-18ab62a8")
     val buildDir = file("$nativeDir/build-llama")
     val installDir = file("$nativeDir/llama-install")
@@ -598,7 +610,7 @@ tasks.register("prepareDhtCrawlerSrc") {
 
     val crawlerSrc = providers.gradleProperty("dhtCrawlerSrc").orNull?.let { file(it).absoluteFile }
         ?: file("src/main/cpp/dht_crawler")
-    val nativeDir = file("build/native")
+    val nativeDir = nativeRoot
     val destDir = file("$nativeDir/src/dht_crawler")
 
     inputs.dir(file("$crawlerSrc/src"))
@@ -695,7 +707,7 @@ tasks.register("buildDhtCrawler") {
     val ndkDir = file(ndk.get())
     val toolchainFile = file("$ndkDir/build/cmake/android.toolchain.cmake")
 
-    val nativeDir = file("build/native")
+    val nativeDir = nativeRoot
     val crawlerCmakeDir = file("src/main/cpp/dht_crawler-android")
     val crawlerSrcDir = file("$nativeDir/src/dht_crawler")
     val sqliteDir = file("$nativeDir/src/sqlite-amalgamation")
@@ -760,7 +772,7 @@ tasks.register("buildFtpServer") {
     val ndkDir = file(ndk.get())
     val toolchainFile = file("$ndkDir/build/cmake/android.toolchain.cmake")
 
-    val nativeDir = file("build/native")
+    val nativeDir = nativeRoot
     val srcDir = file("src/main/cpp/ftp-server")
     val buildDir = file("$nativeDir/build-ftpserver")
     val serverOut = file("$buildDir/ftpserver")
@@ -800,7 +812,7 @@ tasks.register("buildFtpServer") {
 tasks.register("fetchCloudflaredSrc") {
     description = "Download the pinned cloudflared 2026.11.0 sources (Go) for the tunnel binary"
 
-    val nativeDir = file("build/native")
+    val nativeDir = nativeRoot
     val srcDir = file("$nativeDir/src/cloudflared-2026.11.0")
     val tarball = file("$nativeDir/src/cloudflared-2026.11.0.tar.gz")
     val stamp = file("$srcDir/.sha")
@@ -869,7 +881,7 @@ tasks.register("buildCloudflared") {
     description = "Cross-compile cloudflared 2026.11.0 for arm64, package libcloudflared.so"
     dependsOn("fetchCloudflaredSrc")
 
-    val nativeDir = file("build/native")
+    val nativeDir = nativeRoot
     val srcDir = file("$nativeDir/src/cloudflared-2026.11.0")
     val buildDir = file("$nativeDir/build-cloudflared")
     val binaryOut = file("$buildDir/cloudflared")
