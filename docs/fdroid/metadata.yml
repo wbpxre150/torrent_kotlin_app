@@ -30,7 +30,7 @@ Builds:
     # Must be a tag or commit that contains the build-script knobs (-PnativeRoot,
     # -PprebuiltNativeSrc). The v1.0 tag predates them; use the next release tag, or the commit
     # below until one exists.
-    commit: 21b675661b6bb5b6bfe857fddd9cfff03096e6fe
+    commit: 8bc4d5bf8728a1ac0c3d31a69fbb9efebefbd70d
     # dht_crawler is a git submodule pointing at a public repo; its three lib/ patches are
     # in-tree and applied by prepareDhtCrawlerSrc, so nothing extra is needed.
     submodules: true
