@@ -34,6 +34,14 @@ enum class MaintenanceAction(
     CATEGORY_FILTER_UPDATE(
         "category-filter-update", "--category-filter-update", false, phoneSupported = false
     ),
+    // The non-Latin sweep only deletes rows (plus a WAL checkpoint), so it is
+    // not space-gated either. Unlike CATEGORY_FILTER_UPDATE it stays
+    // phone-supported: it is the explicit catch-up pass for rows stored while
+    // the filter was off, it refuses (exit 1) when the threshold is 0, and it
+    // prints its own scanned/deleted summary.
+    LANGUAGE_FILTER_CLEANUP(
+        "language-filter-cleanup", "--language-filter-cleanup", false
+    ),
     ;
 
     companion object {

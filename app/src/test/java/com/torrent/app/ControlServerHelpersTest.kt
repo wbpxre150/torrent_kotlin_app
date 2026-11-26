@@ -405,6 +405,45 @@ class ControlServerHelpersTest {
     }
 
     /**
+     * The dashboard's non-Latin language-filter line, formatted from the daemon's
+     * unconditional `language_filter` /stats block: the threshold the module is
+     * actually applying plus the checked/dropped counters and the crawler's own
+     * `filter_rate_percent`. A disabled filter (threshold 0) still renders — that
+     * is the point of publishing the block unconditionally — and the rate is
+     * omitted, never faked as 0 %, until something has been checked. No line at
+     * all for an older daemon or an unparseable body, so the card keeps its last.
+     */
+    @Test fun languageFilterStatsLine_formatsTheDaemonsSweep() {
+        val stats = """{"torrents_indexed":286705,"language_filter":{
+            "enabled":true,"threshold_percent":33,"total_checked":12000,
+            "total_filtered":678,"filtered_by_non_latin":678,
+            "filter_rate_percent":5.65}}"""
+        assertEquals(
+            "non-Latin >=33%: 12000 checked, 678 dropped (5.7%)",
+            ControlServer.languageFilterStatsLine(stats),
+        )
+
+        // Disabled: the counters are still the stored history, so they render.
+        val off = """{"language_filter":{"enabled":false,"threshold_percent":0,
+            "total_checked":0,"total_filtered":12}}"""
+        assertEquals(
+            "non-Latin filter off (threshold 0): 12 dropped",
+            ControlServer.languageFilterStatsLine(off),
+        )
+
+        // Enabled but nothing checked yet: the crawler omits the rate entirely.
+        val fresh = """{"language_filter":{"enabled":true,"threshold_percent":33,
+            "total_checked":0,"total_filtered":0}}"""
+        assertEquals(
+            "non-Latin >=33%: 0 checked, 0 dropped",
+            ControlServer.languageFilterStatsLine(fresh),
+        )
+
+        assertNull(ControlServer.languageFilterStatsLine("""{"torrents_indexed":1}"""))
+        assertNull(ControlServer.languageFilterStatsLine("not json"))
+    }
+
+    /**
      * Webui corrective stage 8: RFC 8259 forbids raw U+0000–U+001F inside a
      * JSON string, so `jsonStr` must escape every control character. One ANSI
      * ESC in a daemon log line used to make the dashboard client's

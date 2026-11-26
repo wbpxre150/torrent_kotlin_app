@@ -333,8 +333,23 @@ line — `CRAM v15 (sha 834159b642d6): N predicted, 0 load failures` — rendere
 the body does not parse, carries no `classifier.cram` object, or reports `enabled` false (the card then
 keeps its previous line). It is cached in `refreshCrawlerStats` and
 pushed over the WS frame key `cramStatsLine`; the pinned-string test lives in `ControlServerHelpersTest`
-(41 tests green). Measured on the phone: server-rendered row
+(42 tests green). Measured on the phone: server-rendered row
 `<span class="k">Classifier</span>… data-field="cramStatsLine"`, updating live.
+
+**Language filter, in the card and in Maintenance.** The crawler publishes its `language_filter` block
+unconditionally (a disabled filter must be distinguishable from "no torrents seen yet"), and the same
+card now carries a `Language filter` row — `non-Latin >=33%: N checked, M dropped (x.y%)`, or
+`non-Latin filter off (threshold 0): M dropped` — from `ControlServer.languageFilterStatsLine()`
+cached in the same `refreshCrawlerStats` tick and pushed as WS key `langFilterStatsLine`. The rate is
+omitted, never faked as 0 %, until `total_checked > 0`, because the crawler omits `filter_rate_percent`
+then too; the line is null only for an unparseable body or an older daemon with no block.
+`MaintenanceAction.LANGUAGE_FILTER_CLEANUP` (`--language-filter-cleanup`, route
+`/crawler/maintenance/language-filter-cleanup`) is **phone-supported** and therefore has a button on
+the Maintenance tab: it is the catch-up sweep for rows stored while the filter was off, it only deletes
+rows (plus a WAL checkpoint) so it is not space-gated, and it exits 1 without touching the database when
+`language_filter_non_latin_threshold` is 0. It is the one row-deleting action the page offers —
+`category-filter-update` stays CLI-only — because it is a single explicit sweep whose confirm() names
+what it deletes; it emits no `[MPROG]` lines, so its progress stays phase-only.
 
 **Measured on the clean install (device b93dac74, empty DB, live DHT ingest only, versionCode 4).** G2
 device leg — 600 rows pulled from the live DB: **100 % / 100 % / 100 %** category/tv_kind/adult against

@@ -53,6 +53,10 @@ class CrawlerMaintenanceTest {
             MaintenanceAction.CATEGORY_FILTER_UPDATE,
             MaintenanceAction.fromRoute("category-filter-update")
         )
+        assertEquals(
+            MaintenanceAction.LANGUAGE_FILTER_CLEANUP,
+            MaintenanceAction.fromRoute("language-filter-cleanup")
+        )
         assertNull(MaintenanceAction.fromRoute("porn-filter-update"))
     }
 
@@ -64,8 +68,8 @@ class CrawlerMaintenanceTest {
     }
 
     @Test fun maintenanceRouteAllowed_refusesTheTwoCliOnlyActions() {
-        // The enum keeps all six members, so both CLI flags stay reachable…
-        assertEquals(6, MaintenanceAction.entries.size)
+        // The enum keeps all seven members, so both CLI flags stay reachable…
+        assertEquals(7, MaintenanceAction.entries.size)
         assertEquals(
             listOf("compact", "category-filter-update"),
             MaintenanceAction.entries.filterNot { it.phoneSupported }.map { it.route }
@@ -92,6 +96,7 @@ class CrawlerMaintenanceTest {
         assertEquals("--rebuild-bloom-filter", MaintenanceAction.REBUILD_BLOOM_FILTER.flag)
         assertEquals("--clear-failure-filter", MaintenanceAction.CLEAR_FAILURE_FILTER.flag)
         assertEquals("--category-filter-update", MaintenanceAction.CATEGORY_FILTER_UPDATE.flag)
+        assertEquals("--language-filter-cleanup", MaintenanceAction.LANGUAGE_FILTER_CLEANUP.flag)
     }
 
     @Test fun needsSpaceCheckOnlyForDbRewritingActions() {
@@ -103,6 +108,8 @@ class CrawlerMaintenanceTest {
         // The purge only deletes rows (+ WAL checkpoint) and no longer compacts
         // the database, so it is not space-gated.
         assertFalse(MaintenanceAction.CATEGORY_FILTER_UPDATE.needsSpaceCheck)
+        // The non-Latin sweep only deletes rows (+ WAL checkpoint) too.
+        assertFalse(MaintenanceAction.LANGUAGE_FILTER_CLEANUP.needsSpaceCheck)
     }
 
     @Test fun compact_refusedWhenNotEnoughFreeSpace() {

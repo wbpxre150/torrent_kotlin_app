@@ -169,20 +169,24 @@ class ControlServerCrawlerCategoriesTest {
             html.contains("action=\"/crawler/maintenance/movie-kind-bench\""))
         assertFalse("the movie-kind-bench label must be gone", html.contains(">Movie-kind bench</button>"))
         assertFalse("the movie-kind-bench tooltip must be gone", html.contains("title=\"--movie-kind-bench\""))
-        // Exactly the four phone-supported actions keep one button each, with the flag as its tooltip.
+        // Exactly the five phone-supported actions keep one button each, with the flag as its tooltip.
         val maintSection = Regex("id=\"maint-btns\"[\\s\\S]*?</div>").find(html)?.value ?: ""
         assertEquals(
-            "exactly four phone-supported maintenance buttons",
-            4,
+            "exactly five phone-supported maintenance buttons",
+            5,
             Regex("<button").findAll(maintSection).count())
         for (flag in listOf(
             "--check-database", "--recover-database", "--rebuild-bloom-filter",
-            "--clear-failure-filter"
+            "--clear-failure-filter", "--language-filter-cleanup"
         )) {
             assertTrue("missing a button for $flag", html.contains("title=\"$flag\""))
         }
         assertTrue(html.contains(">Check database</button>"))
         assertTrue(html.contains(">Recover database</button>"))
+        // The non-Latin sweep is the one row-deleting action the page still
+        // offers: its label and its confirm() must both say what it deletes.
+        assertTrue(html.contains(">Language filter cleanup</button>"))
+        assertTrue(html.contains("at or above "))
     }
 
     @Test fun panel_hasNoPornFilterLeftovers() {

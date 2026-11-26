@@ -153,6 +153,11 @@ class ControlServer(
     @Volatile private var cachedCrawlerStatsLine: String? = null
     /** CRAM classifier line (generation + container sha + counters), from the same /stats tick. */
     @Volatile private var cachedCramStatsLine: String? = null
+    /**
+     * Non-Latin language-filter line (effective threshold + checked/dropped counters),
+     * from the same /stats tick. Null until the daemon answers with the block.
+     */
+    @Volatile private var cachedLangFilterStatsLine: String? = null
     // One frame flow per feed: replay keeps the newest frame for a client that
     // connects between ticks, DROP_OLDEST keeps a slow socket from stalling
     // the ticker.
@@ -948,6 +953,7 @@ class ControlServer(
         cachedCrawlerStatsJson = raw
         cachedCrawlerStatsLine = raw?.let { crawlerStatsLine(it) }
         cachedCramStatsLine = raw?.let { cramStatsLine(it) }
+        cachedLangFilterStatsLine = raw?.let { languageFilterStatsLine(it) }
         statsFrames.emit(crawlerStatsJson(cachedCrawlerStatsJson, crawler?.state))
     }
 
@@ -1159,6 +1165,7 @@ class ControlServer(
             """<div class="row"><span class="k">Search</span><span class="v"><a href="/search">/search</a></span></div>""",
             """<div class="row"><span class="k">Stats</span><span class="v" data-field="statsLine">${esc(cachedCrawlerStatsLine ?: "—")}</span></div>""",
             """<div class="row"><span class="k">Classifier</span><span class="v" data-field="cramStatsLine">${esc(cachedCramStatsLine ?: "—")}</span></div>""",
+            """<div class="row"><span class="k">Language filter</span><span class="v" data-field="langFilterStatsLine">${esc(cachedLangFilterStatsLine ?: "—")}</span></div>""",
             """<div class="row"><span class="k">Models</span><span class="v" data-field="modelsLine">${esc(modelsLineText())}</span></div>""",
         )
     }
@@ -1300,6 +1307,7 @@ class ControlServer(
                         append(",\"pausedNoWifi\":").append(crawlerPausedNoWifi())
                         append(",\"statsLine\":").append(jsonStr(cachedCrawlerStatsLine))
                         append(",\"cramStatsLine\":").append(jsonStr(cachedCramStatsLine))
+                        append(",\"langFilterStatsLine\":").append(jsonStr(cachedLangFilterStatsLine))
                         append(",\"modelsLine\":").append(jsonStr(modelsLineText()))
                     }
                     append("}")
@@ -2048,6 +2056,7 @@ class ControlServer(
         MaintenanceAction.REBUILD_BLOOM_FILTER -> "Rebuild bloom filter"
         MaintenanceAction.CLEAR_FAILURE_FILTER -> "Clear failure filter"
         MaintenanceAction.CATEGORY_FILTER_UPDATE -> "Category filter update"
+        MaintenanceAction.LANGUAGE_FILTER_CLEANUP -> "Language filter cleanup"
     }
 
     /** What a maintenance action does, phrased for its confirmation prompt. */
@@ -2060,6 +2069,9 @@ class ControlServer(
         MaintenanceAction.CATEGORY_FILTER_UPDATE ->
             "Delete all torrents in unchecked categories and adult-tagged torrents " +
                 "from the database"
+        MaintenanceAction.LANGUAGE_FILTER_CLEANUP ->
+            "Delete every stored torrent whose name or file paths are at or above " +
+                "the non-Latin threshold"
     }
 
     /**
@@ -2606,6 +2618,34 @@ class ControlServer(
                     cram.optLong("rows_predicted", 0L),
                     cram.optLong("load_failures", 0L),
                 )
+            } catch (e: Exception) {
+                null
+            }
+        }
+
+        /**
+         * The one-line non-Latin language-filter summary beside the CRAM line, from
+         * the same raw loopback /stats body: the threshold the module is actually
+         * applying and the checked/dropped counters, with the crawler's own
+         * `filter_rate_percent` when it has checked something. `enabled` false (a
+         * threshold of 0) reads as "off" with its dropped count rather than as an
+         * empty counter; the line is null only when the body does not parse or
+         * carries no `language_filter` object, so the card keeps its previous line.
+         */
+        internal fun languageFilterStatsLine(raw: String): String? {
+            return try {
+                val lf = JSONObject(raw).optJSONObject("language_filter") ?: return null
+                val threshold = lf.optInt("threshold_percent", 0)
+                val dropped = lf.optLong("total_filtered", 0L)
+                if (!lf.optBoolean("enabled", false) || threshold <= 0) {
+                    return "non-Latin filter off (threshold 0): %d dropped".format(dropped)
+                }
+                val checked = lf.optLong("total_checked", 0L)
+                // The crawler omits the rate until something has been checked, so an
+                // absent key is "no data yet", never 0 %.
+                val rate = if (lf.has("filter_rate_percent"))
+                    " (%.1f%%)".format(lf.optDouble("filter_rate_percent", 0.0)) else ""
+                "non-Latin >=%d%%: %d checked, %d dropped%s".format(threshold, checked, dropped, rate)
             } catch (e: Exception) {
                 null
             }
@@ -3369,6 +3409,7 @@ ${adultSelectionRow(adultSelection)}
                   patchText(fieldIn(section, 'internalFree'), d.internalFree);
                   patchText(fieldIn(section, 'statsLine'), d.statsLine);
                   patchText(fieldIn(section, 'cramStatsLine'), d.cramStatsLine);
+                  patchText(fieldIn(section, 'langFilterStatsLine'), d.langFilterStatsLine);
                   patchText(fieldIn(section, 'modelsLine'), d.modelsLine);
                   // The paused badge is rendered on every crawler render and
                   // only its `hidden` attribute is flipped here, so a pause that
