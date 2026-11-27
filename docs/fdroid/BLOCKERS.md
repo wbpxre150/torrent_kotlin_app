@@ -12,7 +12,9 @@ produce byte-identical APKs, and the signed release APK is entry-identical to th
 anything else, so it carries no comments; every decision behind it is explained in this file — and
 `commit:` is the full hash, which the MR template requires. The MR is filed:
 <https://gitlab.com/fdroid/fdroiddata/-/merge_requests/59319> (branch `com.torrent.app` on the
-`bullocka77/fdroiddata` fork, five new files, nothing else).
+`bullocka77/fdroiddata` fork, five new files, nothing else). Its pipeline is green: all eight
+`test`-stage jobs (`fdroid lint`, `fdroid rewritemeta`, the scanner, `checkupdates`, schema and script
+validation) and the `build` stage, which produced and signed `com.torrent.app_9.apk`.
 
 `v1.0` is deliberately not listed as a build: it predates the build-script knobs, so it cannot be
 built by this recipe.
@@ -35,6 +37,23 @@ None of this was visible from reading the docs — each one only showed up when 
 | `No apks match .../app-release.apk` | without `keystore.properties` the build type is unsigned, so AGP names it `app-release-unsigned.apk` | `output:` points at the unsigned name; F-Droid signs it |
 | `Can't build due to 1312 errors while scanning` | the scan runs **after** `prebuild` (`common.prepare_source` → `gradle clean` → `scanner.scan_source`), so with the staging inside the checkout it saw the staged trees. 1299 of the 1312 were under `app/native-root/src` (transmission's libpsl/libdeflate fuzz corpora, mbedtls `framework/data_files` + `programs/fuzz`, libuv's `Index.zip`, transmission's `macosx/Sparkle.framework`); the other 13 are in the vendored `dht_crawler` submodule (libbloom collision tables, civetweb/duktape test archives, cJSON/uthash `package.json`, the CRAM parser fixtures) | staged the trees outside the checkout (which also shrank the source tarball from 99.9 MB to 25.5 MB), and six narrow `scanignore` entries for the crawler submodule — see below. Nothing in that set is compiled or shipped: the APK holds four executables and dex/resources only |
 | `Categories 'Internet' is not valid` (and every category, if the repo has no `config/`) | fdroiddata moved to a granular taxonomy in `config/categories.yml`; `fdroid lint` loads it from the *repository* it is run in, so a bare test repo with no `config/` fails every category check | `Categories: Download` + `File Transfer` (what LibreTorrent and BiglyBT use), and the local test repo needs `config/categories.yml` |
+
+### What only the MR pipeline found
+
+The CI's fdroidserver is newer than the released wheel, and its runner is a bare `debian:trixie-slim`
+container rather than this host, so four things only showed up there:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `fdroid lint`: "subshell '(cd ...)' in 'prebuild' … use pushd/popd" | a lint rule the 2.4.6 wheel does not have | `pushd`/`popd` — but see the next row |
+| `fdroid build`: curl's `configure` "Something went wrong bootstrapping makefile fragments" | the image has no `make`; `configure` shells out to it while bootstrapping dependency tracking, and the real error is three lines earlier: `make: command not found` | `make` added to the `sudo` apt list |
+| `fdroid rewritemeta` fails on a file the local wheel considers canonical | its rewritemeta **unwraps** long scalars where the pinned commit's version wraps them; the two disagree, and CI is authoritative | ship the unwrapped form (blob `480bdf8`), which is what the 2.4.6 wheel also produces |
+| `buildCloudflared`: "Go toolchain not found" | the image has no Go | `go1.27.4` installed from `go.dev` in `sudo`, sha256-pinned, which is also what cloudflared's `go.mod` requires, so `GOTOOLCHAIN` resolves to it instead of downloading a second toolchain |
+
+Two related notes: `autoreconf -fi <dir>` is *not* equivalent to `(cd <dir> && autoreconf -fi)` (it
+leaves `depcomp` uninstalled in the tree being built), so `prebuild` now autoconf's the staged curl
+copy — the tree that is actually compiled — and the `pushd`/`popd` therefore points at
+`../native-root/src/curl-8.20.0`, not at the srclib.
 
 ### The `scanignore` block, and why those six entries
 
