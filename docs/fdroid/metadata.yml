@@ -1,9 +1,8 @@
 AntiFeatures:
   TetheredNet:
-    en-US: Downloads its classifier models (~500 MB) and the BEP51 cache 
-      bootstrap from a single host operated by the author (unjumble.au). The app
-      stays usable without them, but those two features cannot be pointed at 
-      another server.
+    en-US: Downloads its classifier models (~500 MB) and the BEP51 cache bootstrap
+      from a single host operated by the author (unjumble.au). The app stays usable
+      without them, but those two features cannot be pointed at another server.
 Categories:
   - Download
   - File Transfer
@@ -28,11 +27,10 @@ Builds:
     sudo:
       - apt-get update || apt-get update
       - apt-get install -y cmake ninja-build autoconf automake libtool curl
-      - curl -fsSL -o /tmp/go.tgz https://go.dev/dl/go1.27.4.linux-amd64.tar.gz 
-        && echo 
-        "7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840  
-        /tmp/go.tgz" | sha256sum -c - && tar -C /usr/local -xzf /tmp/go.tgz && 
-        ln -sf /usr/local/go/bin/go /usr/bin/go
+      - curl -fsSL -o /tmp/go.tgz https://go.dev/dl/go1.27.4.linux-amd64.tar.gz &&
+        echo "7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840 /tmp/go.tgz"
+        | sha256sum -c - && tar -C /usr/local -xzf /tmp/go.tgz && ln -sf /usr/local/go/bin/go
+        /usr/bin/go
     gradle:
       - yes
     output: app/build/outputs/apk/release/app-release-unsigned.apk
@@ -50,8 +48,7 @@ Builds:
       - git -C $$transmission$$ submodule update --init --recursive
       - cp -a $$mbedtls$$ ../native-root/src/mbedtls-3.6.6
       - cp -a $$curl$$ ../native-root/src/curl-8.20.0
-      - sed -i 's/"8\.20\.0-DEV"/"8.20.0"/' 
-        ../native-root/src/curl-8.20.0/include/curl/curlver.h
+      - sed -i 's/"8\.20\.0-DEV"/"8.20.0"/' ../native-root/src/curl-8.20.0/include/curl/curlver.h
       - cp -a $$transmission$$ ../native-root/src/transmission-4.1.4
       - cp -a $$libuv$$ ../native-root/src/libuv-v1.48.0
       - cp -a $$llama.cpp$$ ../native-root/src/llama-18ab62a8
