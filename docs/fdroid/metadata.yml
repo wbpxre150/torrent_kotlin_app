@@ -43,11 +43,11 @@ Builds:
       - cloudflared@2026.11.0
     prebuild:
       - rm -rf ../native-root && mkdir -p ../native-root/src
-      - pushd $$curl$$ && autoreconf -fi && popd
       - git -C $$mbedtls$$ submodule update --init --recursive
       - git -C $$transmission$$ submodule update --init --recursive
       - cp -a $$mbedtls$$ ../native-root/src/mbedtls-3.6.6
       - cp -a $$curl$$ ../native-root/src/curl-8.20.0
+      - pushd ../native-root/src/curl-8.20.0 && autoreconf -fi && popd
       - sed -i 's/"8\.20\.0-DEV"/"8.20.0"/' ../native-root/src/curl-8.20.0/include/curl/curlver.h
       - cp -a $$transmission$$ ../native-root/src/transmission-4.1.4
       - cp -a $$libuv$$ ../native-root/src/libuv-v1.48.0
