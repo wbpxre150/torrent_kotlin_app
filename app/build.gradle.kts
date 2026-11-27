@@ -23,8 +23,8 @@ android {
         ndk {
             abiFilters += "arm64-v8a"
         }
-        versionCode = 8
-        versionName = "1.0.2"
+        versionCode = 9
+        versionName = "1.0.3"
     }
 
     // Release signing comes from keystore.properties at the repo root, which is gitignored. A
@@ -118,6 +118,19 @@ android {
 val nativeRoot = providers.gradleProperty("nativeRoot").orNull?.let { file(it) }
     ?: file("build/native")
 
+// Byte-reproducible native binaries. `-ffile-prefix-map` rewrites absolute paths out of __FILE__
+// (and out of debug info) at compile time; without it the daemons embed their own source paths —
+// 192 such strings in libdhtcrawler.so, 56 in libtransmissiond.so — so the same tag built in two
+// different directories produces different bytes. That comparison is exactly what F-Droid's
+// reproducible-builds check makes. The replacement literals are fixed, so every build root maps to
+// the same strings. Fed to the native builds as CFLAGS/CXXFLAGS (CMake appends the environment to
+// its toolchain flags rather than replacing them).
+val reproFlags: String = listOf(
+    nativeRoot.absolutePath to "/native-root",
+    rootProject.projectDir.absolutePath to "/src",
+    (System.getenv("ANDROID_NDK_HOME") ?: System.getenv("ANDROID_NDK_ROOT") ?: "/nonexistent") to "/ndk",
+).joinToString(" ") { (from, to) -> "-ffile-prefix-map=$from=$to" }
+
 // -PprebuiltNativeSrc: fetchLlamaCpp and fetchCloudflaredSrc accept a pre-staged tree and skip
 // their tarball entirely (they are the only two fetches that hash the archive unconditionally).
 // The caller that staged the tree owns the pin.
@@ -197,6 +210,8 @@ tasks.register("buildMbedtls") {
         }
         // 3. Configure (Ninja generator + NDK toolchain, static only)
         project.exec {
+            environment("CFLAGS", reproFlags)
+            environment("CXXFLAGS", reproFlags)
             commandLine(
                 "cmake", "-G", "Ninja",
                 "-S", srcDir.absolutePath, "-B", buildDir.absolutePath,
@@ -257,7 +272,7 @@ tasks.register("buildCurl") {
             environment("CC", cc.absolutePath)
             environment("AR", ar.absolutePath)
             environment("RANLIB", ranlib.absolutePath)
-            environment("CFLAGS", "-fPIC -Os")
+            environment("CFLAGS", "-fPIC -Os $reproFlags")
             environment("LDFLAGS", "-L${mbedtlsInstall.absolutePath}/lib")
             environment("CPPFLAGS", "-I${mbedtlsInstall.absolutePath}/include")
             environment("PKG_CONFIG_LIBDIR", "/dev/null")
@@ -357,6 +372,8 @@ tasks.register("buildTransmission") {
         }
         // 3. Configure (Ninja + NDK toolchain, dynamic PIE, static deps, mbedtls crypto)
         project.exec {
+            environment("CFLAGS", reproFlags)
+            environment("CXXFLAGS", reproFlags)
             commandLine(
                 "cmake", "-G", "Ninja",
                 "-S", srcDir.absolutePath, "-B", buildDir.absolutePath,
@@ -434,6 +451,8 @@ tasks.register("buildLibuv") {
         }
         // 3. Configure (Ninja generator + NDK toolchain, static only)
         project.exec {
+            environment("CFLAGS", reproFlags)
+            environment("CXXFLAGS", reproFlags)
             commandLine(
                 "cmake", "-G", "Ninja",
                 "-S", srcDir.absolutePath, "-B", buildDir.absolutePath,
@@ -584,6 +603,8 @@ tasks.register("buildLlama") {
     doLast {
         // 1. Configure (Ninja generator + NDK toolchain, CPU-only inference, static libs)
         project.exec {
+            environment("CFLAGS", reproFlags)
+            environment("CXXFLAGS", reproFlags)
             commandLine(
                 "cmake", "-G", "Ninja",
                 "-S", srcDir.absolutePath, "-B", buildDir.absolutePath,
@@ -748,6 +769,8 @@ tasks.register("buildDhtCrawler") {
     doLast {
         // 1. Configure (Ninja + NDK toolchain, dynamic PIE, static deps)
         project.exec {
+            environment("CFLAGS", reproFlags)
+            environment("CXXFLAGS", reproFlags)
             commandLine(
                 "cmake", "-G", "Ninja",
                 "-S", crawlerCmakeDir.absolutePath, "-B", buildDir.absolutePath,
@@ -804,6 +827,8 @@ tasks.register("buildFtpServer") {
     doLast {
         // 1. Configure (Ninja + NDK toolchain)
         project.exec {
+            environment("CFLAGS", reproFlags)
+            environment("CXXFLAGS", reproFlags)
             commandLine(
                 "cmake", "-G", "Ninja",
                 "-S", srcDir.absolutePath, "-B", buildDir.absolutePath,

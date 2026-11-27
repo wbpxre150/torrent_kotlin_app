@@ -1,0 +1,7 @@
+No functional changes — a build release that makes the APK reproducible.
+
+- The native daemons no longer embed absolute source paths. Every native build
+  now passes -ffile-prefix-map, so libdhtcrawler.so and libtransmissiond.so are
+  byte-identical no matter which directory the app is built in (previously
+  they carried 192 and 56 build-machine paths respectively).
+- Same app, same behaviour; the binaries are a few bytes smaller.
