@@ -39,7 +39,7 @@ Builds:
       - cloudflared@2026.11.0
     prebuild:
       - rm -rf ../native-root && mkdir -p ../native-root/src
-      - (cd $$curl$$ && autoreconf -fi)
+      - autoreconf -fi $$curl$$
       - git -C $$mbedtls$$ submodule update --init --recursive
       - git -C $$transmission$$ submodule update --init --recursive
       - cp -a $$mbedtls$$ ../native-root/src/mbedtls-3.6.6
