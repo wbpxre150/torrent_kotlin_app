@@ -1,0 +1,8 @@
+No functional changes — the crawler's compiled backup default no longer names
+a path from the developer's machine.
+
+- The daily-backup destination defaulted to an absolute host path
+  (/home/adam/external_hdd/...), which every build embedded in
+  libdhtcrawler.so even though backups are off by default. It is now
+  data/torrents.db.bak, relative to the crawler's data directory.
+- Same app, same behaviour unless you turn backups on.
