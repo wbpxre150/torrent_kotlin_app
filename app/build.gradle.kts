@@ -197,6 +197,7 @@ tasks.register("buildMbedtls") {
     val tarball = file("$nativeDir/src/mbedtls-3.6.6.tar.bz2")
     val url = "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.6/mbedtls-3.6.6.tar.bz2"
 
+    inputs.property("reproFlags", reproFlags)   // a flag change must not leave a stale .so
     outputs.dir(installDir)
 
     doLast {
@@ -255,6 +256,7 @@ tasks.register("buildCurl") {
     val tarball = file("$nativeDir/src/curl-8.20.0.tar.gz")
     val curlUrl = "https://curl.se/download/curl-8.20.0.tar.gz"
 
+    inputs.property("reproFlags", reproFlags)   // a flag change must not leave a stale .so
     outputs.dir(installDir)
 
     doLast {
@@ -328,6 +330,7 @@ tasks.register("buildTransmission") {
     // Official release tarball (includes vendored third-party submodules)
     val url = "https://github.com/transmission/transmission/releases/download/$txVersion/transmission-$txVersion.tar.xz"
 
+    inputs.property("reproFlags", reproFlags)   // a flag change must not leave a stale .so
     outputs.file("$jniLibsArm64/libtransmissiond.so")
     inputs.file("src/main/cpp/transmission-fork/file-saf.h")
     inputs.file("src/main/cpp/transmission-fork/file-saf.cc")
@@ -438,6 +441,7 @@ tasks.register("buildLibuv") {
     val tarball = file("$nativeDir/src/libuv-v1.48.0.tar.gz")
     val url = "https://dist.libuv.org/dist/v1.48.0/libuv-v1.48.0.tar.gz"
 
+    inputs.property("reproFlags", reproFlags)   // a flag change must not leave a stale .so
     outputs.dir(installDir)
 
     doLast {
@@ -598,6 +602,7 @@ tasks.register("buildLlama") {
     val buildDir = file("$nativeDir/build-llama")
     val installDir = file("$nativeDir/llama-install")
 
+    inputs.property("reproFlags", reproFlags)   // a flag change must not leave a stale .so
     outputs.dir(installDir)
 
     doLast {
@@ -758,6 +763,7 @@ tasks.register("buildDhtCrawler") {
     val crawlerOut = file("$buildDir/dhtcrawler")
     val jniLibsArm64 = file("src/main/jniLibs/arm64-v8a")
 
+    inputs.property("reproFlags", reproFlags)   // a flag change must not leave a stale .so
     outputs.file("$jniLibsArm64/libdhtcrawler.so")
     inputs.dir(crawlerCmakeDir)
     inputs.dir(crawlerSrcDir)
@@ -820,6 +826,7 @@ tasks.register("buildFtpServer") {
     val serverOut = file("$buildDir/ftpserver")
     val jniLibsArm64 = file("src/main/jniLibs/arm64-v8a")
 
+    inputs.property("reproFlags", reproFlags)   // a flag change must not leave a stale .so
     outputs.file("$jniLibsArm64/libftpserver.so")
     inputs.dir(srcDir)
     inputs.file(toolchainFile)
