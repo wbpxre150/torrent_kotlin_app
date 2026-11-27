@@ -1023,6 +1023,10 @@ tasks.register("buildCloudflared") {
             commandLine(
                 "go", "build",
                 "-trimpath",
+                // The staged tree is a git checkout (fdroid copies the srclib clone, .git included),
+                // so without this Go stamps vcs.revision/vcs.modified and a build from a dirty
+                // working tree differs from a build of the same commit.
+                "-buildvcs=false",
                 "-buildmode=pie",
                 "-ldflags", "-s -w -X main.Version=2026.11.0",
                 "-o", binaryOut.absolutePath,
