@@ -10,8 +10,9 @@ produce byte-identical APKs, and the signed release APK is entry-identical to th
 0 warnings, `fdroid lint` is silent, `fdroid rewritemeta` is a no-op, and the source tarball is
 25.5 MB. [`metadata.yml`](metadata.yml) is `fdroid rewritemeta` output — fdroiddata's CI job fails on
 anything else, so it carries no comments; every decision behind it is explained in this file — and
-`commit:` is the full hash, which the MR template requires. The MR itself is described in
-[Filing the MR](#filing-the-mr) and [What the MR contains](#what-the-mr-contains).
+`commit:` is the full hash, which the MR template requires. The MR is filed:
+<https://gitlab.com/fdroid/fdroiddata/-/merge_requests/59319> (branch `com.torrent.app` on the
+`bullocka77/fdroiddata` fork, five new files, nothing else).
 
 `v1.0` is deliberately not listed as a build: it predates the build-script knobs, so it cannot be
 built by this recipe.
