@@ -125,11 +125,18 @@ val nativeRoot = providers.gradleProperty("nativeRoot").orNull?.let { file(it) }
 // reproducible-builds check makes. The replacement literals are fixed, so every build root maps to
 // the same strings. Handed to every native build as CMAKE_C_FLAGS/CMAKE_CXX_FLAGS (curl gets it
 // through its autotools CFLAGS); see the note on each configure line.
+//
+// `-g0` is the other half of the same job, and it is not optional. The NDK toolchain always passes
+// `-g`, and transmission links with `-Wl,--build-id=sha1`, which hashes the image *including* debug
+// info; four bytes of DWARF frame-base offsets are not bit-stable between build roots, so the
+// build-id — and with it the APK — differed by 20 bytes while the shipped code was identical. The
+// debug info is stripped before packaging anyway, so not generating it costs nothing and makes the
+// intermediates ~90 MB smaller per daemon.
 val reproFlags: String = listOf(
     nativeRoot.absolutePath to "/native-root",
     rootProject.projectDir.absolutePath to "/src",
     (System.getenv("ANDROID_NDK_HOME") ?: System.getenv("ANDROID_NDK_ROOT") ?: "/nonexistent") to "/ndk",
-).joinToString(" ") { (from, to) -> "-ffile-prefix-map=$from=$to" }
+).joinToString(" ") { (from, to) -> "-ffile-prefix-map=$from=$to" } + " -g0"
 
 // -PprebuiltNativeSrc: fetchLlamaCpp and fetchCloudflaredSrc accept a pre-staged tree and skip
 // their tarball entirely (they are the only two fetches that hash the archive unconditionally).
