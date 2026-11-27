@@ -1,14 +1,17 @@
 # F-Droid readiness
 
-**Status: the recipe builds from a tag, scan included, and nothing is outstanding in this repo.**
-`fdroid build --test --refresh com.torrent.app` (fdroidserver 2.4.6, 2026-11-26) against
-**`v1.0.2`** — no `--skip-scan`, no `--no-tarball` — ends with `success: com.torrent.app` /
-`1 build succeeded`, producing a 16.7 MB `arm64-v8a` APK (`versionCode 8`, `versionName 1.0.2`,
-25.5 MB. [`metadata.yml`](metadata.yml) is `fdroid rewritemeta` output — fdroiddata's CI job fails
-on anything else, so it carries no comments; every decision behind it is explained in this file —
-and `commit:` is the full hash, which the MR template requires. No MR has been filed yet; the steps
-are in [Filing the MR](#filing-the-mr) and [What the MR contains](#what-the-mr-contains).
-[What the MR contains](#what-the-mr-contains).
+**Status: the recipe builds from a tag, scan included, is byte-reproducible, and nothing is
+outstanding in this repo.** `fdroid build --test --refresh com.torrent.app` (fdroidserver 2.4.6,
+2026-11-27) against **`v1.0.3`** — no `--skip-scan`, no `--no-tarball` — ends with
+`success: com.torrent.app` / `1 build succeeded`, producing a 16.7 MB `arm64-v8a` APK (`versionCode
+9`, `versionName 1.0.3`, 16 733 639 bytes) signed by F-Droid's test key. Two independent build roots
+produce byte-identical APKs, and the signed release APK is entry-identical to them — see
+[Reproducible builds](#reproducible-builds). `fdroid scanner com.torrent.app:9` reports 0 errors /
+0 warnings, `fdroid lint` is silent, `fdroid rewritemeta` is a no-op, and the source tarball is
+25.5 MB. [`metadata.yml`](metadata.yml) is `fdroid rewritemeta` output — fdroiddata's CI job fails on
+anything else, so it carries no comments; every decision behind it is explained in this file — and
+`commit:` is the full hash, which the MR template requires. The MR itself is described in
+[Filing the MR](#filing-the-mr) and [What the MR contains](#what-the-mr-contains).
 
 `v1.0` is deliberately not listed as a build: it predates the build-script knobs, so it cannot be
 built by this recipe.
@@ -54,17 +57,47 @@ matches nothing at all as an exception), so the block cannot silently rot.
 2. **Go toolchain for cloudflared.** `go.mod` requires go1.27.4, so the buildserver downloads that
    toolchain and the module graph. Decided: accept it. `-PgoToolchain=<ver|local>` and
    `-PgoVendor` exist if that ever needs to be hermetic.
-3. **The APK is not byte-reproducible across build roots.** Repeated builds from the same staging
-   path produced byte-identical APKs, but moving the staging from `app/native-root` to
-   `<build root>/native-root` changed the v1.0.1 APK from 16 733 915 to 16 733 671 bytes (v1.0.2,
-   same staging, measures 16 733 667 — the 4 bytes are the versionCode/versionName resources): the
-   daemons embed their absolute source paths (`__FILE__` — 192 such strings in libdhtcrawler, 56 in
-   libtransmissiond), so a shorter path means a smaller binary. No `-ffile-prefix-map` is passed.
-   F-Droid does not require reproducibility for inclusion; if it is ever wanted (binary
-   transparency), that is a build-script change and therefore a new tag, not a recipe change.
-4. **The source tarball is 25.5 MB** (`com.torrent.app_8_src.tar.gz`, 25 488 950 bytes measured;
+3. **The source tarball is 25.5 MB** (`com.torrent.app_9_src.tar.gz`, 25 489 488 bytes measured;
    it was 99.9 MB while the staged trees lived in the checkout). Most of it is the dht_crawler
    submodule's history and test fixtures. Accepted.
+
+## Reproducible builds
+
+Enabled as of `v1.0.3`. It took three separate findings, and each one was only visible by building
+twice from different directories and diffing the result:
+
+1. **`__FILE__` paths.** The daemons embedded their build paths (192 strings in `libdhtcrawler.so`,
+   56 in `libtransmissiond.so`), so a different build root meant a different binary. Every native
+   build now gets `-ffile-prefix-map` for the checkout, the staged native root and the NDK, mapping
+   to fixed literals (`/src`, `/native-root`, `/ndk`). Handed over as
+   `-DCMAKE_C_FLAGS`/`-DCMAKE_CXX_FLAGS` rather than as an env `CFLAGS`: an env `CFLAGS` only
+   initialises the CMake cache on the *first* configure, so an existing build dir silently keeps the
+   old flags. That mistake shipped a 193-string `libdhtcrawler.so` and was caught by counting strings
+   — the build had not failed at all.
+2. **`--build-id` hashing DWARF.** With the paths fixed the code was identical but the APK still
+   differed by 20 bytes: transmission links with `-Wl,--build-id=sha1`, which hashes the image
+   *including* debug info, and 4 bytes of DWARF frame-base offsets are not bit-stable between build
+   roots. The native builds now pass `-g0`; the debug info was stripped before packaging anyway, so
+   the only visible effect is ~90 MB smaller intermediates per daemon.
+3. **Go VCS stamping.** `libcloudflared.so` differed because fdroid stages the cloudflared srclib
+   clone *with* `.git`, so Go stamped `vcs.revision`/`vcs.modified` — a build from a dirty working
+   tree can never match a build of the same commit. `-buildvcs=false`.
+
+The last difference was a version string: at tag `curl-8_20_0`, curl's own `curlver.h` still says
+`8.20.0-DEV` (curl's release tarball patches it to `8.20.0`), so the srclib build embedded
+`8.20.0-DEV` where our tarball build embeds `8.20.0`. `prebuild` normalises that one line — that is
+what makes the recipe's build and our release APK byte-identical rather than merely deterministic.
+
+Measured across two independent build roots (`~/fdroid-test` and `~/fdroid-rep-b`, different path
+lengths, each staging its own sources):
+
+```
+sha256 94ca4a045f1ae8626e12ca94b740498e9e0bf395dc06f98b1d87bb2bf5b7830c   16 733 639 bytes
+```
+
+The signed `v1.0.3` APK (`sha256 3dcb3f17…`, 16 741 767 bytes) is entry-identical to that build —
+same contents, only the signature added — which is exactly the comparison F-Droid's
+reproducible-builds check makes.
 
 ## Filing the MR
 
@@ -83,9 +116,9 @@ matches nothing at all as an exception), so the block cannot silently rot.
      (see `AGENTS.md`); srclibs keep the fdroiddata build hermetic without vendoring ~1.8 GB into
      the app repo. The trees are staged outside the checkout, so they are never scanned — unlike a
      submodule, which is why the six `scanignore` entries for `dht_crawler` exist.
-   - *Reproducible builds.* Not enabled: the daemons embed `__FILE__` paths and no
-     `-ffile-prefix-map` is passed, so the APK differs across build roots (measured: 16 733 915 vs
-     16 733 671 bytes). Fixing it is a build-script change, i.e. a new tag — see Accepted cost 3.
+   - *Reproducible builds.* Enabled and verified — see [Reproducible builds](#reproducible-builds):
+     two independent build roots produce the same APK, and the signed release APK is entry-identical
+     to it, so the check can confirm our signature.
    - *AntiFeature `TetheredNet`* — declared, with the reason in the metadata's `en-US` text.
    - *License mix* — MIT app + GPLv2 transmission-daemon + Apache-2.0 mbedTLS/cloudflared + curl
      license + MIT llama.cpp, all sources published.
@@ -93,7 +126,7 @@ matches nothing at all as an exception), so the block cannot silently rot.
    builds it on the buildserver (`fdroid build --server`). Anything that fails there fails for a
    reason this host could not see, so keep the local test environment around.
 5. Nothing else is needed from this repo. Do not push a new tag for the MR: it builds the commit
-   `726a04b8…`, which is the `v1.0.2` tag, and `UpdateCheckMode: Tags` picks up later releases on
+   `3dfe3982…`, which is the `v1.0.3` tag, and `UpdateCheckMode: Tags` picks up later releases on
    its own.
 
 ## What the MR contains
@@ -120,9 +153,9 @@ Resolved along the way (kept here so nobody re-litigates them):
 
 - ~~Point the recipe at a tag that contains the build-script knobs.~~ **Done.** `v1.0.1`
   (versionCode 7) is the first tag carrying `-PnativeRoot`/`-PprebuiltNativeSrc`, so
-  `UpdateCheckMode: Tags` / `AutoUpdateMode: Version` track it normally. The MR ships **`v1.0.2`**
-  (versionCode 8) instead, the first tag that also carries the tracked gradle wrapper and the
-  finished recipe; 1.0.2 has no functional change over 1.0.1.
+  `UpdateCheckMode: Tags` / `AutoUpdateMode: Version` track it normally. The MR ships **`v1.0.3`**
+  (versionCode 9), the first tag that also carries the tracked gradle wrapper, the finished recipe
+  and the reproducible native builds; 1.0.3 has no functional change over 1.0.2.
 - ~~Consider `scanignore`.~~ **Done, and it was needed.** See the table above.
 - ~~The published APK is not stripped.~~ **Fixed.** The daemons were shipping ~90 MB of
   `debug_info` each because AGP's `stripReleaseDebugSymbols` reports UP-TO-DATE and emits
@@ -181,7 +214,7 @@ fdroiddata CI jobs (`fdroid lint`, `fdroid rewritemeta`, scanner):
 
 ```bash
 fdroid lint com.torrent.app      # categories, AntiFeatures, field validity
-fdroid scanner --json com.torrent.app:8 | python3 -c 'import json,sys; d=json.load(sys.stdin)["com.torrent.app"]["8"]; print({k: len(v) for k, v in d.items()})'
+fdroid scanner --json com.torrent.app:9 | python3 -c 'import json,sys; d=json.load(sys.stdin)["com.torrent.app"]["9"]; print({k: len(v) for k, v in d.items()})'
 # expect {'infos': N, 'warnings': 0, 'errors': 0} — "Unused scanignore path" lands in errors
 fdroid rewritemeta com.torrent.app && git diff --exit-code -- metadata/   # must be a no-op
 ```
