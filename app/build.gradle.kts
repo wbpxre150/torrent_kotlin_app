@@ -123,8 +123,8 @@ val nativeRoot = providers.gradleProperty("nativeRoot").orNull?.let { file(it) }
 // 192 such strings in libdhtcrawler.so, 56 in libtransmissiond.so — so the same tag built in two
 // different directories produces different bytes. That comparison is exactly what F-Droid's
 // reproducible-builds check makes. The replacement literals are fixed, so every build root maps to
-// the same strings. Fed to the native builds as CFLAGS/CXXFLAGS (CMake appends the environment to
-// its toolchain flags rather than replacing them).
+// the same strings. Handed to every native build as CMAKE_C_FLAGS/CMAKE_CXX_FLAGS (curl gets it
+// through its autotools CFLAGS); see the note on each configure line.
 val reproFlags: String = listOf(
     nativeRoot.absolutePath to "/native-root",
     rootProject.projectDir.absolutePath to "/src",
@@ -211,12 +211,15 @@ tasks.register("buildMbedtls") {
         }
         // 3. Configure (Ninja generator + NDK toolchain, static only)
         project.exec {
-            environment("CFLAGS", reproFlags)
-            environment("CXXFLAGS", reproFlags)
             commandLine(
                 "cmake", "-G", "Ninja",
                 "-S", srcDir.absolutePath, "-B", buildDir.absolutePath,
                 "-DCMAKE_TOOLCHAIN_FILE=${toolchainFile.absolutePath}",
+                // Cache args, not env CFLAGS: an env CFLAGS only initialises the cache on the
+                // first configure, so an existing build dir silently kept the old flags. The NDK
+                // toolchain appends its ABI flags to whatever CMAKE_C_FLAGS already holds.
+                "-DCMAKE_C_FLAGS=${reproFlags}",
+                "-DCMAKE_CXX_FLAGS=${reproFlags}",
                 "-DANDROID_ABI=arm64-v8a",
                 "-DANDROID_PLATFORM=android-24",
                 "-DCMAKE_BUILD_TYPE=Release",
@@ -266,6 +269,14 @@ tasks.register("buildCurl") {
         if (!srcDir.exists()) {
             project.exec {
                 commandLine("tar", "-xzf", tarball.absolutePath, "-C", srcDir.parentFile.absolutePath)
+            }
+        }
+        // autotools tracks neither compiler flags nor the command line, so a re-run with new
+        // CFLAGS would keep the old objects; clean first. Only reached when the task runs.
+        if (file("$srcDir/Makefile").exists()) {
+            project.exec {
+                workingDir = srcDir
+                commandLine("make", "clean")
             }
         }
         // 3. Configure (autotools, cross-compile via --host + env vars)
@@ -375,12 +386,15 @@ tasks.register("buildTransmission") {
         }
         // 3. Configure (Ninja + NDK toolchain, dynamic PIE, static deps, mbedtls crypto)
         project.exec {
-            environment("CFLAGS", reproFlags)
-            environment("CXXFLAGS", reproFlags)
             commandLine(
                 "cmake", "-G", "Ninja",
                 "-S", srcDir.absolutePath, "-B", buildDir.absolutePath,
                 "-DCMAKE_TOOLCHAIN_FILE=${toolchainFile.absolutePath}",
+                // Cache args, not env CFLAGS: an env CFLAGS only initialises the cache on the
+                // first configure, so an existing build dir silently kept the old flags. The NDK
+                // toolchain appends its ABI flags to whatever CMAKE_C_FLAGS already holds.
+                "-DCMAKE_C_FLAGS=${reproFlags}",
+                "-DCMAKE_CXX_FLAGS=${reproFlags}",
                 "-DANDROID_ABI=arm64-v8a",
                 "-DANDROID_PLATFORM=android-24",
                 "-DCMAKE_BUILD_TYPE=Release",
@@ -455,12 +469,15 @@ tasks.register("buildLibuv") {
         }
         // 3. Configure (Ninja generator + NDK toolchain, static only)
         project.exec {
-            environment("CFLAGS", reproFlags)
-            environment("CXXFLAGS", reproFlags)
             commandLine(
                 "cmake", "-G", "Ninja",
                 "-S", srcDir.absolutePath, "-B", buildDir.absolutePath,
                 "-DCMAKE_TOOLCHAIN_FILE=${toolchainFile.absolutePath}",
+                // Cache args, not env CFLAGS: an env CFLAGS only initialises the cache on the
+                // first configure, so an existing build dir silently kept the old flags. The NDK
+                // toolchain appends its ABI flags to whatever CMAKE_C_FLAGS already holds.
+                "-DCMAKE_C_FLAGS=${reproFlags}",
+                "-DCMAKE_CXX_FLAGS=${reproFlags}",
                 "-DANDROID_ABI=arm64-v8a",
                 "-DANDROID_PLATFORM=android-24",
                 "-DCMAKE_BUILD_TYPE=Release",
@@ -608,12 +625,15 @@ tasks.register("buildLlama") {
     doLast {
         // 1. Configure (Ninja generator + NDK toolchain, CPU-only inference, static libs)
         project.exec {
-            environment("CFLAGS", reproFlags)
-            environment("CXXFLAGS", reproFlags)
             commandLine(
                 "cmake", "-G", "Ninja",
                 "-S", srcDir.absolutePath, "-B", buildDir.absolutePath,
                 "-DCMAKE_TOOLCHAIN_FILE=${toolchainFile.absolutePath}",
+                // Cache args, not env CFLAGS: an env CFLAGS only initialises the cache on the
+                // first configure, so an existing build dir silently kept the old flags. The NDK
+                // toolchain appends its ABI flags to whatever CMAKE_C_FLAGS already holds.
+                "-DCMAKE_C_FLAGS=${reproFlags}",
+                "-DCMAKE_CXX_FLAGS=${reproFlags}",
                 "-DANDROID_ABI=arm64-v8a",
                 "-DANDROID_PLATFORM=android-24",
                 "-DCMAKE_BUILD_TYPE=Release",
@@ -775,12 +795,15 @@ tasks.register("buildDhtCrawler") {
     doLast {
         // 1. Configure (Ninja + NDK toolchain, dynamic PIE, static deps)
         project.exec {
-            environment("CFLAGS", reproFlags)
-            environment("CXXFLAGS", reproFlags)
             commandLine(
                 "cmake", "-G", "Ninja",
                 "-S", crawlerCmakeDir.absolutePath, "-B", buildDir.absolutePath,
                 "-DCMAKE_TOOLCHAIN_FILE=${toolchainFile.absolutePath}",
+                // Cache args, not env CFLAGS: an env CFLAGS only initialises the cache on the
+                // first configure, so an existing build dir silently kept the old flags. The NDK
+                // toolchain appends its ABI flags to whatever CMAKE_C_FLAGS already holds.
+                "-DCMAKE_C_FLAGS=${reproFlags}",
+                "-DCMAKE_CXX_FLAGS=${reproFlags}",
                 "-DANDROID_ABI=arm64-v8a",
                 "-DANDROID_PLATFORM=android-24",
                 "-DCMAKE_BUILD_TYPE=Release",
@@ -834,12 +857,15 @@ tasks.register("buildFtpServer") {
     doLast {
         // 1. Configure (Ninja + NDK toolchain)
         project.exec {
-            environment("CFLAGS", reproFlags)
-            environment("CXXFLAGS", reproFlags)
             commandLine(
                 "cmake", "-G", "Ninja",
                 "-S", srcDir.absolutePath, "-B", buildDir.absolutePath,
                 "-DCMAKE_TOOLCHAIN_FILE=${toolchainFile.absolutePath}",
+                // Cache args, not env CFLAGS: an env CFLAGS only initialises the cache on the
+                // first configure, so an existing build dir silently kept the old flags. The NDK
+                // toolchain appends its ABI flags to whatever CMAKE_C_FLAGS already holds.
+                "-DCMAKE_C_FLAGS=${reproFlags}",
+                "-DCMAKE_CXX_FLAGS=${reproFlags}",
                 "-DANDROID_ABI=arm64-v8a",
                 "-DANDROID_PLATFORM=android-24",
                 "-DCMAKE_BUILD_TYPE=Release"
