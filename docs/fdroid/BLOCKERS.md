@@ -112,12 +112,28 @@ Measured across two independent build roots (`~/fdroid-test` and `~/fdroid-rep-b
 lengths, each staging its own sources):
 
 ```
-sha256 94ca4a045f1ae8626e12ca94b740498e9e0bf395dc06f98b1d87bb2bf5b7830c   16 733 639 bytes
+v1.0.3  sha256 94ca4a045f1ae8626e12ca94b740498e9e0bf395dc06f98b1d87bb2bf5b7830c   16 733 639 bytes
+v1.0.4  sha256 2a1335052ae257d82c016a7c4a3609674fe07055deeb7e6b6954dda41c2b517c   16 733 471 bytes
 ```
 
-The signed `v1.0.3` APK (`sha256 3dcb3f17…`, 16 741 767 bytes) is entry-identical to that build —
-same contents, only the signature added — which is exactly the comparison F-Droid's
-reproducible-builds check makes.
+The signed releases (`v1.0.3` `sha256 3dcb3f17…`, 16 741 767 bytes; `v1.0.4` `sha256 18b03dc0…`,
+16 741 663 bytes) are entry-identical to those builds — same contents, only the signature added —
+which is exactly the comparison F-Droid's reproducible-builds check makes.
+
+### No host paths in the shipped binary (`v1.0.4`)
+
+`config_init_defaults()` in the crawler seeded `backup_path` with
+`/home/adam/external_hdd/dht_crawler_backup/torrent.db.bak`. Backups are off by default
+(`backup_enabled = 0`), so nothing ever used it — but the literal shipped inside `libdhtcrawler.so`
+in every APK, which is both a pointless leak of the development machine's layout and a reviewer
+question waiting to happen. It is now `data/torrents.db.bak`, relative to the crawler's working
+directory like `db_path` and `bloom_path`, so a standalone build that flips `backup_enabled` alone
+still writes somewhere it can reach.
+
+`v1.0.4` is that change and nothing else; `libdhtcrawler.so` no longer contains the string, the
+recipe points at `9b6b6abd3c9a3837a376f7fb45318283c072cba8`, and the pipeline is green again.
+`config.ini.example` and the CRAM G4 fixture carried the same host paths in the crawler repository
+and were cleaned up in the same commit.
 
 ## Filing the MR
 
