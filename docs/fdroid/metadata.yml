@@ -20,9 +20,9 @@ RepoType: git
 Repo: https://github.com/wbpxre150/torrent_kotlin_app.git
 
 Builds:
-  - versionName: 1.0.3
-    versionCode: 9
-    commit: 3dfe39821a558f858d713dd40ab917a17cae8eb5
+  - versionName: 1.0.4
+    versionCode: 10
+    commit: 9b6b6abd3c9a3837a376f7fb45318283c072cba8
     submodules: true
     sudo:
       - apt-get update || apt-get update
@@ -67,5 +67,5 @@ Builds:
 
 AutoUpdateMode: Version
 UpdateCheckMode: Tags
-CurrentVersion: 1.0.3
-CurrentVersionCode: 9
+CurrentVersion: 1.0.4
+CurrentVersionCode: 10
